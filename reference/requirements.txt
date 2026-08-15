@@ -1,0 +1,3 @@
+# Development-only oracle.  qwen38 itself has no Python runtime dependency.
+# This exact Transformers revision contains the official Qwen3.5 implementation.
+transformers @ https://github.com/huggingface/transformers/archive/96fe6dce36cc929a5ffd3e34296554c4cb6b669e.tar.gz
