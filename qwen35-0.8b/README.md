@@ -20,7 +20,7 @@ tied 策略不同，但 forward 的概念和顺序相同。
 ~~~
 cd qwen35-0.8b
 make
-python3 convert.py ../models/Qwen3.5-0.8B out/qwen35-0.8b.bin
+python3 pack_weights.py ../models/Qwen3.5-0.8B out/qwen35-0.8b.bin
 ./qwen35 --forward out/qwen35-0.8b.bin 248044,198,198
 ./qwen35 --generate out/qwen35-0.8b.bin 248044,198,198 16
 ~~~

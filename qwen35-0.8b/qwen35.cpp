@@ -1,7 +1,7 @@
 // qwen35.cpp -- 一个固定 Qwen3.5-0.8B text backbone 的 CPU 推理器。
 //
 // 这是课程的最后一课：没有 Tensor 类、没有算子注册表、没有通用模型兼容层。
-// convert.py 已按本文件读取的顺序排好权重，因此这里从上到下就是一次 token
+// pack_weights.py 已按本文件读取的顺序排好权重，因此这里从上到下就是一次 token
 // 的真实 Qwen hybrid forward。Qwen3.8-27B 与它有同样的 3 DeltaNet : 1
 // full-attention 栈；差别主要是层数和矩阵尺寸。
 //
@@ -56,7 +56,7 @@ float f32(B value) {
 }
 
 B bf16(float value) {
-    // 只用于 self-test。真实模型权重由 convert.py 原样复制，不会走这里。
+    // 只用于 self-test。真实模型权重由 pack_weights.py 原样复制，不会走这里。
     uint32_t bits;
     std::memcpy(&bits, &value, sizeof(bits));
     const uint32_t bias = 0x7fffu + ((bits >> 16) & 1u);  // round-to-nearest-even
@@ -72,7 +72,7 @@ float sigmoid(float x) {
 float silu(float x) { return x * sigmoid(x); }  // SwiGLU 与 DeltaNet gate 共用的 SiLU。
 float softplus(float x) { return x > 20.0f ? x : std::log1p(std::exp(x)); }
 
-// convert.py 的文件开头是 [8-byte magic, u32 version, u32 reserved]，随后每个
+// pack_weights.py 的文件开头是 [8-byte magic, u32 version, u32 reserved]，随后每个
 // tensor 都按 64 字节对齐。这里没有 tensor name/shape 元数据：本程序和转换器
 // 都固定为同一个模型，Reader 的 take() 顺序就是简化后的格式 schema。
 // mmap 只建立虚拟映射；操作系统按真正访问到的权重页加载。
@@ -89,7 +89,7 @@ struct File {
         size = static_cast<size_t>(info.st_size);
         data = static_cast<const uint8_t*>(mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0));
         if (data == MAP_FAILED) die("mmap model.bin failed");
-        if (std::memcmp(data, "Q35COUR\0", 8) != 0) die("wrong model.bin magic; run convert.py");
+        if (std::memcmp(data, "Q35COUR\0", 8) != 0) die("wrong model.bin magic; run pack_weights.py");
     }
     ~File() {
         if (data && data != MAP_FAILED) munmap(const_cast<uint8_t*>(data), size);
@@ -155,7 +155,7 @@ struct Model {
     std::array<Layer, N> layer {};
 
     explicit Model(const char* path) : file(path), reader(file) {
-        // 以下读取顺序必须逐项匹配 convert.py::expected_tensors()。先读所有层共享的
+        // 以下读取顺序必须逐项匹配 pack_weights.py::expected_tensors()。先读所有层共享的
         // embedding/final norm，再顺序读第 0..23 层，故不需要 map<string,tensor>。
         embedding = reader.take<B>(static_cast<size_t>(V) * H);
         final_norm = reader.take<B>(H);

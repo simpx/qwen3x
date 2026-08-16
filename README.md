@@ -62,7 +62,7 @@ decode、DeltaNet state、KV cache 和 greedy generation。
 ~~~
 cd qwen35-0.8b
 make
-python3 convert.py ../models/Qwen3.5-0.8B out/qwen35-0.8b.bin
+python3 pack_weights.py ../models/Qwen3.5-0.8B out/qwen35-0.8b.bin
 ./qwen35 --generate out/qwen35-0.8b.bin 248044,198,198 16
 ~~~
 

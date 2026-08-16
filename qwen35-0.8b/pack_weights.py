@@ -7,7 +7,7 @@ safetensors schema 或多模型分发器。
 
 用法：
     cd qwen35-0.8b
-    python3 convert.py ../models/Qwen3.5-0.8B out/qwen35-0.8b.bin
+    python3 pack_weights.py ../models/Qwen3.5-0.8B out/qwen35-0.8b.bin
 
 输入目录需要官方 config.json、model.safetensors.index.json 和对应 shard。
 脚本只用 Python 标准库；它不会把 1.6 GiB 权重整体读入内存。
@@ -162,7 +162,7 @@ def main():
     # 先检查模型家族、hidden width 和层数。更细的矩阵 shape 由 Shard.copy 再检查。
     config = json.loads((args.checkpoint_dir / "config.json").read_text())["text_config"]
     if config["model_type"] != "qwen3_5_text" or config["hidden_size"] != H or config["num_hidden_layers"] != LAYERS:
-        raise SystemExit("this converter only accepts the official Qwen3.5-0.8B text configuration")
+        raise SystemExit("this packer only accepts the official Qwen3.5-0.8B text configuration")
 
     # 先枚举完整 schema 并检查 names，避免写了一半大文件才发现 checkpoint 缺 tensor。
     expected = list(expected_tensors())
