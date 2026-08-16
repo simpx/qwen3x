@@ -23,10 +23,16 @@ stack。Qwen3.5-0.8B 是目前足够小、又真正保留目标架构的官方 c
 ## 从这里开始
 
 不要先打开两千行的 prototype。先阅读 [lessons/README.md](lessons/README.md)，
-并运行每一课：
+先编译全部课程和最终程序：
 
 ~~~
-make lesson-test
+make
+~~~
+
+再运行每一课与 capstone 自检：
+
+~~~
+make test
 ~~~
 
 课程每一步都是独立、可编译的 C++ 文件：

@@ -33,10 +33,11 @@
 
 ## 运行
 
-在仓库根目录执行：
+在仓库根目录执行；`make` 只编译，`make test` 才会运行：
 
 ~~~
-make lesson-test
+make
+make test
 ~~~
 
 也可以单独编译一课：
