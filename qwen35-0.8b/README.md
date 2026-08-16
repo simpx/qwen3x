@@ -40,6 +40,35 @@ make oracle-test MODEL=../models/Qwen3.5-0.8B
 官方 Python tokenizer、Transformers 或任意兼容工具把 text 编码为这些 id，
 再将生成 id 解码回来；它不进入本仓库的 C++ build。
 
+## Chat：官方 tokenizer 留在 Python
+
+`chat.py` 是不到 130 行的外围 wrapper，不属于 C++ inference core。它读取官方
+checkpoint 的 tokenizer 和 chat template，调用 C++ binary，最后 decode 输出 ids：
+
+~~~
+# 第一次只需安装文字外围依赖；它不是 C++ runtime dependency。
+pip install transformers
+
+# 先创建一次 C++ 可 mmap 的权重包。
+python3 pack_weights.py ../models/Qwen3.5-0.8B out/qwen35-0.8b.bin
+
+# 单轮 chat（默认 CPU）。
+python3 chat.py --model ../models/Qwen3.5-0.8B \
+  --weights out/qwen35-0.8b.bin --prompt "用一句话介绍 DeltaNet。"
+
+# 同一套 tokenizer/chat template，换成 CUDA executable。
+python3 chat.py --cuda --model ../models/Qwen3.5-0.8B \
+  --weights out/qwen35-0.8b.bin --prompt "用一句话介绍 DeltaNet。"
+
+# 多轮演示；为保持 C++ 课程可读性，每回合会重新 prefill 完整 history。
+python3 chat.py --cuda --interactive --model ../models/Qwen3.5-0.8B \
+  --weights out/qwen35-0.8b.bin
+~~~
+
+传 `--show-ids` 可以看到 Python/C++ 边界上的 prompt 和 output token ids。这样 chat
+template、Unicode、history 都在 Python，而 `qwen35.cpp` 和 `qwen35_cuda.cu` 继续只做
+模型 forward。
+
 ## 可选 CUDA backend
 
 CPU `qwen35.cpp` 永远是直接、可读的 correctness reference。CUDA 不修改它，
