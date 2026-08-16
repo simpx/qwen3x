@@ -8,7 +8,7 @@
 1. 不依赖 CUDA、PyTorch 或 Tensor framework；
 2. 不继承上一课的隐藏库；少量重复是故意的，读者可以只打开当前文件；
 3. 运行时先用玩具维度和手写权重，确保结果可以手算；
-4. 最终才切换到 Qwen3.5-0.8B 的 text backbone，验证同一套计算能跑真实
+4. 完成课程后再进入同级 `../qwen35-0.8b/`，验证同一套计算能跑真实
    Qwen3.8-style hybrid 架构。
 
 ## 课程地图
@@ -24,18 +24,17 @@
 | 06 | 06_deltanet_recurrence.cpp | Gated DeltaNet 的固定 recurrent state | 已完成 |
 | 07 | 07_deltanet_layer.cpp | Q/K/V 投影、causal conv、门控、DeltaNet layer | 已完成 |
 | 08 | 08_hybrid_qwen.cpp | 3 DeltaNet : 1 attention 的 Qwen hybrid stack | 已完成 |
-| 转换工具 | ../convert.py | 官方 safetensors 到固定顺序 model.bin | 已完成 |
-| 09 | ../capstone/qwen38.cpp -> 09_real_qwen38 | 真实 0.8B、生成、token id 接口 | 已完成 |
 
 课程文件的总行数不会限制在 1000 行，因为每课为了自包含会重复少量代码；
-限制的是最后的整合版 capstone/qwen38.cpp。否则会为了“少几行”而把关键细节
-藏进帮助函数，反而失去教学价值。
+限制的是同级 [qwen35-0.8b/qwen38.cpp](../qwen35-0.8b/qwen38.cpp)。否则会为了
+“少几行”而把关键细节藏进帮助函数，反而失去教学价值。
 
 ## 运行
 
-在仓库根目录执行；`make` 只编译，所有 bin 都落在本目录；`make test` 才会运行：
+本目录有自己的 Makefile；进入本目录后，`make` 只编译，`make test` 才会运行：
 
 ~~~
+cd lessons
 make
 make test
 ~~~
@@ -43,9 +42,15 @@ make test
 也可以单独编译一课：
 
 ~~~
-c++ -O2 -std=c++17 lessons/00_toy_logits.cpp -o lesson00
-./lesson00
+c++ -O2 -std=c++17 00_toy_logits.cpp -o 00_toy_logits
+./00_toy_logits
 ~~~
+
+## 完成课程后
+
+真实官方 0.8B 的固定权重程序、转换器与回归脚本都在同级
+[qwen35-0.8b](../qwen35-0.8b/README.md)。它刻意不混在本目录：这里始终只保留
+可手算、可逐步阅读的 lesson。
 
 ## 与旧 prototype 的关系
 

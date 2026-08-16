@@ -23,14 +23,14 @@ stack。Qwen3.5-0.8B 是目前足够小、又真正保留目标架构的官方 c
 ## 从这里开始
 
 不要先打开两千行的 prototype。先阅读 [lessons/README.md](lessons/README.md)，
-先编译全部课程；产物按顺序出现在 `lessons/00_toy_logits` 到
-`lessons/09_real_qwen38`：
+进入课程目录编译全部手写 lesson：
 
 ~~~
+cd lessons
 make
 ~~~
 
-再运行每一课与 capstone 自检：
+再运行每一课：
 
 ~~~
 make test
@@ -49,28 +49,31 @@ make test
 | 06 | Gated DeltaNet recurrent state |
 | 07 | 完整 toy DeltaNet layer |
 | 08 | 3 DeltaNet : 1 attention hybrid stack |
-| 09 | 官方 safetensors 到固定 model.bin 的转换 |
-| 10 | 真实 Qwen3.5-0.8B CPU 生成 |
 
-## 最终 capstone
+`lessons/` 只放这些可手算的教学文件、它们的 bin 和 Makefile。真实 0.8B 的
+权重程序另放在同级 [qwen35-0.8b](qwen35-0.8b/README.md)。
 
-[capstone/qwen38.cpp](capstone/qwen38.cpp) 是约 520 行的整合版。它严格固定为
+## 真实 0.8B
+
+[qwen35-0.8b/qwen38.cpp](qwen35-0.8b/qwen38.cpp) 是约 520 行的整合版。它严格固定为
 Qwen3.5-0.8B text backbone，采用 BF16 权重、FP32 计算，支持真实 prefill、
 decode、DeltaNet state、KV cache 和 greedy generation。
 
 ~~~
-make course-test
-python3 convert.py models/Qwen3.5-0.8B out/qwen38-0.8b.bin
-./lessons/09_real_qwen38 --generate out/qwen38-0.8b.bin 248044,198,198 16
+cd qwen35-0.8b
+make
+python3 convert.py ../models/Qwen3.5-0.8B out/qwen38-0.8b.bin
+./qwen38 --generate out/qwen38-0.8b.bin 248044,198,198 16
 ~~~
 
 详细模型格式和 regression 请看
-[capstone/README.md](capstone/README.md)。
+[qwen35-0.8b/README.md](qwen35-0.8b/README.md)。
 
 有本地官方 checkpoint 时：
 
 ~~~
-make course-oracle-test MODEL=models/Qwen3.5-0.8B
+cd qwen35-0.8b
+make oracle-test MODEL=../models/Qwen3.5-0.8B
 ~~~
 
 该测试会临时转换权重，对照已固定的官方权重结果：三 token prompt 的

@@ -1,4 +1,4 @@
-// qwen38.cpp capstone -- 一个固定 Qwen3.5-0.8B text backbone 的 CPU 推理器。
+// qwen38.cpp -- 一个固定 Qwen3.5-0.8B text backbone 的 CPU 推理器。
 //
 // 这是课程的最后一课：没有 Tensor 类、没有算子注册表、没有通用模型兼容层。
 // convert.py 已按本文件读取的顺序排好权重，因此这里从上到下就是一次 token
@@ -478,7 +478,7 @@ void generate(const char* path, const std::vector<int>& prompt, int count, std::
 }
 
 void self_test() {
-    // 这是无需下载模型的微型单元测试；真实权重的端到端回归见 make course-oracle-test。
+    // 这是无需下载模型的微型单元测试；真实权重的端到端回归见 make oracle-test。
     assert(std::fabs(f32(bf16(1.25f)) - 1.25f) < 1e-6f);
     const std::vector<float> values = {1.0f, 3.0f, 2.0f};
     assert(argmax(values) == 1);

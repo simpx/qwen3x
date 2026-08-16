@@ -12,5 +12,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build and run every lesson plus the capstone self-test
+      - name: Build and run every lesson
+        working-directory: lessons
+        run: make test
+      - name: Build the real-model program and run its self-test
+        working-directory: qwen35-0.8b
         run: make test
