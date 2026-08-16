@@ -1,11 +1,12 @@
 # 最小构建说明：`make` 只编译全部；每个可执行文件就是下面一条 c++ 命令。
+# 编译产物按课程编号放在 lessons/，因此目录本身就是从 00 到 09 的阅读顺序。
 
 .PHONY: all test lesson-test course-test course-oracle-test clean
 
-all: qwen38 lessons/00_toy_logits lessons/01_rmsnorm_linear lessons/02_swiglu_residual lessons/03_rope lessons/04_attention lessons/05_gqa_kv_cache lessons/06_deltanet_recurrence lessons/07_deltanet_layer lessons/08_hybrid_qwen
+all: lessons/00_toy_logits lessons/01_rmsnorm_linear lessons/02_swiglu_residual lessons/03_rope lessons/04_attention lessons/05_gqa_kv_cache lessons/06_deltanet_recurrence lessons/07_deltanet_layer lessons/08_hybrid_qwen lessons/09_real_qwen38
 
-qwen38: capstone/qwen38.cpp
-	c++ -O3 -std=c++17 -Wall -Wextra -Wpedantic capstone/qwen38.cpp -o qwen38
+lessons/09_real_qwen38: capstone/qwen38.cpp
+	c++ -O3 -std=c++17 -Wall -Wextra -Wpedantic capstone/qwen38.cpp -o lessons/09_real_qwen38
 
 lessons/00_toy_logits: lessons/00_toy_logits.cpp
 	c++ -O3 -std=c++17 -Wall -Wextra -Wpedantic lessons/00_toy_logits.cpp -o lessons/00_toy_logits
@@ -37,14 +38,14 @@ lessons/08_hybrid_qwen: lessons/08_hybrid_qwen.cpp
 lesson-test: all
 	@for lesson in lessons/00_toy_logits lessons/01_rmsnorm_linear lessons/02_swiglu_residual lessons/03_rope lessons/04_attention lessons/05_gqa_kv_cache lessons/06_deltanet_recurrence lessons/07_deltanet_layer lessons/08_hybrid_qwen; do ./$$lesson; done
 
-course-test: qwen38
-	./qwen38 --self-test
+course-test: lessons/09_real_qwen38
+	./lessons/09_real_qwen38 --self-test
 
 test: lesson-test course-test
 
-course-oracle-test: qwen38
+course-oracle-test: lessons/09_real_qwen38
 	@test -n "$(MODEL)" || (echo "usage: make course-oracle-test MODEL=/path/to/Qwen3.5-0.8B" >&2; exit 2)
 	scripts/test_course_08b.sh "$(MODEL)"
 
 clean:
-	rm -f qwen38 lessons/00_toy_logits lessons/01_rmsnorm_linear lessons/02_swiglu_residual lessons/03_rope lessons/04_attention lessons/05_gqa_kv_cache lessons/06_deltanet_recurrence lessons/07_deltanet_layer lessons/08_hybrid_qwen
+	rm -f lessons/00_toy_logits lessons/01_rmsnorm_linear lessons/02_swiglu_residual lessons/03_rope lessons/04_attention lessons/05_gqa_kv_cache lessons/06_deltanet_recurrence lessons/07_deltanet_layer lessons/08_hybrid_qwen lessons/09_real_qwen38

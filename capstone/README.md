@@ -19,8 +19,8 @@ tied 策略不同，但 forward 的概念和顺序相同。
 ~~~
 python3 convert.py models/Qwen3.5-0.8B out/qwen38-0.8b.bin
 make course-test
-./qwen38 --forward out/qwen38-0.8b.bin 248044,198,198
-./qwen38 --generate out/qwen38-0.8b.bin 248044,198,198 16
+./lessons/09_real_qwen38 --forward out/qwen38-0.8b.bin 248044,198,198
+./lessons/09_real_qwen38 --generate out/qwen38-0.8b.bin 248044,198,198 16
 ~~~
 
 转换器逐 tensor 拷贝原始 safetensors 字节，所以不需要 PyTorch、NumPy 或

@@ -1,4 +1,3 @@
-/qwen38
 /out/
 /models/
 /lessons/00_toy_logits
@@ -10,5 +9,6 @@
 /lessons/06_deltanet_recurrence
 /lessons/07_deltanet_layer
 /lessons/08_hybrid_qwen
+/lessons/09_real_qwen38
 __pycache__/
 *.pyc

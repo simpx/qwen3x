@@ -18,7 +18,7 @@ trap 'rm -f "$course_bin" "$course_bin.tmp"' EXIT
 
 # convert.py 做 dtype/shape 检查后按 capstone 的读取顺序写出小格式权重。
 python3 convert.py "$model_dir" "$course_bin" >/dev/null
-course_forward=$(./qwen38 --forward "$course_bin" 248044,198,198)
+course_forward=$(./lessons/09_real_qwen38 --forward "$course_bin" 248044,198,198)
 
 python3 - "$course_forward" <<'PY'
 import re
@@ -36,7 +36,7 @@ if abs(float(match.group(2)) - 17.2760) > 1e-3:
 PY
 
 # 再验证 state 跨八次 decode 持续更新；仅比较 greedy token id，避免 tokenizer 变体。
-course_generate=$(./qwen38 --generate "$course_bin" 248044,198,198 8)
+course_generate=$(./lessons/09_real_qwen38 --generate "$course_bin" 248044,198,198 8)
 expected_generate="generated: 198 198 198 198 198 198 198 198"
 if [[ "$course_generate" != "$expected_generate" ]]; then
     echo "course:   $course_generate" >&2

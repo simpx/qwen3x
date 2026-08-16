@@ -24,8 +24,8 @@
 | 06 | 06_deltanet_recurrence.cpp | Gated DeltaNet 的固定 recurrent state | 已完成 |
 | 07 | 07_deltanet_layer.cpp | Q/K/V 投影、causal conv、门控、DeltaNet layer | 已完成 |
 | 08 | 08_hybrid_qwen.cpp | 3 DeltaNet : 1 attention 的 Qwen hybrid stack | 已完成 |
-| 09 | ../convert.py | 官方 safetensors 到固定顺序 model.bin | 已完成 |
-| 10 | ../capstone/qwen38.cpp | 真实 0.8B、生成、token id 接口 | 已完成 |
+| 转换工具 | ../convert.py | 官方 safetensors 到固定顺序 model.bin | 已完成 |
+| 09 | ../capstone/qwen38.cpp -> 09_real_qwen38 | 真实 0.8B、生成、token id 接口 | 已完成 |
 
 课程文件的总行数不会限制在 1000 行，因为每课为了自包含会重复少量代码；
 限制的是最后的整合版 capstone/qwen38.cpp。否则会为了“少几行”而把关键细节
@@ -33,7 +33,7 @@
 
 ## 运行
 
-在仓库根目录执行；`make` 只编译，`make test` 才会运行：
+在仓库根目录执行；`make` 只编译，所有 bin 都落在本目录；`make test` 才会运行：
 
 ~~~
 make

@@ -23,7 +23,8 @@ stack。Qwen3.5-0.8B 是目前足够小、又真正保留目标架构的官方 c
 ## 从这里开始
 
 不要先打开两千行的 prototype。先阅读 [lessons/README.md](lessons/README.md)，
-先编译全部课程和最终程序：
+先编译全部课程；产物按顺序出现在 `lessons/00_toy_logits` 到
+`lessons/09_real_qwen38`：
 
 ~~~
 make
@@ -60,7 +61,7 @@ decode、DeltaNet state、KV cache 和 greedy generation。
 ~~~
 make course-test
 python3 convert.py models/Qwen3.5-0.8B out/qwen38-0.8b.bin
-./qwen38 --generate out/qwen38-0.8b.bin 248044,198,198 16
+./lessons/09_real_qwen38 --generate out/qwen38-0.8b.bin 248044,198,198 16
 ~~~
 
 详细模型格式和 regression 请看
