@@ -11,6 +11,10 @@ Current focus: text-only, batch 1, one process, one device, correctness first.
 There is no training, quantization, server, continuous batching, tensor
 abstraction, generic model loader, or distributed execution.
 
+不想直接啃两千行 C++ 时，打开本地的
+[`docs/qwen38-reading-guide.html`](docs/qwen38-reading-guide.html)：它按真实
+forward 顺序解释源码，并附关键行号、陷阱提示和阅读进度。
+
 ## Status
 
 The CPU reference path is complete for the fixed Qwen3.8-27B text topology:
