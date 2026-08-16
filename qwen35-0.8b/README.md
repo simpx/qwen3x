@@ -1,6 +1,6 @@
 # 真实 Qwen3.5-0.8B text inference
 
-qwen38.cpp 是课程后的真实权重整合答案，目前少于 1000 行。它不是通用 runtime：
+qwen3x.cpp 是课程后的真实权重整合答案，目前少于 1000 行。它不是通用 runtime：
 
 - 固定 Qwen3.5-0.8B 的 24 层 text backbone；
 - CPU、batch 1、贪婪生成、最多 2048 token；
@@ -20,9 +20,9 @@ tied 策略不同，但 forward 的概念和顺序相同。
 ~~~
 cd qwen35-0.8b
 make
-python3 convert.py ../models/Qwen3.5-0.8B out/qwen38-0.8b.bin
-./qwen38 --forward out/qwen38-0.8b.bin 248044,198,198
-./qwen38 --generate out/qwen38-0.8b.bin 248044,198,198 16
+python3 convert.py ../models/Qwen3.5-0.8B out/qwen3x-0.8b.bin
+./qwen3x --forward out/qwen3x-0.8b.bin 248044,198,198
+./qwen3x --generate out/qwen3x-0.8b.bin 248044,198,198 16
 ~~~
 
 转换器逐 tensor 拷贝原始 safetensors 字节，所以不需要 PyTorch、NumPy 或

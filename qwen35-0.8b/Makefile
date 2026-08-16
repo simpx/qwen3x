@@ -1,18 +1,18 @@
-# 真实 Qwen3.5-0.8B 的独立小目录：`make` 只编译这一个固定模型程序。
+# 真实 Qwen3.5-0.8B 的独立小目录：`make` 只编译 qwen3x。
 
 .PHONY: all test oracle-test clean
 
-all: qwen38
+all: qwen3x
 
-qwen38: qwen38.cpp
-	c++ -O3 -std=c++17 -Wall -Wextra -Wpedantic qwen38.cpp -o qwen38
+qwen3x: qwen3x.cpp
+	c++ -O3 -std=c++17 -Wall -Wextra -Wpedantic qwen3x.cpp -o qwen3x
 
-test: qwen38
-	./qwen38 --self-test
+test: qwen3x
+	./qwen3x --self-test
 
-oracle-test: qwen38
+oracle-test: qwen3x
 	@test -n "$(MODEL)" || (echo "usage: make oracle-test MODEL=/path/to/Qwen3.5-0.8B" >&2; exit 2)
 	./test.sh "$(MODEL)"
 
 clean:
-	rm -f qwen38
+	rm -f qwen3x

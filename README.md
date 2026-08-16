@@ -1,4 +1,4 @@
-# qwen38.cpp
+# qwen3x
 
 一个循序渐进的 C++ 课程：从零写出 Qwen3.8-style hybrid LLM inference。
 
@@ -55,15 +55,15 @@ make test
 
 ## 真实 0.8B
 
-[qwen35-0.8b/qwen38.cpp](qwen35-0.8b/qwen38.cpp) 是约 520 行的整合版。它严格固定为
+[qwen35-0.8b/qwen3x.cpp](qwen35-0.8b/qwen3x.cpp) 是约 520 行的整合版。它严格固定为
 Qwen3.5-0.8B text backbone，采用 BF16 权重、FP32 计算，支持真实 prefill、
 decode、DeltaNet state、KV cache 和 greedy generation。
 
 ~~~
 cd qwen35-0.8b
 make
-python3 convert.py ../models/Qwen3.5-0.8B out/qwen38-0.8b.bin
-./qwen38 --generate out/qwen38-0.8b.bin 248044,198,198 16
+python3 convert.py ../models/Qwen3.5-0.8B out/qwen3x-0.8b.bin
+./qwen3x --generate out/qwen3x-0.8b.bin 248044,198,198 16
 ~~~
 
 详细模型格式和 regression 请看

@@ -1,4 +1,4 @@
-# qwen38.cpp：从零实现 Qwen 风格 inference 的课程
+# qwen3x：从零实现 Qwen 风格 inference 的课程
 
 这里的目标不是一次读懂根目录中完整的 prototype，而是每次只增加一个
 概念，并得到一个可以独立编译、独立验证的 C++ 程序。
@@ -26,7 +26,7 @@
 | 08 | 08_hybrid_qwen.cpp | 3 DeltaNet : 1 attention 的 Qwen hybrid stack | 已完成 |
 
 课程文件的总行数不会限制在 1000 行，因为每课为了自包含会重复少量代码；
-限制的是同级 [qwen35-0.8b/qwen38.cpp](../qwen35-0.8b/qwen38.cpp)。否则会为了
+限制的是同级 [qwen35-0.8b/qwen3x.cpp](../qwen35-0.8b/qwen3x.cpp)。否则会为了
 “少几行”而把关键细节藏进帮助函数，反而失去教学价值。
 
 ## 运行
