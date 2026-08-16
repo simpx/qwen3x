@@ -502,6 +502,7 @@ void cuda_self_test() {
 void cuda_usage(const char* program) {
     std::printf("usage: %s --self-test\n", program);
     std::printf("       %s --forward <qwen35-0.8b.bin> <id,id,...>\n", program);
+    std::printf("       %s --logits <qwen35-0.8b.bin> <id,id,...>\n", program);
     std::printf("       %s --generate <qwen35-0.8b.bin> <id,id,...> <new-tokens>\n", program);
 }
 
@@ -515,6 +516,13 @@ int main(int argc, char** argv) {
         for (int token : parse_ids(argv[3])) forward_cuda(model, state, token, work);
         const int next = argmax(work.host_logits);
         std::printf("next token: %d, logit: %.6f\n", next, work.host_logits[next]);
+        return 0;
+    }
+    if (std::strcmp(argv[1], "--logits") == 0 && argc == 4) {
+        // 复用 CPU 文件的 dump format；区别只是 logits 已由 forward_cuda 下载到 host。
+        DeviceModel model(argv[2]); CudaState state; CudaWork work;
+        for (int token : parse_ids(argv[3])) forward_cuda(model, state, token, work);
+        dump_logits(work.host_logits);
         return 0;
     }
     if (std::strcmp(argv[1], "--generate") == 0 && argc == 5) {

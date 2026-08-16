@@ -40,6 +40,31 @@ make oracle-test MODEL=../models/Qwen3.5-0.8B
 官方 Python tokenizer、Transformers 或任意兼容工具把 text 编码为这些 id，
 再将生成 id 解码回来；它不进入本仓库的 C++ build。
 
+### 最强回归：官方 FP32 end-to-end oracle
+
+`oracle-test` 使用固定值防止日常重构回归；`official-oracle` 则是更强的开发期测试。
+它将一条真实 text chat 用 checkpoint 自带的官方 tokenizer/template 编码，并以相同的
+token ids 分别运行官方 Transformers FP32 model、`qwen35` 与 `qwen35_cuda`。它检查：
+
+- 全部 248,320 个 prefill logits 的 max/mean absolute error 与 argmax；
+- 八步 greedy decode token，因而覆盖 attention KV cache 和 DeltaNet recurrent state；
+- CPU 与 CUDA 都直接对官方 reference，而不只是彼此相同。
+
+Qwen3.5 支持需要较新的 Transformers；这个只用于开发期 oracle，不是 C++ runtime 依赖：
+
+~~~
+pip install 'transformers>=5.0' torch
+make official-oracle MODEL=../models/Qwen3.5-0.8B
+
+# 已有权重包时可跳过临时 pack：
+make official-oracle MODEL=../models/Qwen3.5-0.8B WEIGHTS=out/qwen35-0.8b.bin
+~~~
+
+测试有意让官方模型以 FP32 运行。本项目的语义是“BF16 权重 + FP32 activation/state”；
+默认要求全词表 max absolute error 不超过 `1e-4`。若把官方 model 以 BF16 运行，每一层
+matmul 的舍入会放大为明显的最终 logit 差异，不能
+当作这个 CPU/CUDA reference implementation 的数值黄金值。
+
 ## Chat：官方 tokenizer 留在 Python
 
 `chat.py` 是不到 130 行的外围 wrapper，不属于 C++ inference core。它读取官方

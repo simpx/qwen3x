@@ -444,6 +444,12 @@ int argmax(const std::vector<float>& values) {
     return static_cast<int>(std::max_element(values.begin(), values.end()) - values.begin());
 }
 
+void dump_logits(const std::vector<float>& values) {
+    // 只给开发期 official-oracle.py 使用：一行一个 FP32 logit，便于它比较完整词表，
+    // 而不是只看 argmax 后“文字看起来正常”。正常的 --forward / --generate 不会走这里。
+    for (float value : values) std::printf("%.9g\n", value);
+}
+
 std::vector<int> parse_ids(const char* text) {
     // C++ core 刻意只接受 token ids。tokenizer 是可独立替换的文字外围工具，不应
     // 遮住本文件的模型计算；格式如 "248044,198,198"。
@@ -493,6 +499,7 @@ void self_test() {
 void usage(const char* program) {
     std::printf("usage: %s --self-test\n", program);
     std::printf("       %s --forward <qwen35-0.8b.bin> <id,id,...>\n", program);
+    std::printf("       %s --logits <qwen35-0.8b.bin> <id,id,...>\n", program);
     std::printf("       %s --generate <qwen35-0.8b.bin> <id,id,...> <new-tokens>\n", program);
 }
 
@@ -507,6 +514,13 @@ int main(int argc, char** argv) {
         for (int token : parse_ids(argv[3])) forward(model, state, token, work);
         const int next = argmax(work.logits);
         std::printf("next token: %d, logit: %.6f\n", next, work.logits[next]);
+        return 0;
+    }
+    if (std::strcmp(argv[1], "--logits") == 0 && argc == 4) {
+        // 开发期数值 oracle：对一个完整 prefill prompt 输出 V=248320 个 logits。
+        Model model(argv[2]); State state; Work work;
+        for (int token : parse_ids(argv[3])) forward(model, state, token, work);
+        dump_logits(work.logits);
         return 0;
     }
     if (std::strcmp(argv[1], "--generate") == 0 && argc == 5) {

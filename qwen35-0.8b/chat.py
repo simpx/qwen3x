@@ -12,6 +12,7 @@ qwen35 / qwen35_cuda 只做一件事：token id -> next token id。这里才做�
 import argparse
 import subprocess
 import sys
+from pathlib import Path
 
 from transformers import AutoTokenizer
 
@@ -30,7 +31,7 @@ def generate(tokenizer, messages, engine: str, weights: str, max_new_tokens: int
     # `apply_chat_template` 从 checkpoint 的 tokenizer_config.json 读取模板；本项目
     # 不手写 <|im_start|>、<think> 等控制 token，也不将这类知识塞进 C++。
     prompt_ids = tokenizer.apply_chat_template(
-        messages, tokenize=True, add_generation_prompt=True
+        messages, tokenize=True, add_generation_prompt=True, return_dict=False
     )
     if len(prompt_ids) + max_new_tokens > 2048:
         raise RuntimeError(
@@ -82,7 +83,10 @@ def add_arguments() -> argparse.Namespace:
 
 def main() -> None:
     args = add_arguments()
-    engine = args.engine or ("./qwen35_cuda" if args.cuda else "./qwen35")
+    # 默认 binary 相对本脚本定位，而非相对 shell 当前目录；README 里的 `cd` 只是让
+    # 命令更短，用户从仓库根目录执行 `python qwen35-0.8b/chat.py ...` 也应当可用。
+    default_engine = Path(__file__).with_name("qwen35_cuda" if args.cuda else "qwen35")
+    engine = args.engine or str(default_engine)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
     # The Python-side history is deliberately ordinary text messages. Recomputing the full
