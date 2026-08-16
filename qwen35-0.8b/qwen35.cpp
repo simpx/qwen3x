@@ -1,4 +1,4 @@
-// qwen3x.cpp -- 一个固定 Qwen3.5-0.8B text backbone 的 CPU 推理器。
+// qwen35.cpp -- 一个固定 Qwen3.5-0.8B text backbone 的 CPU 推理器。
 //
 // 这是课程的最后一课：没有 Tensor 类、没有算子注册表、没有通用模型兼容层。
 // convert.py 已按本文件读取的顺序排好权重，因此这里从上到下就是一次 token
@@ -25,7 +25,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-namespace qwen3x {
+namespace qwen35 {
 
 // 这些常数直接来自 Qwen/Qwen3.5-0.8B 的 text_config。不是运行时 Config；
 // 换模型意味着另写一份课程，而不是把本文件演化成通用推理框架。
@@ -43,7 +43,7 @@ constexpr float EPS = 1e-6f, THETA = 10000000.0f;
 using B = uint16_t;  // 一个 BF16 权重元素的原始 bit；运算时立即转为 FP32。
 
 [[noreturn]] void die(const char* text) {
-    std::fprintf(stderr, "qwen3x: %s\n", text);
+    std::fprintf(stderr, "qwen35: %s\n", text);
     std::exit(1);
 }
 
@@ -89,7 +89,7 @@ struct File {
         size = static_cast<size_t>(info.st_size);
         data = static_cast<const uint8_t*>(mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0));
         if (data == MAP_FAILED) die("mmap model.bin failed");
-        if (std::memcmp(data, "Q3XCOUR\0", 8) != 0) die("wrong model.bin magic; run convert.py");
+        if (std::memcmp(data, "Q35COUR\0", 8) != 0) die("wrong model.bin magic; run convert.py");
     }
     ~File() {
         if (data && data != MAP_FAILED) munmap(const_cast<uint8_t*>(data), size);
@@ -492,14 +492,14 @@ void self_test() {
 
 void usage(const char* program) {
     std::printf("usage: %s --self-test\n", program);
-    std::printf("       %s --forward <qwen3x-0.8b.bin> <id,id,...>\n", program);
-    std::printf("       %s --generate <qwen3x-0.8b.bin> <id,id,...> <new-tokens>\n", program);
+    std::printf("       %s --forward <qwen35-0.8b.bin> <id,id,...>\n", program);
+    std::printf("       %s --generate <qwen35-0.8b.bin> <id,id,...> <new-tokens>\n", program);
 }
 
-}  // namespace qwen3x
+}  // namespace qwen35
 
 int main(int argc, char** argv) {
-    using namespace qwen3x;
+    using namespace qwen35;
     if (argc == 1 || std::strcmp(argv[1], "--self-test") == 0) { self_test(); return 0; }
     if (std::strcmp(argv[1], "--forward") == 0 && argc == 4) {
         // --forward 只做 prefill 并报告 next-token；它便于与官方 reference 比数值。

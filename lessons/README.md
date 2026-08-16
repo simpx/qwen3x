@@ -26,7 +26,7 @@
 | 08 | 08_hybrid_qwen.cpp | 3 DeltaNet : 1 attention 的 Qwen hybrid stack | 已完成 |
 
 课程文件的总行数不会限制在 1000 行，因为每课为了自包含会重复少量代码；
-限制的是同级 [qwen35-0.8b/qwen3x.cpp](../qwen35-0.8b/qwen3x.cpp)。否则会为了
+限制的是同级 [qwen35-0.8b/qwen35.cpp](../qwen35-0.8b/qwen35.cpp)。否则会为了
 “少几行”而把关键细节藏进帮助函数，反而失去教学价值。
 
 ## 运行
