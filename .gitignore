@@ -1,12 +1,6 @@
-# Local build products.
-/build/
 /qwen38
-/qwen38_tiny
-/qwen38_tiny_cuda
-/qwen38_08b
-/qwen38_08b_cuda
-/qwen38_course
 /out/
+/models/
 /lessons/00_toy_logits
 /lessons/01_rmsnorm_linear
 /lessons/02_swiglu_residual
@@ -16,14 +10,5 @@
 /lessons/06_deltanet_recurrence
 /lessons/07_deltanet_layer
 /lessons/08_hybrid_qwen
-
-# Downloaded Hugging Face checkpoints are test fixtures, never source files.
-/models/
-
-# Local Python environments and test output.
-/.venv/
-/reference/.venv/
-/reference/.deps/
-/reference/out/
-*.pyc
 __pycache__/
+*.pyc

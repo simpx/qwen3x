@@ -25,7 +25,7 @@
 | 07 | 07_deltanet_layer.cpp | Q/K/V 投影、causal conv、门控、DeltaNet layer | 已完成 |
 | 08 | 08_hybrid_qwen.cpp | 3 DeltaNet : 1 attention 的 Qwen hybrid stack | 已完成 |
 | 09 | ../convert.py | 官方 safetensors 到固定顺序 model.bin | 已完成 |
-| 10 | ../capstone/qwen38.cpp | 真实 0.8B、生成、可选官方 tokenizer | 已完成 |
+| 10 | ../capstone/qwen38.cpp | 真实 0.8B、生成、token id 接口 | 已完成 |
 
 课程文件的总行数不会限制在 1000 行，因为每课为了自包含会重复少量代码；
 限制的是最后的整合版 capstone/qwen38.cpp。否则会为了“少几行”而把关键细节
@@ -46,8 +46,7 @@ c++ -O2 -std=c++17 lessons/00_toy_logits.cpp -o lesson00
 ./lesson00
 ~~~
 
-## 与现有 prototype 的关系
+## 与旧 prototype 的关系
 
-当前根目录的 qwen38.cpp 是已经验证过的完整 reference prototype，已被
-本地 git tag prototype-v0 固定保存。课程会从玩具模型重新写起，而不是把
-那个大文件拆碎；后者仍可作为最终课的数值与结构参考。
+旧的完整 reference prototype 已由 git tag `prototype-v0` 保留。它不在当前
+工作树中：这个仓库只保留从玩具模型到最终 capstone 的教学路径。

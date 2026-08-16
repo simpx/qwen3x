@@ -21,11 +21,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#ifdef QWEN38_WITH_TOKENIZER
-#include "qwen38_tokenizer.h"
-#endif
-
-namespace qwen38_course {
+namespace qwen38 {
 
 // 这些常数直接来自 Qwen/Qwen3.5-0.8B 的 text_config。不是运行时 Config；
 // 换模型意味着另写一份课程，而不是把本文件演化成通用推理框架。
@@ -431,15 +427,12 @@ void usage(const char* program) {
     std::printf("usage: %s --self-test\n", program);
     std::printf("       %s --forward <qwen38-0.8b.bin> <id,id,...>\n", program);
     std::printf("       %s --generate <qwen38-0.8b.bin> <id,id,...> <new-tokens>\n", program);
-#ifdef QWEN38_WITH_TOKENIZER
-    std::printf("       %s --generate-text <qwen38-0.8b.bin> <tokenizer-dir> <text> <new-tokens>\n", program);
-#endif
 }
 
-}  // namespace qwen38_course
+}  // namespace qwen38
 
 int main(int argc, char** argv) {
-    using namespace qwen38_course;
+    using namespace qwen38;
     if (argc == 1 || std::strcmp(argv[1], "--self-test") == 0) { self_test(); return 0; }
     if (std::strcmp(argv[1], "--forward") == 0 && argc == 4) {
         Model model(argv[2]); State state; Work work;
@@ -456,15 +449,6 @@ int main(int argc, char** argv) {
         std::putchar('\n');
         return 0;
     }
-#ifdef QWEN38_WITH_TOKENIZER
-    if (std::strcmp(argv[1], "--generate-text") == 0 && argc == 6) {
-        qwen38::QwenTokenizer tokenizer(argv[3]);
-        std::vector<int> output;
-        generate(argv[2], tokenizer.encode(argv[4]), std::atoi(argv[5]), &output);
-        std::printf("%s\n", tokenizer.decode(output).c_str());
-        return 0;
-    }
-#endif
     usage(argv[0]);
     return 1;
 }

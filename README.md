@@ -47,17 +47,17 @@ make lesson-test
 
 ## 最终 capstone
 
-[capstone/qwen38.cpp](capstone/qwen38.cpp) 是 469 行的整合版。它严格固定为
+[capstone/qwen38.cpp](capstone/qwen38.cpp) 是 454 行的整合版。它严格固定为
 Qwen3.5-0.8B text backbone，采用 BF16 权重、FP32 计算，支持真实 prefill、
 decode、DeltaNet state、KV cache 和 greedy generation。
 
 ~~~
 make course-test
 python3 convert.py models/Qwen3.5-0.8B out/qwen38-0.8b.bin
-./qwen38_course --generate out/qwen38-0.8b.bin 248044,198,198 16
+./qwen38 --generate out/qwen38-0.8b.bin 248044,198,198 16
 ~~~
 
-详细模型格式、CMake tokenizer 文本入口和 regression 请看
+详细模型格式和 regression 请看
 [capstone/README.md](capstone/README.md)。
 
 有本地官方 checkpoint 时：
@@ -66,9 +66,9 @@ python3 convert.py models/Qwen3.5-0.8B out/qwen38-0.8b.bin
 make course-oracle-test MODEL=models/Qwen3.5-0.8B
 ~~~
 
-该测试会临时转换权重，比较 capstone 和已验证的完整 CPU prototype：三 token
-prompt 的 next-token 必须相同，logit 误差必须低于 1e-3，并比较八个 greedy
-decode token。
+该测试会临时转换权重，对照已固定的官方权重结果：三 token prompt 的
+next-token 必须为 198，logit 误差必须低于 1e-3，并比较八个 greedy decode
+token。
 
 ## 明确不做
 
@@ -82,8 +82,5 @@ decode token。
 C++ 性能引擎会另开仓库；它可以从这里已验证的数学与测试开始，但不受一千行
 限制。
 
-## 现有 prototype
-
-早期完整 scalar/CUDA prototype 已保留在 git tag prototype-v0。根目录的旧
-qwen38.cpp、kernels/、reference/ 和 docs/ 阅读页仍作为 advanced reference
-存在，但不再是本教学项目的主入口。
+旧 prototype 已保留在远端 git tag prototype-v0；它不在当前教学仓库的
+工作树中。

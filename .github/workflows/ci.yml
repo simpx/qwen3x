@@ -1,4 +1,4 @@
-name: CPU checks
+name: Course checks
 
 on:
   push:
@@ -8,24 +8,9 @@ permissions:
   contents: read
 
 jobs:
-  scalar-reference:
+  course:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build and test fixed CPU configurations
-        run: |
-          make test
-          make tiny-test
-          make dev-test
-      - name: Exercise the tiny end-to-end loader and forward path
-        run: |
-          make qwen38_tiny
-          fixture=$(mktemp -d)
-          ./qwen38_tiny --make-fake "$fixture"
-          ./qwen38_tiny --inspect "$fixture"
-          ./qwen38_tiny --forward "$fixture" 1,2,3,4
-          ./qwen38_tiny --generate "$fixture" 1,2,3 4 --temperature 0
-      - name: Check dependency-free CMake build
-        run: |
-          cmake -S . -B build -DQWEN38_ENABLE_TOKENIZER=OFF -DQWEN38_ENABLE_CUDA=OFF
-          cmake --build build --target qwen38 qwen38_08b qwen38_tiny -j2
+      - name: Build and run every lesson plus the capstone self-test
+        run: make test

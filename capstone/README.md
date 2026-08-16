@@ -19,30 +19,21 @@ tied 策略不同，但 forward 的概念和顺序相同。
 ~~~
 python3 convert.py models/Qwen3.5-0.8B out/qwen38-0.8b.bin
 make course-test
-./qwen38_course --forward out/qwen38-0.8b.bin 248044,198,198
-./qwen38_course --generate out/qwen38-0.8b.bin 248044,198,198 16
+./qwen38 --forward out/qwen38-0.8b.bin 248044,198,198
+./qwen38 --generate out/qwen38-0.8b.bin 248044,198,198 16
 ~~~
 
 转换器逐 tensor 拷贝原始 safetensors 字节，所以不需要 PyTorch、NumPy 或
 safetensors Python 包。它的输出约 1.4 GiB：只包含 language model 所需的
 320 个 text tensors，不包含视觉和 MTP tensors。
 
-有本地官方 checkpoint 时，可运行以下 regression；它会临时转换权重，并将
-capstone 的 logits 与八个 greedy token 同已保留的完整 CPU prototype 比较：
+有本地官方 checkpoint 时，可运行以下 regression；它会临时转换权重，并检查
+一个已固定的官方权重 forward logit 和八个 greedy token：
 
 ~~~
 make course-oracle-test MODEL=models/Qwen3.5-0.8B
 ~~~
 
-## 文本版本
-
-CMake 默认会编译官方 tokenizer.json 的轻量 C ABI adapter：
-
-~~~
-cmake -S . -B build
-cmake --build build --target qwen38_course -j
-./build/qwen38_course --generate-text out/qwen38-0.8b.bin models/Qwen3.5-0.8B '你好' 16
-~~~
-
-Tokenizer 是外围基础设施，不计入 capstone 的模型数学代码；它只负责 text 和
-token id 的互相转换。
+本课程的 C++ 只接受和输出 token id。文本 tokenizer 是独立外围工具：可用
+官方 Python tokenizer、Transformers 或任意兼容工具把 text 编码为这些 id，
+再将生成 id 解码回来；它不进入本仓库的 C++ build。
