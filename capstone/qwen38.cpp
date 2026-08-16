@@ -408,7 +408,8 @@ void generate(const char* path, const std::vector<int>& prompt, int count, std::
     for (int token : prompt) forward(model, state, token, work);  // prefill
     for (int step = 0; step < count; ++step) {
         const int next = argmax(work.logits);
-        if (next == 248044) break;  // Qwen3.5 text EOS
+        // 普通 text EOS 与 chat assistant 回合结束符都不应返回给用户。
+        if (next == 248044 || next == 248046) break;
         result->push_back(next);
         if (step + 1 < count) forward(model, state, next, work);  // decode
     }

@@ -5,6 +5,7 @@ capstone/qwen38.cpp 是课程的整合答案，目前少于 1000 行。它不是
 - 固定 Qwen3.5-0.8B 的 24 层 text backbone；
 - CPU、batch 1、贪婪生成、最多 2048 token；
 - BF16 权重即时转 FP32，DeltaNet recurrent state 与 KV cache 都保留 FP32；
+- 同时识别 Qwen text EOS 与 chat template 的 assistant 回合结束 token；
 - 忽略视觉 encoder、MTP、量化、CUDA、Metal 和通用 safetensors 兼容。
 
 这个 0.8B 模型与 Qwen3.8-27B 共享 Qwen3.5 hybrid text 架构：每四层中前三层
