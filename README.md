@@ -1,191 +1,89 @@
 # qwen38.cpp
 
-A small, readable Qwen inference engine for CPU, Metal, and CUDA.
+一个循序渐进的 C++ 课程：从零写出 Qwen3.8-style hybrid LLM inference。
 
-`qwen38.cpp` is an executable specification, not a general inference
-framework. The core forward remains direct, fixed-model C++ that can be read
-top-to-bottom: embedding → norm → DeltaNet or attention → residual → MLP →
-logits.
+这不是 llama.cpp、vLLM 或通用推理框架。目标是让读者按文件顺序理解：
 
-## Teaching rebuild: active
+    token -> embedding -> RMSNorm -> DeltaNet / attention -> residual
+          -> SwiGLU FFN -> logits -> next token
 
-This repository is now being rebuilt as a progressive C++ inference course.
-The active reading path is [lessons/](lessons/README.md): every source file
-adds exactly one concept, runs with hand-checkable toy weights, and has its own
-self-test. The intended final chapter is one text-only CPU implementation
-under 1000 lines that runs the fixed official Qwen3.5-0.8B text backbone—a
-small model with the same Qwen3.8-style 3 DeltaNet : 1 attention hybrid
-pattern.
+最终答案是少于 1000 行的 CPU 程序，运行官方 Qwen3.5-0.8B 的 text backbone。
+它与 Qwen3.8-27B 共享 Qwen3.5 hybrid 结构：每四层是三个 Gated DeltaNet
+layer 加一个 Gated Attention layer。
 
-The existing root-level implementation is preserved as the prototype-v0 git
-tag. It remains a useful correctness reference, but it is deliberately not
-the first file a learner should read.
+## 为什么是 0.8B，而不是 Qwen2.5-0.5B
 
-Current teaching scope: text-only, batch 1, one process, CPU reference first.
-There is no training, quantization, server, continuous batching, tensor
-abstraction, generic model loader, or distributed execution.
+Qwen2.5-0.5B 是纯 attention Transformer，能教 embedding、RoPE、GQA 与 KV
+cache，但它没有 DeltaNet recurrent state、DeltaNet convolution 和 3:1 hybrid
+stack。Qwen3.5-0.8B 是目前足够小、又真正保留目标架构的官方 checkpoint。
 
-Run the completed lessons:
+0.8B 与 27B 的尺寸、层数和 embedding/lm_head tied 策略不同；课程不会掩盖
+这些差异。它的价值是：同一套核心 forward 概念可以端到端运行真实权重。
+
+## 从这里开始
+
+不要先打开两千行的 prototype。先阅读 [lessons/README.md](lessons/README.md)，
+并运行每一课：
 
 ~~~
 make lesson-test
 ~~~
 
-不想直接啃两千行 C++ 时，打开本地的
-[`docs/qwen38-reading-guide.html`](docs/qwen38-reading-guide.html)：它按真实
-forward 顺序解释源码，并附关键行号、陷阱提示和阅读进度。
+课程每一步都是独立、可编译的 C++ 文件：
 
-## Status
-
-The CPU reference path is complete for the fixed Qwen3.8-27B text topology:
-safetensors loading, embedding, RMSNorm, RoPE, DeltaNet state and convolution,
-GQA cache, MLP, final norm, logits, sampling, prefill, and decode.
-
-For day-to-day work this repository also builds the fixed official
-[`Qwen/Qwen3.5-0.8B`](https://huggingface.co/Qwen/Qwen3.5-0.8B) checkpoint.
-It is small enough for this WSL machine and provides real end-to-end text
-tests. It has the same 3 DeltaNet : 1 attention hybrid family pattern, but it
-is **not** a claim that its dimensions, tied LM head, or weights equal the
-eventual Qwen3.8-27B target.
-
-| Path | Status |
+| 课 | 新概念 |
 | --- | --- |
-| CPU scalar reference | Complete and checked against official Transformers on 0.8B |
-| CUDA correctness path | Complete for tiny fixture and 0.8B; deliberately naive GEMV |
-| Metal | Planned; not implemented or claimed working yet |
-| Qwen3.8-27B real weights | Loader and scalar forward are fixed for it; this WSL machine cannot hold its BF16 checkpoint |
+| 00 | token id、embedding、tied lm_head、logits |
+| 01 | RMSNorm、linear |
+| 02 | SwiGLU、residual |
+| 03 | RoPE |
+| 04 | causal attention |
+| 05 | GQA、KV cache、prefill/decode |
+| 06 | Gated DeltaNet recurrent state |
+| 07 | 完整 toy DeltaNet layer |
+| 08 | 3 DeltaNet : 1 attention hybrid stack |
+| 09 | 官方 safetensors 到固定 model.bin 的转换 |
+| 10 | 真实 Qwen3.5-0.8B CPU 生成 |
 
-## Quick start
+## 最终 capstone
 
-The single-file CPU numerical reference needs only a C++17 compiler:
+[capstone/qwen38.cpp](capstone/qwen38.cpp) 是 469 行的整合版。它严格固定为
+Qwen3.5-0.8B text backbone，采用 BF16 权重、FP32 计算，支持真实 prefill、
+decode、DeltaNet state、KV cache 和 greedy generation。
 
-```bash
-make test
-make qwen38_08b
-./qwen38_08b --self-test
-```
+~~~
+make course-test
+python3 convert.py models/Qwen3.5-0.8B out/qwen38-0.8b.bin
+./qwen38_course --generate out/qwen38-0.8b.bin 248044,198,198 16
+~~~
 
-The Makefile takes token IDs. For actual text, use the CMake build. It adds a
-thin adapter over the official `tokenizer.json` through the Hugging Face
-tokenizers C ABI; model inference itself still has no Python or Transformers
-runtime dependency.
+详细模型格式、CMake tokenizer 文本入口和 regression 请看
+[capstone/README.md](capstone/README.md)。
 
-```bash
-cmake -S . -B build
-cmake --build build --target qwen38_08b -j
+有本地官方 checkpoint 时：
 
-model=models/Qwen3.5-0.8B
-./build/qwen38_08b --inspect "$model"
-./build/qwen38_08b --tokenize "$model" '你好，Qwen38!'
-./build/qwen38_08b --forward-text "$model" 'Hello'
-./build/qwen38_08b --generate-text "$model" 'Hello' 16 --temperature 0 --seed 1
-./build/qwen38_08b --generate-chat "$model" '请用一句话解释 DeltaNet。' 64 --temperature 0
-```
+~~~
+make course-oracle-test MODEL=models/Qwen3.5-0.8B
+~~~
 
-`--temperature 0` is greedy. Positive temperature enables deterministic
-temperature/top-k/top-p sampling when a `--seed` is supplied.
+该测试会临时转换权重，比较 capstone 和已验证的完整 CPU prototype：三 token
+prompt 的 next-token 必须相同，logit 误差必须低于 1e-3，并比较八个 greedy
+decode token。
 
-`--generate-chat` is a deliberately small convenience: one user turn, no
-tools/vision, and the official Qwen3.5 generation prefix with thinking
-disabled. It is regression-tested against the shipped Jinja template; it is
-not a general chat-template interpreter.
+## 明确不做
 
-Download the official checkpoint into `models/Qwen3.5-0.8B` (ignored by Git).
-The required files are `config.json`, `tokenizer.json`, and
-`model.safetensors-00001-of-00001.safetensors`. The loader validates all 320
-text tensor names, shapes, and dtypes before evaluating a token; it ignores the
-153 vision tensors and 15 MTP tensors in this text-only checkpoint.
+- 通用 Hugging Face 模型、GGUF 或量化格式
+- CUDA、Metal、BLAS 性能优化
+- vision、MTP、多模态、训练或 LoRA
+- continuous batching、服务、并行与分布式
+- Tensor/Operator/Backend 抽象框架
 
-To regression-test the tokenizer against the local official tokenizer:
+这些不是缺失功能，而是为了让核心 inference 可读而做的范围控制。未来真正的
+C++ 性能引擎会另开仓库；它可以从这里已验证的数学与测试开始，但不受一千行
+限制。
 
-```bash
-make tokenizer-test MODEL=models/Qwen3.5-0.8B
-```
+## 现有 prototype
 
-## Correctness workflow
-
-`--trace` writes the final token's FP32 checkpoints: embedding; every layer's
-input norm, mixer, residual, post norm, MLP, and final residual; final norm;
-and logits. `reference/` pins a Transformers revision containing the official
-Qwen3.5 implementation and compares the same points.
-
-```bash
-python3 -m pip install --target reference/.deps -r reference/requirements.txt
-scripts/test_08b_oracle.sh models/Qwen3.5-0.8B
-```
-
-The default three-token oracle test compares 147 tensors at an absolute
-tolerance of `1e-3`. On the checked WSL machine its largest all-tensor error
-was `3.156662e-4` at final norm; logits were `1.223087e-4`, and the greedy
-next token matched the official reference.
-The Python pieces are development-only and are excluded from the runtime
-binary.
-
-## CUDA correctness backend
-
-CUDA is intentionally simple at this stage: one readable BF16 GEMV kernel per
-row and explicit state kernels, not cuBLAS or a performance backend. It keeps
-the whole fixed model forward on the GPU and compares the final logits with the
-scalar CPU oracle.
-
-```bash
-make qwen38_tiny_cuda
-tiny=$(mktemp -d)
-./qwen38_tiny_cuda --make-fake "$tiny"
-./qwen38_tiny_cuda --cuda-compare "$tiny" 1,2,3,4
-
-make qwen38_08b_cuda
-./qwen38_08b_cuda --cuda-compare models/Qwen3.5-0.8B 248044,198,198
-```
-
-For the real 0.8B correctness build, CPU and CUDA use FP32 KV cache values so
-both can be checked directly against the FP32 Transformers oracle. The tiny
-fixture intentionally retains BF16 cache storage to test that representation.
-On an RTX 4080 SUPER, the tested 0.8B CUDA logits differed from scalar CPU by
-at most `3.9053e-4` for a one-token prompt and `1.0443e-4` for a three-token
-prompt; greedy IDs matched. The accepted CUDA bound is `1e-3`, accounting for
-the different floating-point reduction order.
-
-## What is deliberately not here
-
-- Any arbitrary Hugging Face architecture or GGUF compatibility
-- Quantization, TP/PP, multiple GPUs, continuous batching, scheduling, or serving
-- Vision and MTP execution
-- Training, LoRA, speculative decode, and multimodal inputs
-- A `Tensor`, `Operator`, `Backend`, virtual dispatch, or computation graph framework
-
-Those omissions are scope control, not missing plumbing. Libraries are used
-for peripheral work (tokenization); the Qwen forward is written here.
-
-## Repository map
-
-```text
-qwen38.cpp                 # CPU reference, safetensors loader, sampler, trace writer
-kernels/qwen38_tiny_cuda.cu # compile-time fixed CUDA correctness implementation
-kernels/qwen38_08b_cuda.cu  # 0.8B compile-time configuration wrapper
-qwen38_tokenizer.*          # small tokenizer.json adapter, outside the core forward
-reference/                  # pinned Transformers oracle; development-only
-scripts/test_08b_oracle.sh  # repeatable real-weight CPU oracle test
-```
-
-## Machine limits and current validation
-
-This workspace has 15 GiB WSL RAM and an RTX 4080 SUPER with 16 GiB VRAM. The
-0.8B checkpoint has 1.40 GiB of text tensors and runs comfortably as an oracle.
-The Qwen3.8-27B BF16 text weights are roughly 50 GiB, so real 27B inference is
-not a viable test on this machine. It remains the fixed final configuration;
-0.8B is the deliberately bounded development fixture.
-
-Current local checks include scalar unit tests, strict safetensors inspection,
-real tokenizer round-trip (`你好，Qwen38!`), real greedy text generation,
-one- and three-token official traces, and CPU/CUDA logits comparison.
-
-## Before publishing
-
-CI, contribution scope, and reproducible validation instructions are included.
-The repository still needs the project owner's explicit code-license choice
-before a public release; until then, no license is implied.
-
-[`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) separates the checks that can
-run today from the larger-hardware validation required before claiming a fully
-verified Qwen3.8-27B / Metal release.
+早期完整 scalar/CUDA prototype 已保留在 git tag prototype-v0。根目录的旧
+qwen38.cpp、kernels/、reference/ 和 docs/ 阅读页仍作为 advanced reference
+存在，但不再是本教学项目的主入口。

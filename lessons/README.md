@@ -22,15 +22,14 @@
 | 04 | 04_attention.cpp | causal attention | 已完成 |
 | 05 | 05_gqa_kv_cache.cpp | GQA、prefill、decode、KV cache | 已完成 |
 | 06 | 06_deltanet_recurrence.cpp | Gated DeltaNet 的固定 recurrent state | 已完成 |
-| 07 | 07_deltanet_layer.cpp | Q/K/V 投影、causal conv、门控、DeltaNet layer | 待实现 |
-| 08 | 08_hybrid_qwen.cpp | 3 DeltaNet : 1 attention 的 Qwen hybrid stack | 待实现 |
-| 09 | 09_load_08b.cpp | 固定 0.8B 的简单二进制权重格式 | 待实现 |
-| 10 | 10_tokenizer_generate.cpp | 官方 tokenizer 库、采样、文本生成 | 待实现 |
-| 11 | qwen38.cpp | 小于 1000 行的整合 CPU 版本 | 待实现 |
+| 07 | 07_deltanet_layer.cpp | Q/K/V 投影、causal conv、门控、DeltaNet layer | 已完成 |
+| 08 | 08_hybrid_qwen.cpp | 3 DeltaNet : 1 attention 的 Qwen hybrid stack | 已完成 |
+| 09 | ../convert.py | 官方 safetensors 到固定顺序 model.bin | 已完成 |
+| 10 | ../capstone/qwen38.cpp | 真实 0.8B、生成、可选官方 tokenizer | 已完成 |
 
 课程文件的总行数不会限制在 1000 行，因为每课为了自包含会重复少量代码；
-限制的是最后的整合版 qwen38.cpp。否则会为了“少几行”而把关键细节藏进
-帮助函数，反而失去教学价值。
+限制的是最后的整合版 capstone/qwen38.cpp。否则会为了“少几行”而把关键细节
+藏进帮助函数，反而失去教学价值。
 
 ## 运行
 

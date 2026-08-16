@@ -2,15 +2,25 @@ CXX ?= c++
 CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic
 NVCC ?= nvcc
 
-.PHONY: test tiny-test dev-test oracle-test tokenizer-test tiny-cuda-test cuda-dev-test lesson-test clean
+.PHONY: test tiny-test dev-test oracle-test tokenizer-test tiny-cuda-test cuda-dev-test lesson-test course-test course-oracle-test clean
 
-LESSON_BINS := lessons/00_toy_logits lessons/01_rmsnorm_linear lessons/02_swiglu_residual lessons/03_rope lessons/04_attention lessons/05_gqa_kv_cache lessons/06_deltanet_recurrence
+LESSON_BINS := lessons/00_toy_logits lessons/01_rmsnorm_linear lessons/02_swiglu_residual lessons/03_rope lessons/04_attention lessons/05_gqa_kv_cache lessons/06_deltanet_recurrence lessons/07_deltanet_layer lessons/08_hybrid_qwen
 
 lessons/%: lessons/%.cpp
 	$(CXX) $(CXXFLAGS) $< -o $@
 
 lesson-test: $(LESSON_BINS)
 	@for lesson in $(LESSON_BINS); do echo "== $$lesson =="; ./$$lesson; done
+
+qwen38_course: capstone/qwen38.cpp
+	$(CXX) $(CXXFLAGS) capstone/qwen38.cpp -o $@
+
+course-test: qwen38_course
+	./qwen38_course --self-test
+
+course-oracle-test: qwen38_course qwen38_08b
+	@test -n "$(MODEL)" || (echo "usage: make course-oracle-test MODEL=/path/to/Qwen3.5-0.8B" >&2; exit 2)
+	scripts/test_course_08b.sh "$(MODEL)"
 
 qwen38: qwen38.cpp
 	$(CXX) $(CXXFLAGS) qwen38.cpp -o $@
@@ -57,4 +67,4 @@ cuda-dev-test: qwen38_08b_cuda
 	./qwen38_08b_cuda --cuda-compare "$(MODEL)" 248044,198,198
 
 clean:
-	rm -f qwen38 qwen38_tiny qwen38_tiny_cuda qwen38_08b qwen38_08b_cuda $(LESSON_BINS)
+	rm -f qwen38 qwen38_tiny qwen38_tiny_cuda qwen38_08b qwen38_08b_cuda qwen38_course $(LESSON_BINS)

@@ -48,13 +48,24 @@ if(QWEN38_ENABLE_TOKENIZER)
     target_compile_definitions(qwen38_08b PRIVATE QWEN38_WITH_TOKENIZER=1 QWEN38_DEV_08B_MODEL=1)
     target_include_directories(qwen38_08b PRIVATE "${QWEN38_TOKENIZERS_SOURCE_DIR}/include")
     target_link_libraries(qwen38_08b PRIVATE "${QWEN38_TOKENIZERS_LIBRARY}" ${CMAKE_DL_LIBS} Threads::Threads)
+
+    # 课程最终版：固定 0.8B 的小型 CPU inference，文本转换仍复用同一官方
+    # tokenizer adapter；模型计算代码本身位于 capstone/qwen38.cpp。
+    add_executable(qwen38_course capstone/qwen38.cpp qwen38_tokenizer.cpp)
+    add_dependencies(qwen38_course qwen38_tokenizers)
+    target_compile_definitions(qwen38_course PRIVATE QWEN38_WITH_TOKENIZER=1)
+    target_include_directories(qwen38_course PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+                               "${QWEN38_TOKENIZERS_SOURCE_DIR}/include")
+    target_link_libraries(qwen38_course PRIVATE "${QWEN38_TOKENIZERS_LIBRARY}" ${CMAKE_DL_LIBS} Threads::Threads)
 else()
     add_executable(qwen38 qwen38.cpp)
     add_executable(qwen38_08b qwen38.cpp)
     target_compile_definitions(qwen38_08b PRIVATE QWEN38_DEV_08B_MODEL=1)
+    add_executable(qwen38_course capstone/qwen38.cpp)
 endif()
 target_compile_options(qwen38 PRIVATE -O3 -Wall -Wextra -Wpedantic)
 target_compile_options(qwen38_08b PRIVATE -O3 -Wall -Wextra -Wpedantic)
+target_compile_options(qwen38_course PRIVATE -O3 -Wall -Wextra -Wpedantic)
 
 # A 4-layer, width-32 Qwen3.8-shaped executable. It uses precisely the same
 # loader and forward code and can create a 94 KiB fake BF16 checkpoint.
