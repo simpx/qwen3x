@@ -2,7 +2,7 @@
 
 CUDA_ARCH ?= 89
 
-.PHONY: all test oracle-test official-oracle cuda cuda-test cuda-oracle-test clean
+.PHONY: all test oracle-test official-oracle mmlu-eval cuda cuda-test cuda-oracle-test clean
 
 all: qwen35
 
@@ -21,6 +21,11 @@ oracle-test: qwen35
 official-oracle: qwen35 qwen35_cuda
 	@test -n "$(MODEL)" || (echo "usage: make official-oracle MODEL=/path/to/Qwen3.5-0.8B [WEIGHTS=out/qwen35-0.8b.bin]" >&2; exit 2)
 	python3 test_official.py "$(MODEL)" $(if $(WEIGHTS),--weights "$(WEIGHTS)")
+
+# 生成式 MMLU accuracy：默认 CUDA，subject 默认 abstract_algebra 的完整 100 道 test 题。
+mmlu-eval: qwen35_cuda
+	@test -n "$(MODEL)" -a -n "$(WEIGHTS)" || (echo "usage: make mmlu-eval MODEL=/path/to/Qwen3.5-0.8B WEIGHTS=out/qwen35-0.8b.bin [SUBJECT=abstract_algebra] [LIMIT=20]" >&2; exit 2)
+	python3 eval_mmlu.py "$(MODEL)" "$(WEIGHTS)" --subject "$(or $(SUBJECT),abstract_algebra)" $(if $(LIMIT),--limit "$(LIMIT)")
 
 # 可选 GPU 路径。默认 sm_89 对应当前 RTX 4080 SUPER；其他 NVIDIA GPU 可覆盖：
 # make cuda CUDA_ARCH=120

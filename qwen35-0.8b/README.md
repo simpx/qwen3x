@@ -65,6 +65,31 @@ make official-oracle MODEL=../models/Qwen3.5-0.8B WEIGHTS=out/qwen35-0.8b.bin
 matmul 的舍入会放大为明显的最终 logit 差异，不能
 当作这个 CPU/CUDA reference implementation 的数值黄金值。
 
+### 最终回答质量：生成式 MMLU score
+
+数值 oracle 证明实现没有偏离官方；[eval_mmlu.py](eval_mmlu.py) 则让模型实际回答
+公开 MMLU 选择题，并按标准答案计算 accuracy。它使用官方 tokenizer/chat template，要求
+模型只生成 `A` / `B` / `C` / `D`，默认跑一个完整的 100 题 subject：
+
+~~~
+pip install transformers datasets
+make mmlu-eval MODEL=../models/Qwen3.5-0.8B WEIGHTS=out/qwen35-0.8b.bin \
+  SUBJECT=abstract_algebra
+~~~
+
+这是 **zero-shot generative MMLU accuracy**，不是 lm-eval-harness 的官方 MMLU protocol：
+后者为四个候选答案计算 log-likelihood。本项目选择生成一个答案字母，是为了不把通用
+evaluation framework 或额外 runtime 塞进教学 C++；因此这个 score 只适合同一 prompt 和
+同一 subject/limit 的横向比较，不能直接与公开 leaderboard 比较。
+
+CPU reference 的目标是 correctness，不适合完整 100 题跑分。可先在少量固定题上确认其与
+CUDA 输出一致：
+
+~~~
+python3 eval_mmlu.py ../models/Qwen3.5-0.8B out/qwen35-0.8b.bin \
+  --engine ./qwen35 --subject abstract_algebra --limit 5
+~~~
+
 ## Chat：官方 tokenizer 留在 Python
 
 `chat.py` 是不到 130 行的外围 wrapper，不属于 C++ inference core。它读取官方
