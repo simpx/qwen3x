@@ -3,6 +3,10 @@
 // 上一课的 embedding 只是“取一行”。真实模型随后反复执行：
 //   y = RMSNorm(x) -> W * y
 // 这里保留最小向量，读者可以用纸笔复算每个数。
+//
+// RMSNorm 只按向量的均方根缩放，不像 LayerNorm 那样先减去均值。它不混合
+// hidden dimension；真正混合维度的是后面的 linear。Qwen 的 layer 是 pre-norm：
+// 先 norm，再把结果送入 attention/DeltaNet 或 FFN 分支。
 
 #include <cassert>
 #include <cmath>
@@ -17,16 +21,19 @@ bool close(float left, float right) { return std::fabs(left - right) < 1e-5f; }
 
 // Qwen3.5/3.8 ordinary RMSNorm 的 scale 是 (1 + weight)，不是 weight 本身。
 void qwen_rmsnorm(const float* input, const float* weight, float* output) {
+    // RMS(x) = sqrt(mean_i(x_i^2) + eps)。eps 防止全零输入除零。
     float mean_square = 0.0f;
     for (int i = 0; i < kHidden; ++i) mean_square += input[i] * input[i];
     mean_square /= kHidden;
 
     const float inverse_rms = 1.0f / std::sqrt(mean_square + kEpsilon);
+    // checkpoint 保存的是 weight；Qwen 的 ordinary RMSNorm 实际乘 1 + weight。
     for (int i = 0; i < kHidden; ++i) output[i] = input[i] * inverse_rms * (1.0f + weight[i]);
 }
 
 // 行主序权重 W[out_dim][in_dim] 与输入向量相乘。
 void linear(const float weight[2][kHidden], const float* input, float* output) {
+    // y[row] = sum_col W[row,col] * x[col]。无 bias：Qwen 的这些投影没有 bias。
     for (int output_row = 0; output_row < 2; ++output_row) {
         output[output_row] = 0.0f;
         for (int input_column = 0; input_column < kHidden; ++input_column) {
@@ -45,7 +52,7 @@ void self_test() {
     qwen_rmsnorm(input, norm_weight, normalized);
     linear(projection, normalized, output);
 
-    // mean(x^2) = (9 + 16) / 2 = 12.5。
+    // mean(x^2) = (9 + 16) / 2 = 12.5；weight=0 表示 RMSNorm 的缩放恰好是 1。
     const float inverse_rms = 1.0f / std::sqrt(12.5f + kEpsilon);
     assert(close(normalized[0], 3.0f * inverse_rms));
     assert(close(normalized[1], 4.0f * inverse_rms));
@@ -56,6 +63,7 @@ void self_test() {
 }  // namespace lesson01
 
 int main() {
+    // 输出先显示 norm 后的向量，再显示 W @ norm；两者不应混淆成同一个操作。
     lesson01::self_test();
 
     const float input[lesson01::kHidden] = {3.0f, 4.0f};

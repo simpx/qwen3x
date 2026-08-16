@@ -4,6 +4,8 @@
 //   ffn(x) = down_proj( SiLU(gate_proj(x)) * up_proj(x) )
 //   output = x + ffn(x)
 // 本课把两个上投影的结果直接写成 gate/up，先隔离理解非线性和 residual。
+// 真实模型中 gate_proj 和 up_proj 都把 [hidden] 投到更宽的 [intermediate]，
+// down_proj 再投回 [hidden]；这里让三个长度都为 3，只为让公式一眼可见。
 
 #include <cassert>
 #include <cmath>
@@ -26,11 +28,13 @@ float silu(float x) { return x * sigmoid(x); }
 
 // gate 与 up 的逐元素相乘正是 SwiGLU；输出长度保持为 intermediate size。
 void swiglu(const float* gate, const float* up, float* output) {
+    // SiLU(gate[i]) 不是 sigmoid(gate[i])：它额外乘回 gate[i]，保留正负幅度信息。
     for (int i = 0; i < kHidden; ++i) output[i] = silu(gate[i]) * up[i];
 }
 
 void residual_add(float* hidden, const float* branch) {
     // residual 不是拼接，而是同一位置逐元素相加。
+    // 这使每个分支只需要学习对已有 hidden 的修正，也让深层网络保留直通路径。
     for (int i = 0; i < kHidden; ++i) hidden[i] += branch[i];
 }
 
@@ -44,6 +48,7 @@ void self_test() {
     swiglu(gate, up, ffn);
     residual_add(hidden, ffn);
 
+    // gate=0 时 SiLU(0)=0，因此即使 up 非零，这一个 intermediate 通道也关闭。
     assert(close(ffn[0], 0.0f));
     assert(close(ffn[1], silu(1.0f) * 3.0f));
     assert(close(hidden[0], original_hidden[0]));
@@ -53,6 +58,7 @@ void self_test() {
 }  // namespace lesson02
 
 int main() {
+    // 这里打印的是 down_proj 之前的 SwiGLU 分支；真正的 layer 会再线性投回 hidden。
     lesson02::self_test();
 
     const float gate[lesson02::kHidden] = {0.0f, 1.0f, -2.0f};

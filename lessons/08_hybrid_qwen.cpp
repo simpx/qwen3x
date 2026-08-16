@@ -3,6 +3,8 @@
 // lessons 04-07 已分别给出 attention 与 DeltaNet 的数学。本课只把焦点放在
 // “一次 token 如何穿过四层”：三个 DeltaNet layer 的 state 不断更新，第四层
 // 的 attention 则追加 KV cache。真正权重和完整张量维度在 capstone 中出现。
+// 这里的 mixer/ffn 都是故意简化的标量函数；本课的唯一新知识是“每层选择哪类
+// mixer，以及两类 state 为什么必须都放在 generation State 中”。
 
 #include <cassert>
 #include <cstdio>
@@ -14,7 +16,8 @@ constexpr int Layers = 4;
 
 struct State {
     float delta_memory[3] = {};  // 三个 DeltaNet layer 的固定大小 memory。
-    std::vector<float> attention_values;  // 第四层才有、随 context 增长的 KV cache 简化视图。
+    // 第四层才有、随 context 增长的 KV cache 简化视图；真实 cache 同时保存 K 和 V。
+    std::vector<float> attention_values;
 };
 
 float delta_mixer(float input, float* memory) {
@@ -34,14 +37,17 @@ float attention_mixer(float input, std::vector<float>* cache) {
 float ffn(float x) { return 0.1f * x; }  // 本课把已学的 SwiGLU FFN 缩成可读占位。
 
 float forward_token(float token_embedding, State* state) {
+    // generation 时每个 token 都调用一次本函数，并把同一 State 继续传进来。
     float hidden = token_embedding;
     for (int layer = 0; layer < Layers; ++layer) {
-        const float normalized = hidden;  // 省略数值细节；真实路径此处是 RMSNorm。
+        // 每个分支都是 pre-norm：真实路径此处会把 hidden 经过 RMSNorm。
+        const float normalized = hidden;
         float mixer = 0.0f;
         if (layer % 4 != 3) mixer = delta_mixer(normalized, &state->delta_memory[layer]);
         else mixer = attention_mixer(normalized, &state->attention_values);
-        hidden += mixer;          // 第一个 residual。
-        hidden += ffn(hidden);    // post-norm + FFN + 第二个 residual 的结构位置。
+        hidden += mixer;          // 第一个 residual：hidden = hidden + mixer(normalized)。
+        // 真正路径会再次 RMSNorm；这里保留 FFN 位于 mixer residual 之后的顺序。
+        hidden += ffn(hidden);    // 第二个 residual。
     }
     return hidden;
 }
@@ -50,6 +56,7 @@ void self_test() {
     State state;
     const float first = forward_token(1.0f, &state);
     const float second = forward_token(1.0f, &state);
+    // 第二 token 使用了第一 token 留下的两类 state，因此轨迹应与第一 token 不同。
     assert(first > 1.0f && second > first);
     assert(state.attention_values.size() == 2);
 }
@@ -57,6 +64,7 @@ void self_test() {
 }  // namespace lesson08
 
 int main() {
+    // 两次调用明确模拟 prefill/decoding 时“state 跨 token 存活”的事实。
     lesson08::self_test();
     lesson08::State state;
     std::printf("token 0 output: %.6f\n", lesson08::forward_token(1.0f, &state));

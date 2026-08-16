@@ -47,7 +47,7 @@ make lesson-test
 
 ## 最终 capstone
 
-[capstone/qwen38.cpp](capstone/qwen38.cpp) 是 454 行的整合版。它严格固定为
+[capstone/qwen38.cpp](capstone/qwen38.cpp) 是约 520 行的整合版。它严格固定为
 Qwen3.5-0.8B text backbone，采用 BF16 权重、FP32 计算，支持真实 prefill、
 decode、DeltaNet state、KV cache 和 greedy generation。
 

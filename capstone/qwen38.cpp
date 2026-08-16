@@ -4,6 +4,10 @@
 // convert.py 已按本文件读取的顺序排好权重，因此这里从上到下就是一次 token
 // 的真实 Qwen hybrid forward。Qwen3.8-27B 与它有同样的 3 DeltaNet : 1
 // full-attention 栈；差别主要是层数和矩阵尺寸。
+//
+// 建议的阅读顺序：先看常数和 Model，了解权重/状态的 shape；再看 mv、rms、rope
+// 等小算子；随后按 deltanet、attention、mlp 的顺序读三个分支；最后看 forward
+// 和 generate。这样本文件就是一次 token inference 的可执行章节，而非框架源码。
 
 #include <algorithm>
 #include <array>
@@ -25,12 +29,18 @@ namespace qwen38 {
 
 // 这些常数直接来自 Qwen/Qwen3.5-0.8B 的 text_config。不是运行时 Config；
 // 换模型意味着另写一份课程，而不是把本文件演化成通用推理框架。
+// V=词表大小，H=每个 token 的 hidden width，I=FFN intermediate width，N=层数。
 constexpr int V = 248320, H = 1024, I = 3584, N = 24;
+// full attention：AH 个 query head、KVH 个共享 key/value head、每 head AD 通道；
+// 只旋转前 RD 个通道。AH/KVH 是 GQA 的压缩比来源。
 constexpr int AH = 8, KVH = 2, AD = 256, RD = 64;
+// DeltaNet：KH 个小 Q/K head，VH 个 value head；S 的单 head shape 是 [KD,VD]；
+// CK 是 causal depthwise convolution 的 kernel 宽度。
 constexpr int KH = 16, VH = 16, KD = 128, VD = 128, CK = 4;
+// 以下是经常一起出现的平铺宽度。DQKV 的布局固定为 [small_Q | small_K | V]。
 constexpr int AS = AH * AD, KVS = KVH * AD, DQK = KH * KD, DO = VH * VD, DQKV = 2 * DQK + DO;
 constexpr float EPS = 1e-6f, THETA = 10000000.0f;
-using B = uint16_t;  // 一个 BF16 权重元素的原始 bit。
+using B = uint16_t;  // 一个 BF16 权重元素的原始 bit；运算时立即转为 FP32。
 
 [[noreturn]] void die(const char* text) {
     std::fprintf(stderr, "qwen38: %s\n", text);
@@ -38,6 +48,7 @@ using B = uint16_t;  // 一个 BF16 权重元素的原始 bit。
 }
 
 float f32(B value) {
+    // BF16 与 FP32 共用最高 16 bit；左移后按位复制即可得到精确的 FP32 表示。
     uint32_t bits = static_cast<uint32_t>(value) << 16;
     float out;
     std::memcpy(&out, &bits, sizeof(out));
@@ -45,6 +56,7 @@ float f32(B value) {
 }
 
 B bf16(float value) {
+    // 只用于 self-test。真实模型权重由 convert.py 原样复制，不会走这里。
     uint32_t bits;
     std::memcpy(&bits, &value, sizeof(bits));
     const uint32_t bias = 0x7fffu + ((bits >> 16) & 1u);  // round-to-nearest-even
@@ -57,10 +69,12 @@ float sigmoid(float x) {
     return e / (1.0f + e);
 }
 
-float silu(float x) { return x * sigmoid(x); }
+float silu(float x) { return x * sigmoid(x); }  // SwiGLU 与 DeltaNet gate 共用的 SiLU。
 float softplus(float x) { return x > 20.0f ? x : std::log1p(std::exp(x)); }
 
-// convert.py 的文件开头是固定 16 字节，随后每个 tensor 都按 64 字节对齐。
+// convert.py 的文件开头是 [8-byte magic, u32 version, u32 reserved]，随后每个
+// tensor 都按 64 字节对齐。这里没有 tensor name/shape 元数据：本程序和转换器
+// 都固定为同一个模型，Reader 的 take() 顺序就是简化后的格式 schema。
 // mmap 只建立虚拟映射；操作系统按真正访问到的权重页加载。
 struct File {
     int fd = -1;
@@ -91,6 +105,7 @@ struct Reader {
     explicit Reader(const File& file) : begin(file.data), cursor(file.data + 16), end(file.data + file.size) {}
 
     void align() {
+        // 必须在每个 tensor 之前与转换器做相同的向上取整，否则后续所有指针都会错位。
         const size_t offset = static_cast<size_t>(cursor - begin);
         cursor += (64 - offset % 64) % 64;
     }
@@ -98,14 +113,17 @@ struct Reader {
         align();
         const size_t bytes = count * sizeof(T);
         if (cursor > end || bytes > static_cast<size_t>(end - cursor)) die("truncated model.bin");
+        // model.bin 是本机 little-endian、按自然对齐读取的教学格式；不是可移植交换格式。
         const T* result = reinterpret_cast<const T*>(cursor);
         cursor += bytes;
         return result;
     }
 };
 
+// Linear 始终表示没有 bias 的 row-major W[rows,cols]。指针直接指向 mmap 权重页。
 struct Linear { const B* w = nullptr; int rows = 0, cols = 0; };
 struct Delta {
+    // DeltaNet 的四个输入投影、depthwise conv 参数、衰减参数、head norm 和输出投影。
     Linear qkv, z, a, b, out;
     const B* conv = nullptr;
     const float* alog = nullptr;
@@ -113,11 +131,14 @@ struct Delta {
     const float* norm = nullptr;
 };
 struct Attention {
+    // q 同时产出 query 和 attention gate，所以有 2*AS 行；k/v 是 GQA 的小宽度。
     Linear q, k, v, out;
     const B* qnorm = nullptr;
     const B* knorm = nullptr;
 };
 struct Layer {
+    // 每一层共有输入 RMSNorm、mixer 分支、post-mixer RMSNorm 和 MLP；delta/a 只有
+    // 其中一个被填充。bool 的目的只是保持 forward 的 if 一眼可读。
     bool delta = false;
     const B* input_norm = nullptr;
     const B* post_norm = nullptr;
@@ -134,10 +155,13 @@ struct Model {
     std::array<Layer, N> layer {};
 
     explicit Model(const char* path) : file(path), reader(file) {
+        // 以下读取顺序必须逐项匹配 convert.py::expected_tensors()。先读所有层共享的
+        // embedding/final norm，再顺序读第 0..23 层，故不需要 map<string,tensor>。
         embedding = reader.take<B>(static_cast<size_t>(V) * H);
         final_norm = reader.take<B>(H);
         for (int index = 0; index < N; ++index) {
             Layer& l = layer[index];
+            // Qwen3.5 hybrid 的固定 4 层周期：0,1,2 是 DeltaNet，3 是 full attention。
             l.delta = index % 4 != 3;
             l.input_norm = reader.take<B>(H);
             if (l.delta) {
@@ -159,6 +183,7 @@ struct Model {
                 l.a.out = {reader.take<B>(static_cast<size_t>(H) * AS), H, AS};
             }
             l.post_norm = reader.take<B>(H);
+            // 每种 mixer 后面都是同一套 SwiGLU MLP。
             l.gate = {reader.take<B>(static_cast<size_t>(I) * H), I, H};
             l.up = {reader.take<B>(static_cast<size_t>(I) * H), I, H};
             l.down = {reader.take<B>(static_cast<size_t>(H) * I), H, I};
@@ -167,6 +192,7 @@ struct Model {
 };
 
 // 线性层是 row-major W[rows, cols] 与向量 x[cols] 的最直白 GEMV。
+// 这是 CPU correctness reference，不是快速 GEMM：batch=1 时每次只算一个向量。
 void mv(const Linear& w, const float* x, float* y) {
     for (int row = 0; row < w.rows; ++row) {
         float sum = 0.0f;
@@ -178,12 +204,15 @@ void mv(const Linear& w, const float* x, float* y) {
 
 void embed(const B* table, int token, float* out) {
     if (token < 0 || token >= V) die("token outside vocabulary");
+    // embedding table 的 shape 是 [V,H]；token id 唯一决定应复制的那一行。
     const B* row = table + static_cast<size_t>(token) * H;
     for (int i = 0; i < H; ++i) out[i] = f32(row[i]);
 }
 
 // Qwen ordinary RMSNorm 使用 (1 + weight)，而不是常见的直接 weight。
 void rms(const float* x, const B* weight, int n, float* out) {
+    // RMSNorm(x)_i = x_i / RMS(x) * (1 + weight_i)。它逐 token、逐向量工作，
+    // 不跨 position，也不减均值。
     float square = 0.0f;
     for (int i = 0; i < n; ++i) square += x[i] * x[i];
     const float scale = 1.0f / std::sqrt(square / n + EPS);
@@ -191,6 +220,9 @@ void rms(const float* x, const B* weight, int n, float* out) {
 }
 
 void gated_rms(const float* x, const float* weight, const float* z, float* out) {
+    // DeltaNet head 内部专用：readout [VD] 先 RMSNorm，再乘 learned norm.weight 和
+    // SiLU(z)。这里的 weight 是 checkpoint 中的 F32，和 ordinary RMSNorm 的 1+w
+    // 约定不同；不要把两个 norm 函数合并后丢掉这一区别。
     float square = 0.0f;
     for (int i = 0; i < VD; ++i) square += x[i] * x[i];
     const float scale = 1.0f / std::sqrt(square / VD + EPS);
@@ -198,6 +230,7 @@ void gated_rms(const float* x, const float* weight, const float* z, float* out) 
 }
 
 void l2(float* x, int n) {
+    // L2Norm 令 q/k 的 Euclidean norm 接近 1；与 RMSNorm 的分母定义不同。
     float square = 0.0f;
     for (int i = 0; i < n; ++i) square += x[i] * x[i];
     const float scale = 1.0f / std::sqrt(square + EPS);
@@ -205,10 +238,12 @@ void l2(float* x, int n) {
 }
 
 void add(float* x, const float* branch) {
+    // 两个 residual 都是 [H]+[H] 的原地逐元素加法。
     for (int i = 0; i < H; ++i) x[i] += branch[i];
 }
 
-// 对一个 head 的前 64 通道执行 Qwen half-rotation RoPE。
+// 对一个 head 的前 RD=64 通道执行 Qwen half-rotation RoPE。head 的其余 AD-RD
+// 通道保持原样；Q/K 都做相同 position 的旋转，V 永远不旋转。
 void rope(float* x, int position) {
     float old[RD];
     std::memcpy(old, x, sizeof(old));
@@ -222,6 +257,9 @@ void rope(float* x, int position) {
 
 struct State {
     int position = 0;
+    // 对 Delta layer：conv 是 [DQKV,CK-1]，recurrent 是 [VH,KD,VD]；两者固定大小。
+    // 对 attention layer：keys/values 每 token append 一次，逻辑 shape 是
+    // [tokens,KVH,AD]，故随 context 线性增长。非对应的 layer vector 保持为空。
     std::array<std::vector<float>, N> conv, recurrent, keys, values;
     State() {
         for (int layer = 0; layer < N; ++layer) {
@@ -234,6 +272,8 @@ struct State {
 };
 
 struct Work {
+    // 一次 forward 重复使用的临时 FP32 buffer。它们不是跨 token state：下一 token
+    // 可以覆盖；真正需要保留的是上面的 State。logits 是唯一长度 V 的工作区。
     std::vector<float> h = std::vector<float>(H), n = std::vector<float>(H), mix = std::vector<float>(H);
     std::vector<float> gate = std::vector<float>(I), up = std::vector<float>(I), logits = std::vector<float>(V);
     std::vector<float> qkv = std::vector<float>(DQKV), z = std::vector<float>(DO);
@@ -244,6 +284,7 @@ struct Work {
 };
 
 // DeltaNet 卷积是逐通道的 causal depthwise convolution；state 只保存 CK-1 个过去输入。
+// weight 的布局是 [channel, CK]，当前输入乘最后一个权重；history 从最旧到最新。
 void conv_step(float* x, const B* weight, std::vector<float>& history) {
     for (int channel = 0; channel < DQKV; ++channel) {
         float* past = history.data() + static_cast<size_t>(channel) * (CK - 1);
@@ -255,20 +296,25 @@ void conv_step(float* x, const B* weight, std::vector<float>& history) {
     }
 }
 
-// 一个 value head 的四步 Delta rule。S 的布局是 [head][key_dim][value_dim]。
+// 一个 value head 的四步 Delta rule。调用者已经切到某个 head 的 S=[KD,VD]。
+// 这份 state 是 DeltaNet 不需要 KV cache 的原因：context 再长，S 的元素数不变。
 void delta_rule(const float* q, const float* k, const float* v, float log_decay, float beta,
                 float* state, float* out) {
+    // (1) S <- exp(log_decay) S：遗忘旧记忆。log_decay 在模型中被构造成负数。
     const float decay = std::exp(log_decay);
     for (int i = 0; i < KD * VD; ++i) state[i] *= decay;
+    // (2) memory <- k^T S：当前 key 查询“这个位置已记住的 value”。
     float memory[VD] = {};
     for (int value = 0; value < VD; ++value) {
         for (int key = 0; key < KD; ++key) memory[value] += k[key] * state[key * VD + value];
     }
+    // (3) S <- S + k outer [beta * (v-memory)]：只写入预测误差，而非盲目累加 v。
     for (int key = 0; key < KD; ++key) {
         for (int value = 0; value < VD; ++value) {
             state[key * VD + value] += k[key] * beta * (v[value] - memory[value]);
         }
     }
+    // (4) out <- q^T S：更新后立即读取，因此当前 token 能影响自己的输出。
     for (int value = 0; value < VD; ++value) {
         out[value] = 0.0f;
         for (int key = 0; key < KD; ++key) out[value] += q[key] * state[key * VD + value];
@@ -277,12 +323,15 @@ void delta_rule(const float* q, const float* k, const float* v, float log_decay,
 
 void deltanet(const Delta& d, std::vector<float>& conv, std::vector<float>& recurrent,
               const float* input, Work& w, float* out) {
+    // 输入已经过 layer input RMSNorm。四个投影都从同一个 normalized hidden 得到。
     mv(d.qkv, input, w.qkv.data());
     mv(d.z, input, w.z.data());
     mv(d.a, input, w.da.data());
     mv(d.b, input, w.db.data());
+    // 只有拼接 Q/K/V 经过 causal depthwise conv；z、a、b 不经过它。
     conv_step(w.qkv.data(), d.conv, conv);
 
+    // 固定布局拆包，不创建 view 类：small_q[KH,KD]、small_k[KH,KD]、value[VH,VD]。
     const float* small_q = w.qkv.data();
     const float* small_k = small_q + DQK;
     const float* value = small_k + DQK;
@@ -295,12 +344,15 @@ void deltanet(const Delta& d, std::vector<float>& conv, std::vector<float>& recu
         std::memcpy(k, small_k + qk_head * KD, KD * sizeof(float));
         l2(q, KD);
         l2(k, KD);
+        // Q 的额外 1/sqrt(KD) 是此实现的 Delta rule 缩放约定。
         for (int i = 0; i < KD; ++i) q[i] /= std::sqrt(static_cast<float>(KD));
+        // b 经过 sigmoid 得到写入比例 beta in (0,1)；a/A_log/dt_bias 决定衰减速度。
         const float beta = sigmoid(w.db[head]);
         const float log_decay = -std::exp(d.alog[head]) * softplus(w.da[head] + f32(d.dt[head]));
         delta_rule(q, k, value + head * VD, log_decay, beta,
                    recurrent.data() + static_cast<size_t>(head) * KD * VD,
                    w.dout.data() + head * VD);
+        // 每个 value head 的 readout 在各自 VD 段内 norm/gate，之后再拼接为 [DO]。
         gated_rms(w.dout.data() + head * VD, d.norm, w.z.data() + head * VD, w.dout.data() + head * VD);
     }
     mv(d.out, w.dout.data(), out);
@@ -308,26 +360,32 @@ void deltanet(const Delta& d, std::vector<float>& conv, std::vector<float>& recu
 
 void attention(const Attention& a, std::vector<float>& keys, std::vector<float>& values,
                int position, const float* input, Work& w, float* out) {
+    // q_proj 输出 [Q, gate] 两个 [AS] 向量；k/v 分别是 GQA 的 [KVS] 向量。
     mv(a.q, input, w.aqp.data());
     mv(a.k, input, w.ak.data());
     mv(a.v, input, w.av.data());
     for (int head = 0; head < AH; ++head) {
+        // QNorm 和 RoPE 是逐 query head 操作；gate 不 norm、不旋转，留到 attention
+        // readout 后才做 sigmoid 门控。
         std::memcpy(w.aq.data() + head * AD, w.aqp.data() + head * 2 * AD, AD * sizeof(float));
         std::memcpy(w.ag.data() + head * AD, w.aqp.data() + head * 2 * AD + AD, AD * sizeof(float));
         rms(w.aq.data() + head * AD, a.qnorm, AD, w.aq.data() + head * AD);
         rope(w.aq.data() + head * AD, position);
     }
     for (int head = 0; head < KVH; ++head) {
+        // K 与 Q 使用同一 RoPE position；V 不依赖位置，因此不做 RoPE。
         rms(w.ak.data() + head * AD, a.knorm, AD, w.ak.data() + head * AD);
         rope(w.ak.data() + head * AD, position);
     }
+    // 先 append 再读，等价于 causal attention 允许 token t 读取 0..t（包括自己）。
     keys.insert(keys.end(), w.ak.begin(), w.ak.end());
     values.insert(values.end(), w.av.begin(), w.av.end());
     const int tokens = static_cast<int>(keys.size() / KVS);
     const float scale = 1.0f / std::sqrt(static_cast<float>(AD));
-    std::vector<float> score(tokens);
+    std::vector<float> score(tokens);  // 单 head 的 score buffer，逐 head 复用。
 
     for (int head = 0; head < AH; ++head) {
+        // GQA：8 个 Q head 按 4:1 分为两组，每组共享一个 K/V head。
         const int kv_head = head / (AH / KVH);
         float maximum = -std::numeric_limits<float>::infinity();
         for (int token = 0; token < tokens; ++token) {
@@ -337,6 +395,7 @@ void attention(const Attention& a, std::vector<float>& keys, std::vector<float>&
             score[token] = dot * scale;
             maximum = std::max(maximum, score[token]);
         }
+        // stable softmax：同时复用 score 数组存 exp(score-maximum)。
         float total = 0.0f;
         for (float& value : score) { value = std::exp(value - maximum); total += value; }
         float* result = w.ao.data() + head * AD;
@@ -347,41 +406,47 @@ void attention(const Attention& a, std::vector<float>& keys, std::vector<float>&
             for (int i = 0; i < AD; ++i) result[i] += probability * value[i];
         }
     }
+    // Qwen Gated Attention：attention readout 与 q_proj 的另一半 gate 逐元素相乘。
     for (int i = 0; i < AS; ++i) w.ao[i] *= sigmoid(w.ag[i]);
     mv(a.out, w.ao.data(), out);
 }
 
 void mlp(const Layer& l, const float* input, Work& w, float* out) {
+    // SwiGLU：gate/up 各投影到 [I]，逐元素 SiLU(gate)*up，再 down_proj 回 [H]。
     mv(l.gate, input, w.gate.data());
     mv(l.up, input, w.up.data());
     for (int i = 0; i < I; ++i) w.gate[i] = silu(w.gate[i]) * w.up[i];
     mv(l.down, w.gate.data(), out);
 }
 
-// 这就是课程最终应从上读到下的完整 token forward。
+// 这就是课程最终应从上读到下的完整 token forward。调用一次只处理一个 token；
+// prompt 的 prefill 只是对 prompt ids 连续调用它，decode 则在每次 argmax 后再调用。
 void forward(const Model& m, State& s, int token, Work& w) {
     if (s.position >= 2048) die("teaching capstone supports at most 2048 tokens");
-    embed(m.embedding, token, w.h.data());
+    embed(m.embedding, token, w.h.data());  // hidden[H]，本 token 的 layer-0 输入。
     for (int index = 0; index < N; ++index) {
         const Layer& l = m.layer[index];
-        rms(w.h.data(), l.input_norm, H, w.n.data());
+        rms(w.h.data(), l.input_norm, H, w.n.data());  // pre-mixer RMSNorm。
         if (l.delta) deltanet(l.d, s.conv[index], s.recurrent[index], w.n.data(), w, w.mix.data());
         else attention(l.a, s.keys[index], s.values[index], s.position, w.n.data(), w, w.mix.data());
-        add(w.h.data(), w.mix.data());
-        rms(w.h.data(), l.post_norm, H, w.n.data());
+        add(w.h.data(), w.mix.data());                 // 第一个 residual。
+        rms(w.h.data(), l.post_norm, H, w.n.data());   // pre-MLP RMSNorm。
         mlp(l, w.n.data(), w, w.mix.data());
-        add(w.h.data(), w.mix.data());
+        add(w.h.data(), w.mix.data());                 // 第二个 residual，进入下一 layer。
     }
-    rms(w.h.data(), m.final_norm, H, w.n.data());
+    rms(w.h.data(), m.final_norm, H, w.n.data());      // final hidden。
     mv({m.embedding, V, H}, w.n.data(), w.logits.data());  // 0.8B 的 lm_head 与 embedding tied。
     ++s.position;
 }
 
 int argmax(const std::vector<float>& values) {
+    // deterministic greedy sampling；课程以它避免 temperature/random seed 的额外变量。
     return static_cast<int>(std::max_element(values.begin(), values.end()) - values.begin());
 }
 
 std::vector<int> parse_ids(const char* text) {
+    // C++ core 刻意只接受 token ids。tokenizer 是可独立替换的文字外围工具，不应
+    // 遮住本文件的模型计算；格式如 "248044,198,198"。
     std::vector<int> ids;
     const char* cursor = text;
     while (*cursor) {
@@ -401,17 +466,19 @@ void generate(const char* path, const std::vector<int>& prompt, int count, std::
     Model model(path);
     State state;
     Work work;
-    for (int token : prompt) forward(model, state, token, work);  // prefill
+    // prefill 完成后，work.logits 已是“最后一个 prompt token 后的下一个 token”分数。
+    for (int token : prompt) forward(model, state, token, work);
     for (int step = 0; step < count; ++step) {
         const int next = argmax(work.logits);
         // 普通 text EOS 与 chat assistant 回合结束符都不应返回给用户。
         if (next == 248044 || next == 248046) break;
-        result->push_back(next);
+        result->push_back(next);  // 将输出 token 也作为下一次 decode 的输入。
         if (step + 1 < count) forward(model, state, next, work);  // decode
     }
 }
 
 void self_test() {
+    // 这是无需下载模型的微型单元测试；真实权重的端到端回归见 make course-oracle-test。
     assert(std::fabs(f32(bf16(1.25f)) - 1.25f) < 1e-6f);
     const std::vector<float> values = {1.0f, 3.0f, 2.0f};
     assert(argmax(values) == 1);
@@ -435,6 +502,7 @@ int main(int argc, char** argv) {
     using namespace qwen38;
     if (argc == 1 || std::strcmp(argv[1], "--self-test") == 0) { self_test(); return 0; }
     if (std::strcmp(argv[1], "--forward") == 0 && argc == 4) {
+        // --forward 只做 prefill 并报告 next-token；它便于与官方 reference 比数值。
         Model model(argv[2]); State state; Work work;
         for (int token : parse_ids(argv[3])) forward(model, state, token, work);
         const int next = argmax(work.logits);
@@ -442,6 +510,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (std::strcmp(argv[1], "--generate") == 0 && argc == 5) {
+        // --generate 输出 token ids。用官方 tokenizer decode 后才会得到 UTF-8 文本。
         std::vector<int> output;
         generate(argv[2], parse_ids(argv[3]), std::atoi(argv[4]), &output);
         std::printf("generated:");

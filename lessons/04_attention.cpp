@@ -6,6 +6,8 @@
 //   output = sum_t p[t] * v[t]
 // “causal” 在这个最小 decode 版本中很直白：传入的 key/value 列表就是过去
 // 与当前 token，未来 token 从来不会传进来。
+// 在 prompt 的 prefill 中，实际实现可一次计算整个下三角 attention matrix；本课
+// 用逐 token 的 decode 写法表达同一条因果规则，也正是 KV cache 所需的形式。
 
 #include <cassert>
 #include <cmath>
@@ -18,6 +20,7 @@ constexpr int kHeadDim = 2;
 bool close(float left, float right) { return std::fabs(left - right) < 1e-5f; }
 
 float dot(const float* left, const float* right) {
+    // 这是单 head 的 q·k；多 head 的版本只是在每个 head 上独立重复它。
     float sum = 0.0f;
     for (int i = 0; i < kHeadDim; ++i) sum += left[i] * right[i];
     return sum;
@@ -30,6 +33,7 @@ void causal_attention(const float* query, const float (*keys)[kHeadDim],
     float scores[8] = {};  // 教学模型最多演示 8 个历史 token。
     assert(token_count <= 8);
 
+    // 除 sqrt(head_dim) 控制 dot product 的尺度，避免 softmax 随维度变尖。
     const float scale = 1.0f / std::sqrt(static_cast<float>(kHeadDim));
     float maximum = -INFINITY;
     for (int token = 0; token < token_count; ++token) {
@@ -37,7 +41,8 @@ void causal_attention(const float* query, const float (*keys)[kHeadDim],
         if (scores[token] > maximum) maximum = scores[token];
     }
 
-    // 减去最大值是稳定 softmax 的标准写法。
+    // 减去最大值是稳定 softmax 的标准写法：exp(score-maximum) 不会溢出，
+    // 且归一化后概率完全不变。
     float denominator = 0.0f;
     for (int token = 0; token < token_count; ++token) {
         scores[token] = std::exp(scores[token] - maximum);
@@ -46,7 +51,7 @@ void causal_attention(const float* query, const float (*keys)[kHeadDim],
 
     for (int dimension = 0; dimension < kHeadDim; ++dimension) output[dimension] = 0.0f;
     for (int token = 0; token < token_count; ++token) {
-        const float probability = scores[token] / denominator;
+        const float probability = scores[token] / denominator;  // 所有 token 概率和为 1。
         for (int dimension = 0; dimension < kHeadDim; ++dimension) {
             output[dimension] += probability * values[token][dimension];
         }
@@ -71,6 +76,7 @@ void self_test() {
 }  // namespace lesson04
 
 int main() {
+    // 输出是对 value 的加权平均，而不是对 key 或 score 的输出。
     lesson04::self_test();
 
     const float query[lesson04::kHeadDim] = {1.0f, 0.0f};

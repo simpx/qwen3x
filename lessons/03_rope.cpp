@@ -4,6 +4,8 @@
 // attention 的 Q 与 K 上做 RoPE，把 position 变成二维平面的旋转角度。
 // 本课只处理一个 head 的 4 个通道，且使用 Qwen 的 half-rotation 布局：
 // [x0, x1, x2, x3] 中 (x0,x2) 与 (x1,x3) 分别组成两个旋转平面。
+// RoPE 不额外把 position 加到 hidden 上；它改写 Q/K，使 dot(q_p, k_t) 天然依赖
+// 相对位置 p-t。只有 attention 层的 Q/K 使用 RoPE；DeltaNet 层不走这条路径。
 
 #include <cassert>
 #include <cmath>
@@ -21,6 +23,7 @@ bool close(float left, float right) { return std::fabs(left - right) < 1e-5f; }
 void make_rope_frequencies(int position, float* cosine, float* sine) {
     constexpr int half = kRotaryDim / 2;
     for (int i = 0; i < half; ++i) {
+        // 第 i 个二维平面的角频率是 theta^(-2i/rotary_dim)。低 i 转得快，高 i 转得慢。
         const float inverse_frequency = 1.0f / std::pow(kRopeTheta, 2.0f * i / kRotaryDim);
         const float angle = position * inverse_frequency;
         // Qwen 的 half-rotation 需要把同一频率复制到前、后两个半区。
@@ -31,6 +34,7 @@ void make_rope_frequencies(int position, float* cosine, float* sine) {
 
 void apply_rope(float* vector, const float* cosine, const float* sine) {
     constexpr int half = kRotaryDim / 2;
+    // 原地旋转会覆盖同一对的另一个输入，因此先备份 rotary 部分。
     float original[kRotaryDim] = {};
     for (int i = 0; i < kRotaryDim; ++i) original[i] = vector[i];
 
@@ -49,6 +53,7 @@ void self_test() {
     for (int i = 0; i < kHeadDim; ++i) assert(close(identity[i], static_cast<float>(i + 1)));
 
     // 手工给出 cos=0、sin=1，相当于每个二维平面旋转 90 度。
+    // 这比比较一串 sin/cos 近似数更直接地验证旋转的符号和 half-rotation 配对。
     float quarter_turn[kHeadDim] = {1.0f, 2.0f, 3.0f, 4.0f};
     const float cosine[kRotaryDim] = {0.0f, 0.0f, 0.0f, 0.0f};
     const float sine[kRotaryDim] = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -62,6 +67,7 @@ void self_test() {
 }  // namespace lesson03
 
 int main() {
+    // position=1 的结果会是浮点近似；position=0 在 self_test 中已经验证为恒等变换。
     lesson03::self_test();
 
     float vector[lesson03::kHeadDim] = {1.0f, 2.0f, 3.0f, 4.0f};
