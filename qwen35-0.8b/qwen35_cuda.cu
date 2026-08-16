@@ -15,7 +15,6 @@
 
 namespace qwen35 {
 
-constexpr int MAX_TOKENS = 2048;
 constexpr int THREADS = 256;
 
 [[noreturn]] void cuda_die(const char* where, const char* detail) {
@@ -458,7 +457,7 @@ void mlp_cuda(const Layer& layer, const float* input, CudaWork& w, float* out) {
 }
 
 void forward_cuda(const DeviceModel& model, CudaState& state, int token, CudaWork& work) {
-    if (state.position >= MAX_TOKENS) cuda_die("forward", "maximum context is 2048 tokens");
+    if (state.position >= MAX_TOKENS) cuda_die("forward", "maximum context is 4096 tokens");
     k_embed<<<(H + THREADS - 1) / THREADS, THREADS>>>(model.embedding, token, work.h);
     for (int index = 0; index < N; ++index) {
         const Layer& layer = model.layer[index];

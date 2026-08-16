@@ -3,7 +3,7 @@
 qwen35.cpp 是课程后的真实权重整合答案，目前少于 1000 行。它不是通用 runtime：
 
 - 固定 Qwen3.5-0.8B 的 24 层 text backbone；
-- CPU、batch 1、贪婪生成、最多 2048 token；
+- CPU、batch 1、贪婪生成、最多 4096 token；
 - BF16 权重即时转 FP32，DeltaNet recurrent state 与 KV cache 都保留 FP32；
 - 同时识别 Qwen text EOS 与 chat template 的 assistant 回合结束 token；
 - 忽略视觉 encoder、MTP、量化、Metal、通用 safetensors 兼容和 CUDA 性能优化。
@@ -81,6 +81,31 @@ make mmlu-eval MODEL=../models/Qwen3.5-0.8B WEIGHTS=out/qwen35-0.8b.bin \
 后者为四个候选答案计算 log-likelihood。本项目选择生成一个答案字母，是为了不把通用
 evaluation framework 或额外 runtime 塞进教学 C++；因此这个 score 只适合同一 prompt 和
 同一 subject/limit 的横向比较，不能直接与公开 leaderboard 比较。
+
+### 对照官方报告：MMLU-Pro
+
+Qwen 的 [Qwen3.5-0.8B 模型卡](https://huggingface.co/Qwen/Qwen3.5-0.8B/blob/main/README.md)
+报告 non-thinking 的 **MMLU-Pro 为 29.7%**。`eval_mmlu_pro.py` 采用
+[MMLU-Pro 官方 runner](https://github.com/TIGER-AI-Lab/MMLU-Pro) 的 5-shot CoT prompt、
+greedy decode 与答案抽取规则，作为 C++ engine 的端到端质量检查：
+
+~~~
+pip install duckdb huggingface_hub transformers
+make mmlu-pro-eval MODEL=../models/Qwen3.5-0.8B WEIGHTS=out/qwen35-0.8b.bin LIMIT=20
+~~~
+
+它会从官方 12,032 道 test 题中用固定 seed 抽题，并自动下载固定 revision 的 parquet。
+这不是官方分数的完整复现：教学 engine 的 context 上限也为 4096，但它没有 tokenizer-aware
+的 `Question:` stop，故为避免在答案后继续无意义 decode，默认只生成 512 token（并报告未能抽取
+答案的次数）；官方 runner 的 `max_new_tokens` 是 2048。同时本项目的 direct-GEMV CUDA 不应为
+全量 benchmark 运行数小时。
+输出应只被解读为「这份小样本是否大致落在官方 29.7% 附近」；20 题样本的 1-sigma 抽样误差约为
+10 个百分点，不能据此宣布精确对齐。要扩大样本可改 `LIMIT`，但它仍不替代官方完整运行。
+
+本机固定 `LIMIT=20`、`seed=12345` 的一次实际运行得到 **4/20 = 20.0%**，其中 6 次没有
+抽取到最终答案格式。它比 29.7% 低 9.7 个百分点，但这小于该样本约 10.2 个百分点的标准误，
+所以结果与官方分数**统计上不矛盾**，却也不足以声称数值复现。这个诚实的限制正是保留
+`invalid responses` 和不把抽样分数写成 leaderboard 成绩的原因。
 
 CPU reference 的目标是 correctness，不适合完整 100 题跑分。可先在少量固定题上确认其与
 CUDA 输出一致：

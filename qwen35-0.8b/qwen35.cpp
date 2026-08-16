@@ -39,6 +39,9 @@ constexpr int AH = 8, KVH = 2, AD = 256, RD = 64;
 constexpr int KH = 16, VH = 16, KD = 128, VD = 128, CK = 4;
 // 以下是经常一起出现的平铺宽度。DQKV 的布局固定为 [small_Q | small_K | V]。
 constexpr int AS = AH * AD, KVS = KVH * AD, DQK = KH * KD, DO = VH * VD, DQKV = 2 * DQK + DO;
+// checkpoint 实际支持 262,144 positions；课程只为避免误用而给 cache 一个明确上限。
+// 4096 也恰好能容纳 MMLU-Pro 官方 runner 的 context window，仍远小于模型的能力边界。
+constexpr int MAX_TOKENS = 4096;
 constexpr float EPS = 1e-6f, THETA = 10000000.0f;
 using B = uint16_t;  // 一个 BF16 权重元素的原始 bit；运算时立即转为 FP32。
 
@@ -422,7 +425,7 @@ void mlp(const Layer& l, const float* input, Work& w, float* out) {
 // 这就是课程最终应从上读到下的完整 token forward。调用一次只处理一个 token；
 // prompt 的 prefill 只是对 prompt ids 连续调用它，decode 则在每次 argmax 后再调用。
 void forward(const Model& m, State& s, int token, Work& w) {
-    if (s.position >= 2048) die("teaching capstone supports at most 2048 tokens");
+    if (s.position >= MAX_TOKENS) die("teaching capstone supports at most 4096 tokens");
     embed(m.embedding, token, w.h.data());  // hidden[H]，本 token 的 layer-0 输入。
     for (int index = 0; index < N; ++index) {
         const Layer& l = m.layer[index];

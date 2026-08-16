@@ -2,7 +2,7 @@
 
 CUDA_ARCH ?= 89
 
-.PHONY: all test oracle-test official-oracle mmlu-eval cuda cuda-test cuda-oracle-test clean
+.PHONY: all test oracle-test official-oracle mmlu-eval mmlu-pro-eval cuda cuda-test cuda-oracle-test clean
 
 all: qwen35
 
@@ -26,6 +26,13 @@ official-oracle: qwen35 qwen35_cuda
 mmlu-eval: qwen35_cuda
 	@test -n "$(MODEL)" -a -n "$(WEIGHTS)" || (echo "usage: make mmlu-eval MODEL=/path/to/Qwen3.5-0.8B WEIGHTS=out/qwen35-0.8b.bin [SUBJECT=abstract_algebra] [LIMIT=20]" >&2; exit 2)
 	python3 eval_mmlu.py "$(MODEL)" "$(WEIGHTS)" --subject "$(or $(SUBJECT),abstract_algebra)" $(if $(LIMIT),--limit "$(LIMIT)")
+
+# 对照 Qwen 模型卡：复用官方 MMLU-Pro 的 5-shot CoT prompt 和答案抽取。
+# 教学引擎的 2048 context 小于官方 runner 的 4096，且默认只抽样 20 题；因此这是
+# 可复现的合理性检查，不是冒充官方的 12,032 题 leaderboard 复现。
+mmlu-pro-eval: qwen35_cuda
+	@test -n "$(MODEL)" -a -n "$(WEIGHTS)" || (echo "usage: make mmlu-pro-eval MODEL=/path/to/Qwen3.5-0.8B WEIGHTS=out/qwen35-0.8b.bin [LIMIT=20]" >&2; exit 2)
+	python3 eval_mmlu_pro.py "$(MODEL)" "$(WEIGHTS)" $(if $(LIMIT),--limit "$(LIMIT)")
 
 # 可选 GPU 路径。默认 sm_89 对应当前 RTX 4080 SUPER；其他 NVIDIA GPU 可覆盖：
 # make cuda CUDA_ARCH=120
