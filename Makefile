@@ -2,7 +2,15 @@ CXX ?= c++
 CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic
 NVCC ?= nvcc
 
-.PHONY: test tiny-test dev-test oracle-test tokenizer-test tiny-cuda-test cuda-dev-test clean
+.PHONY: test tiny-test dev-test oracle-test tokenizer-test tiny-cuda-test cuda-dev-test lesson-test clean
+
+LESSON_BINS := lessons/00_toy_logits lessons/01_rmsnorm_linear lessons/02_swiglu_residual lessons/03_rope lessons/04_attention lessons/05_gqa_kv_cache lessons/06_deltanet_recurrence
+
+lessons/%: lessons/%.cpp
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+lesson-test: $(LESSON_BINS)
+	@for lesson in $(LESSON_BINS); do echo "== $$lesson =="; ./$$lesson; done
 
 qwen38: qwen38.cpp
 	$(CXX) $(CXXFLAGS) qwen38.cpp -o $@
@@ -49,4 +57,4 @@ cuda-dev-test: qwen38_08b_cuda
 	./qwen38_08b_cuda --cuda-compare "$(MODEL)" 248044,198,198
 
 clean:
-	rm -f qwen38 qwen38_tiny qwen38_tiny_cuda qwen38_08b qwen38_08b_cuda
+	rm -f qwen38 qwen38_tiny qwen38_tiny_cuda qwen38_08b qwen38_08b_cuda $(LESSON_BINS)

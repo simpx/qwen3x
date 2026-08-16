@@ -7,9 +7,29 @@ framework. The core forward remains direct, fixed-model C++ that can be read
 top-to-bottom: embedding → norm → DeltaNet or attention → residual → MLP →
 logits.
 
-Current focus: text-only, batch 1, one process, one device, correctness first.
+## Teaching rebuild: active
+
+This repository is now being rebuilt as a progressive C++ inference course.
+The active reading path is [lessons/](lessons/README.md): every source file
+adds exactly one concept, runs with hand-checkable toy weights, and has its own
+self-test. The intended final chapter is one text-only CPU implementation
+under 1000 lines that runs the fixed official Qwen3.5-0.8B text backbone—a
+small model with the same Qwen3.8-style 3 DeltaNet : 1 attention hybrid
+pattern.
+
+The existing root-level implementation is preserved as the prototype-v0 git
+tag. It remains a useful correctness reference, but it is deliberately not
+the first file a learner should read.
+
+Current teaching scope: text-only, batch 1, one process, CPU reference first.
 There is no training, quantization, server, continuous batching, tensor
 abstraction, generic model loader, or distributed execution.
+
+Run the completed lessons:
+
+~~~
+make lesson-test
+~~~
 
 不想直接啃两千行 C++ 时，打开本地的
 [`docs/qwen38-reading-guide.html`](docs/qwen38-reading-guide.html)：它按真实
