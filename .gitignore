@@ -9,6 +9,7 @@
 /lessons/07_deltanet_layer
 /lessons/08_hybrid_qwen
 /qwen35-0.8b/qwen35
+/qwen35-0.8b/qwen35_cuda
 /qwen35-0.8b/out/
 __pycache__/
 *.pyc

@@ -83,7 +83,7 @@ token。
 ## 明确不做
 
 - 通用 Hugging Face 模型、GGUF 或量化格式
-- CUDA、Metal、BLAS 性能优化
+- CUDA、Metal、BLAS 性能优化（0.8B 目录提供单独的 CUDA correctness backend）
 - vision、MTP、多模态、训练或 LoRA
 - continuous batching、服务、并行与分布式
 - Tensor/Operator/Backend 抽象框架
