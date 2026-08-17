@@ -447,6 +447,31 @@ struct CudaState {
             }
         }
     }
+    void copy_from(const CudaState& source) {
+        // MMLU-Pro 的同一 category 共享完整 five-shot prefix。这里从一个已经 prefill 的
+        // base state 克隆到工作 state：只复制 prefix 已写入的 KV rows，DeltaNet state 则固定
+        // 大小。所有 copy 都是 GPU->GPU，因此不把 cache 拉回 host。
+        position = source.position;
+        const size_t kv_bytes = static_cast<size_t>(position) * KVS * sizeof(float);
+        for (int layer = 0; layer < N; ++layer) {
+            if (layer % 4 != 3) {
+                // 同一 default stream 上的 async D2D copy 会排在随后 suffix prefill 的所有
+                // kernels 之前；相比同步 cudaMemcpy，不必为每层的两小块 recurrent state
+                // 往返 WSL driver 一次。正确性仍由 stream 顺序保证。
+                cuda_ok(cudaMemcpyAsync(conv[layer], source.conv[layer],
+                                        static_cast<size_t>(DQKV) * (CK - 1) * sizeof(float),
+                                        cudaMemcpyDeviceToDevice), "clone DeltaNet convolution");
+                cuda_ok(cudaMemcpyAsync(recurrent[layer], source.recurrent[layer],
+                                        static_cast<size_t>(VH) * KD * VD * sizeof(float),
+                                        cudaMemcpyDeviceToDevice), "clone DeltaNet recurrent state");
+            } else if (kv_bytes) {
+                cuda_ok(cudaMemcpyAsync(keys[layer], source.keys[layer], kv_bytes, cudaMemcpyDeviceToDevice),
+                        "clone attention keys");
+                cuda_ok(cudaMemcpyAsync(values[layer], source.values[layer], kv_bytes, cudaMemcpyDeviceToDevice),
+                        "clone attention values");
+            }
+        }
+    }
 };
 
 struct CudaWork {
@@ -573,16 +598,38 @@ void forward_cuda(const DeviceModel& model, CudaState& state, int token, CudaWor
     ++state.position;
 }
 
-void generate_cuda(const DeviceModel& model, CudaState& state, CudaWork& work,
-                   const std::vector<int>& prompt, int count, std::vector<int>* result) {
-    state.reset();
+bool ends_with(const std::vector<int>& tokens, const std::vector<int>& suffix) {
+    return tokens.size() >= suffix.size() &&
+           std::equal(suffix.rbegin(), suffix.rend(), tokens.rbegin());
+}
+
+void prefill_cuda(const DeviceModel& model, CudaState& state, CudaWork& work,
+                  const std::vector<int>& prompt) {
     for (int token : prompt) forward_cuda(model, state, token, work);
+}
+
+void decode_cuda(const DeviceModel& model, CudaState& state, CudaWork& work, int count,
+                 const std::vector<std::vector<int>>& stop_sequences, std::vector<int>* result) {
     for (int step = 0; step < count; ++step) {
         const DeviceTop next = argmax_cuda(work);
         if (next.token == 248044 || next.token == 248046) break;
         result->push_back(next.token);
+        for (const std::vector<int>& stop : stop_sequences) {
+            if (ends_with(*result, stop)) {
+                // vLLM 的 stop string 默认不计入 completion；移走对应 ids 后立即返回。
+                result->resize(result->size() - stop.size());
+                return;
+            }
+        }
         if (step + 1 < count) forward_cuda(model, state, next.token, work);
     }
+}
+
+void generate_cuda(const DeviceModel& model, CudaState& state, CudaWork& work,
+                   const std::vector<int>& prompt, int count, std::vector<int>* result) {
+    state.reset();
+    prefill_cuda(model, state, work, prompt);
+    decode_cuda(model, state, work, count, {}, result);
 }
 
 void generate_cuda(const char* path, const std::vector<int>& prompt, int count, std::vector<int>* result) {
@@ -593,14 +640,63 @@ void generate_cuda(const char* path, const std::vector<int>& prompt, int count, 
 }
 
 void serve_cuda(const char* path) {
-    // 评测时唯一值得持久化的东西是模型、GPU work buffers 和 cache allocation；每个请求
-    // 仍独立 reset state。stdin 协议刻意只有一行：`new_tokens<TAB>id,id,...`。
+    // 评测时唯一值得持久化的东西是模型、GPU work buffers 和 cache allocation。旧协议为
+    // `new_tokens<TAB>id,id,...`；MMLU-Pro 还使用两条 model-specific 命令：
+    // `cache<TAB>prefix_ids`，以及 `generate<TAB>new_tokens<TAB>stop;ids<TAB>suffix_ids`。
+    // 后者从 cache clone state 后再 prefill suffix，因此同一学科的 five-shot prefix 只算一次。
     DeviceModel model(path);
+    CudaState base;
     CudaState state;
     CudaWork work;
+    bool base_ready = false;
     std::string line;
     while (std::getline(std::cin, line)) {
         if (line == "quit") return;
+        if (line.rfind("cache\t", 0) == 0) {
+            base.reset();
+            prefill_cuda(model, base, work, parse_ids(line.c_str() + 6));
+            base_ready = true;
+            std::printf("ready\n");
+            std::fflush(stdout);
+            continue;
+        }
+        if (line.rfind("generate\t", 0) == 0) {
+            const size_t first = line.find('\t');
+            const size_t second = line.find('\t', first + 1);
+            const size_t third = second == std::string::npos ? std::string::npos : line.find('\t', second + 1);
+            if (!base_ready || second == std::string::npos || third == std::string::npos) {
+                std::printf("error: cache first, then generate<TAB>new_tokens<TAB>stop;ids<TAB>suffix_ids\n");
+                std::fflush(stdout);
+                continue;
+            }
+            const int count = std::atoi(line.substr(first + 1, second - first - 1).c_str());
+            if (count <= 0) {
+                std::printf("error: new_tokens must be positive\n");
+                std::fflush(stdout);
+                continue;
+            }
+            std::vector<std::vector<int>> stops;
+            const std::string stop_text = line.substr(second + 1, third - second - 1);
+            if (stop_text != "-") {
+                size_t begin = 0;
+                while (begin < stop_text.size()) {
+                    const size_t end = stop_text.find(';', begin);
+                    const std::string one = stop_text.substr(begin, end - begin);
+                    if (!one.empty()) stops.push_back(parse_ids(one.c_str()));
+                    if (end == std::string::npos) break;
+                    begin = end + 1;
+                }
+            }
+            state.copy_from(base);
+            prefill_cuda(model, state, work, parse_ids(line.c_str() + third + 1));
+            std::vector<int> output;
+            decode_cuda(model, state, work, count, stops, &output);
+            std::printf("generated:");
+            for (int token : output) std::printf(" %d", token);
+            std::putchar('\n');
+            std::fflush(stdout);
+            continue;
+        }
         const size_t tab = line.find('\t');
         if (tab == std::string::npos) {
             std::printf("error: expected new_tokens<TAB>id,id,...\n");

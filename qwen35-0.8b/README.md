@@ -71,9 +71,28 @@ make mmlu-eval MODEL=../models/Qwen3.5-0.8B WEIGHTS=../models/qwen35-0.8b.bin \
   SUBJECT=abstract_algebra
 
 make mmlu-pro-eval MODEL=../models/Qwen3.5-0.8B WEIGHTS=../models/qwen35-0.8b.bin LIMIT=20
+
+# 真实生成并计分 3,610/12,032 (30.003%) 道题；RTX 4080 16 GiB 用 5 个常驻 worker。
+# 这是短输入 coverage run，不是可以同官方 29.7% 比较的 MMLU-Pro leaderboard run。
+make mmlu-pro-fast-coverage MODEL=../models/Qwen3.5-0.8B WEIGHTS=../models/qwen35-0.8b.bin
 ~~~
 
 MMLU-Pro 的 Qwen model-card non-thinking 参考值为 29.7%。当前脚本复用官方 runner 风格的
 5-shot CoT prompt 和答案抽取，但仍是固定抽样而非 leaderboard 复现：官方跑完整 12,032 题，
 并具有更复杂的 textual stop/batching。这里的目标是让性能版本能作为实际、可重复的 GPU
 runner，同时不把这些 serving 功能带回第 09 课。
+
+### 一小时端到端 coverage
+
+完整官方风格 MMLU-Pro 有 12,032 题、five-shot CoT 和很长的生成；这个 batch=1、单 GPU
+教学性能路径不应把它伪装成一个高吞吐 serving engine。`mmlu-pro-fast-coverage` 是另一条明确
+命名的质量回归：它用 Qwen 的 text chat framing 关闭 thinking，要求只生成 A--J 的一个选择，
+并按每个 category 的原始比例选最短的 3,610 个 prompts。题目、选项、模型 forward、greedy
+generation 和答案计分都是真的；没有 logits 对比或 mock。但是短输入选择及不同 prompt 会使
+准确率有偏，因此它**不能**与 Qwen model card 的 29.7% 作比较。
+
+在本机 RTX 4080 16 GiB 上，5 个 worker 约占 14.1 GiB 显存；100 题短输入基准为 57.1 秒。
+完整命令实际完成了 3,610/12,032（30.003%）题，用时 3,568.1 秒，得分为 845/3,610（23.4%，
+0 个格式无效）。因此这个一小时 coverage 上限已真实验证；脚本的
+`--time-limit-seconds=3600` 仍会在题目边界停止，若机器被别的程序占用，它会报告实际完成的题数，
+而不会假称完成 30%。

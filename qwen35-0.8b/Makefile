@@ -7,7 +7,7 @@ CPU_REFERENCE = ../lessons/09_qwen35_0_8b
 # Linux 上该目录不存在，后面的原 LD_LIBRARY_PATH / 默认搜索路径仍照常工作。
 CUDA_RUN ?= LD_LIBRARY_PATH=/usr/lib/wsl/lib:$$LD_LIBRARY_PATH
 
-.PHONY: all cuda-test cuda-oracle official-oracle mmlu-eval mmlu-pro-eval clean
+.PHONY: all cuda-test cuda-oracle official-oracle mmlu-eval mmlu-pro-eval mmlu-pro-fast-coverage clean
 
 all: qwen35_cuda
 
@@ -37,6 +37,12 @@ mmlu-eval: qwen35_cuda
 mmlu-pro-eval: qwen35_cuda
 	@test -n "$(MODEL)" -a -n "$(WEIGHTS)" || (echo "usage: make mmlu-pro-eval MODEL=/path/to/Qwen3.5-0.8B WEIGHTS=/path/to/qwen35-0.8b.bin [LIMIT=20]" >&2; exit 2)
 	$(CUDA_RUN) python3 eval_mmlu_pro.py "$(MODEL)" "$(WEIGHTS)" $(if $(LIMIT),--limit "$(LIMIT)")
+
+# 一小时的端到端 coverage run：3,610 / 12,032 = 30.003%。它刻意选每个 category 中较短的
+# prompt，以让 batch=1 的教学模型能在这台 16 GiB 卡上完成；score 不是官方 MMLU-Pro 分数。
+mmlu-pro-fast-coverage: qwen35_cuda
+	@test -n "$(MODEL)" -a -n "$(WEIGHTS)" || (echo "usage: make mmlu-pro-fast-coverage MODEL=/path/to/Qwen3.5-0.8B WEIGHTS=/path/to/qwen35-0.8b.bin [LIMIT=3610] [WORKERS=5] [SECONDS=3600]" >&2; exit 2)
+	$(CUDA_RUN) python3 -u eval_mmlu_pro.py "$(MODEL)" "$(WEIGHTS)" --fast-answer-only --shortest-per-category --limit "$(or $(LIMIT),3610)" --workers "$(or $(WORKERS),5)" --time-limit-seconds "$(or $(SECONDS),3600)"
 
 clean:
 	rm -f qwen35_cuda
