@@ -49,31 +49,33 @@ make test
 | 06 | Gated DeltaNet recurrent state |
 | 07 | 完整 toy DeltaNet layer |
 | 08 | 3 DeltaNet : 1 attention hybrid stack |
+| 09 | 真实 Qwen3.5-0.8B：权重加载、完整 forward、prefill 和 decode |
 
-`lessons/` 只放这些可手算的教学文件、它们的 bin 和 Makefile。真实 0.8B 的
-权重程序另放在同级 [qwen35-0.8b](qwen35-0.8b/README.md)。
+`lessons/` 是完整的 CPU 教学路径：第 00--08 课使用可手算 toy dimensions，第 09 课把同一
+顺序直接扩大为真实 0.8B 权重。CUDA 不放进 lesson，避免读到模型数学时被 GPU runtime、库句柄
+和性能细节打断。
 
 ## 真实 0.8B
 
-[qwen35-0.8b/qwen35.cpp](qwen35-0.8b/qwen35.cpp) 是约 520 行的整合版。它严格固定为
+[lessons/09_qwen35_0_8b.cpp](lessons/09_qwen35_0_8b.cpp) 是约 520 行的整合版。它严格固定为
 Qwen3.5-0.8B text backbone，采用 BF16 权重、FP32 计算，支持真实 prefill、
 decode、DeltaNet state、KV cache 和 greedy generation。
 
 ~~~
-cd qwen35-0.8b
+cd lessons
 make
-python3 pack_weights.py ../models/Qwen3.5-0.8B out/qwen35-0.8b.bin
-./qwen35 --generate out/qwen35-0.8b.bin 248044,198,198 16
+python3 09_pack_weights.py ../models/Qwen3.5-0.8B ../models/qwen35-0.8b.bin
+./09_qwen35_0_8b --generate ../models/qwen35-0.8b.bin 248044,198,198 16
 ~~~
 
 详细模型格式和 regression 请看
-[qwen35-0.8b/README.md](qwen35-0.8b/README.md)。
+[lessons/README.md](lessons/README.md)。
 
 有本地官方 checkpoint 时：
 
 ~~~
-cd qwen35-0.8b
-make oracle-test MODEL=../models/Qwen3.5-0.8B
+cd lessons
+make model-test MODEL=../models/Qwen3.5-0.8B
 ~~~
 
 该测试会临时转换权重，对照已固定的官方权重结果：三 token prompt 的
@@ -83,14 +85,13 @@ token。
 ## 明确不做
 
 - 通用 Hugging Face 模型、GGUF 或量化格式
-- CUDA、Metal、BLAS 性能优化（0.8B 目录提供单独的 CUDA correctness backend）
+- Metal、通用 Tensor/Operator/Backend 抽象框架
 - vision、MTP、多模态、训练或 LoRA
 - continuous batching、服务、并行与分布式
-- Tensor/Operator/Backend 抽象框架
 
-这些不是缺失功能，而是为了让核心 inference 可读而做的范围控制。未来真正的
-C++ 性能引擎会另开仓库；它可以从这里已验证的数学与测试开始，但不受一千行
-限制。
+这些不是缺失功能，而是为了让 CPU core 可读而做的范围控制。同级
+[qwen35-0.8b](qwen35-0.8b/README.md) 是单独的 CUDA 性能实验：它复用第 09 课已经验证的
+固定模型与权重格式，但可以使用 cuBLAS 和持久 GPU worker；它不属于课程代码行数限制。
 
 旧 prototype 已保留在远端 git tag prototype-v0；它不在当前教学仓库的
 工作树中。

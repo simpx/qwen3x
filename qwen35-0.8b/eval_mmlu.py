@@ -3,7 +3,7 @@
 
 这是最终回答质量的评测，而不是 test_official.py 那种数值 oracle：每道题都经官方
 tokenizer/chat template 变成 prompt，C++ executable 贪婪生成一个 A/B/C/D，脚本与标准
-答案比较，最后报告 accuracy。它可用于 qwen35（CPU）或 qwen35_cuda（CUDA）。
+答案比较，最后报告 accuracy。它使用本目录的 qwen35_cuda（CUDA）性能 binary。
 
 为保持这个教学项目的边界清楚，这不是 lm-eval-harness 的标准 MMLU 分数。标准协议为
 每个候选答案计算 log-likelihood；本程序故意用用户实际会看到的“生成一个选项字母”方式，
@@ -17,12 +17,12 @@ tokenizer/chat template 变成 prompt，C++ executable 贪婪生成一个 A/B/C/
     python3 eval_mmlu.py ../models/Qwen3.5-0.8B out/qwen35-0.8b.bin \
         --subject abstract_algebra
 
-CPU reference 很慢，适合先做小样本 smoke score：
-    python3 eval_mmlu.py ../models/Qwen3.5-0.8B out/qwen35-0.8b.bin \
-        --engine ./qwen35 --subject abstract_algebra --limit 5
+评测会以 `qwen35_cuda --serve` 启动一个常驻 worker：权重只上传一次，而不是每题都重新
+启动进程和上传 1.5 GiB checkpoint。
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -45,7 +45,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--limit", type=int,
                         help="evaluate only the first N test examples (useful for slow CPU smoke tests)")
     parser.add_argument("--engine", default=str(Path(__file__).with_name("qwen35_cuda")),
-                        help="qwen35_cuda by default; pass ./qwen35 for the CPU reference")
+                        help="persistent-worker CUDA executable (qwen35_cuda by default)")
     parser.add_argument("--max-new-tokens", type=int, default=4,
                         help="answer budget; four tokens is enough for `A` / `The answer is A`")
     parser.add_argument("--show", action="store_true", help="print every question's prediction")
@@ -70,22 +70,46 @@ def question_text(example: dict) -> str:
     )
 
 
-def generate(tokenizer, engine: str, weights: Path, text: str, max_new_tokens: int) -> str:
+class CudaWorker:
+    """评测进程唯一的性能外壳；C++ 协议仍只传递 token ids。"""
+
+    def __init__(self, engine: str, weights: Path):
+        env = os.environ.copy()
+        wsl_driver_dir = "/usr/lib/wsl/lib"
+        if Path(wsl_driver_dir, "libcuda.so.1").exists():
+            env["LD_LIBRARY_PATH"] = wsl_driver_dir + ":" + env.get("LD_LIBRARY_PATH", "")
+        self.process = subprocess.Popen(
+            [engine, "--serve", str(weights)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            text=True, bufsize=1, env=env,
+        )
+
+    def generate(self, ids: list[int], count: int) -> list[int]:
+        assert self.process.stdin is not None and self.process.stdout is not None
+        self.process.stdin.write(f"{count}\t{','.join(map(str, ids))}\n")
+        self.process.stdin.flush()
+        line = self.process.stdout.readline().strip()
+        if not line.startswith("generated:"):
+            raise RuntimeError(f"CUDA worker failed: {line!r}")
+        return [int(word) for word in line[len("generated:"):].split()]
+
+    def close(self) -> None:
+        if self.process.stdin:
+            self.process.stdin.write("quit\n")
+            self.process.stdin.flush()
+            self.process.stdin.close()
+        if self.process.wait(timeout=10):
+            raise RuntimeError("CUDA worker exited with an error")
+
+
+def generate(tokenizer, worker: CudaWorker, text: str, max_new_tokens: int) -> str:
     # MMLU is text-only; its official Qwen chat prompt deliberately remains outside the C++ model.
     ids = tokenizer.apply_chat_template(
         [{"role": "user", "content": text}], tokenize=True,
         add_generation_prompt=True, return_dict=False
     )
-    if len(ids) + max_new_tokens > 2048:
-        raise RuntimeError("MMLU prompt exceeds the teaching engine's 2048-token limit")
-    completed = subprocess.run(
-        [engine, "--generate", str(weights), ",".join(map(str, ids)), str(max_new_tokens)],
-        check=True, text=True, capture_output=True,
-    )
-    line = completed.stdout.strip()
-    if not line.startswith("generated:"):
-        raise RuntimeError(f"unexpected engine output: {line!r}")
-    output_ids = [int(word) for word in line[len("generated:"):].split()]
+    if len(ids) + max_new_tokens > 4096:
+        raise RuntimeError("MMLU prompt exceeds the CUDA engine's 4096-token limit")
+    output_ids = worker.generate(ids, max_new_tokens)
     return tokenizer.decode(output_ids, skip_special_tokens=True,
                             clean_up_tokenization_spaces=False).strip()
 
@@ -106,21 +130,24 @@ def main() -> None:
     correct = 0
     invalid = 0
     total = len(dataset)
-    print(f"MMLU {args.subject}: {total} questions, engine={args.engine}")
-    for index, example in enumerate(dataset, 1):
-        output = generate(tokenizer, args.engine, args.weights,
-                          question_text(example), args.max_new_tokens)
-        prediction = parse_choice(output)
-        expected = LABELS[int(example["answer"])]
-        if prediction is None:
-            invalid += 1
-        elif prediction == expected:
-            correct += 1
-        if args.show:
-            shown = prediction or "<invalid>"
-            print(f"{index:3}/{total}: predicted={shown} expected={expected} text={output!r}")
-        elif index % 10 == 0 or index == total:
-            print(f"{index:3}/{total}: running accuracy = {correct / index:.1%}")
+    print(f"MMLU {args.subject}: {total} questions, persistent CUDA worker={args.engine}")
+    worker = CudaWorker(args.engine, args.weights)
+    try:
+        for index, example in enumerate(dataset, 1):
+            output = generate(tokenizer, worker, question_text(example), args.max_new_tokens)
+            prediction = parse_choice(output)
+            expected = LABELS[int(example["answer"])]
+            if prediction is None:
+                invalid += 1
+            elif prediction == expected:
+                correct += 1
+            if args.show:
+                shown = prediction or "<invalid>"
+                print(f"{index:3}/{total}: predicted={shown} expected={expected} text={output!r}")
+            elif index % 10 == 0 or index == total:
+                print(f"{index:3}/{total}: running accuracy = {correct / index:.1%}")
+    finally:
+        worker.close()
 
     accuracy = correct / total if total else 0.0
     print()

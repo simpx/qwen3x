@@ -1,8 +1,8 @@
 # 课程目录是自包含的：进入 lessons/ 后运行 `make`，逐课得到 00 到 08 的 bin。
 
-.PHONY: all test clean
+.PHONY: all test model-test clean
 
-all: 00_toy_logits 01_rmsnorm_linear 02_swiglu_residual 03_rope 04_attention 05_gqa_kv_cache 06_deltanet_recurrence 07_deltanet_layer 08_hybrid_qwen
+all: 00_toy_logits 01_rmsnorm_linear 02_swiglu_residual 03_rope 04_attention 05_gqa_kv_cache 06_deltanet_recurrence 07_deltanet_layer 08_hybrid_qwen 09_qwen35_0_8b
 
 00_toy_logits: 00_toy_logits.cpp
 	c++ -O3 -std=c++17 -Wall -Wextra -Wpedantic 00_toy_logits.cpp -o 00_toy_logits
@@ -31,8 +31,17 @@ all: 00_toy_logits 01_rmsnorm_linear 02_swiglu_residual 03_rope 04_attention 05_
 08_hybrid_qwen: 08_hybrid_qwen.cpp
 	c++ -O3 -std=c++17 -Wall -Wextra -Wpedantic 08_hybrid_qwen.cpp -o 08_hybrid_qwen
 
+# 第 09 课不再是 toy：它 mmap 经过 09_pack_weights.py 转换的真实 Qwen3.5-0.8B 权重。
+# 它仍是纯 CPU、单文件、可从上读到下的 reference，不需要 CUDA。
+09_qwen35_0_8b: 09_qwen35_0_8b.cpp
+	c++ -O3 -std=c++17 -Wall -Wextra -Wpedantic 09_qwen35_0_8b.cpp -o 09_qwen35_0_8b
+
 test: all
-	@for lesson in 00_toy_logits 01_rmsnorm_linear 02_swiglu_residual 03_rope 04_attention 05_gqa_kv_cache 06_deltanet_recurrence 07_deltanet_layer 08_hybrid_qwen; do ./$$lesson; done
+	@for lesson in 00_toy_logits 01_rmsnorm_linear 02_swiglu_residual 03_rope 04_attention 05_gqa_kv_cache 06_deltanet_recurrence 07_deltanet_layer 08_hybrid_qwen 09_qwen35_0_8b; do ./$$lesson; done
+
+model-test: 09_qwen35_0_8b
+	@test -n "$(MODEL)" || (echo "usage: make model-test MODEL=/path/to/Qwen3.5-0.8B" >&2; exit 2)
+	./09_test.sh "$(MODEL)"
 
 clean:
-	rm -f 00_toy_logits 01_rmsnorm_linear 02_swiglu_residual 03_rope 04_attention 05_gqa_kv_cache 06_deltanet_recurrence 07_deltanet_layer 08_hybrid_qwen
+	rm -f 00_toy_logits 01_rmsnorm_linear 02_swiglu_residual 03_rope 04_attention 05_gqa_kv_cache 06_deltanet_recurrence 07_deltanet_layer 08_hybrid_qwen 09_qwen35_0_8b

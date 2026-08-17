@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""将 CPU/CUDA 教学实现与官方 Qwen3.5 FP32 forward 做端到端数值对照。
+"""将第 09 课 CPU 与 Tensor-Core CUDA 路径同官方 Qwen3.5 FP32 forward 做对照。
 
 这不是聊天质量评测，也不是“两个有相同 bug 的 executable 互相比较”。它的黄金
 reference 是官方 checkpoint 加上 Hugging Face Transformers 的 Qwen3_5ForCausalLM：
 
     官方 tokenizer/chat template -> token ids -> 官方 FP32 model
                                       |              |
-                                      +-> qwen35     +-> full logits / greedy ids
+                                      +-> lesson CPU +-> full logits / greedy ids
                                       +-> qwen35_cuda
 
 脚本刻意使用 FP32 官方 forward。BF16 official inference 的每层 linear 都会再次舍入，
-会让最终 logit 与本项目“BF16 weights + FP32 activation”的教学语义相差约 0.15；这不
-应被误报为 C++ 误差。官方模型也逐 token、携带 cache 运行，因此 prefill 与 decode 的
-执行顺序和 qwen35.cpp 完全一致。
+会让最终 logit 与第 09 课“BF16 weights + FP32 activation”的语义相差很小。CUDA 性能版
+为了 Tensor Cores 还会把每个 linear 的输入舍入为 BF16，因此它有单独、更宽的 logit 阈值；
+两者都必须与官方保持同一条 greedy decode。官方模型也逐 token、携带 cache 运行，因此
+prefill 与 decode 的执行顺序和第 09 课的 CPU reference 完全一致。
 
 需要开发期依赖（绝非 C++ runtime dependency）：
     pip install 'transformers>=5.0' torch
@@ -35,7 +36,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 VOCAB_SIZE = 248320
-STOP_TOKENS = {248044, 248046}  # 与 qwen35.cpp::generate() 保持同一个 text/chat 停止规则。
+STOP_TOKENS = {248044, 248046}  # 与第 09 课的 generate() 保持同一个 text/chat 停止规则。
 # 选择一条固定的普通 text chat，而非手写 token ids：这也覆盖官方 tokenizer/template。
 MESSAGES = [{"role": "user", "content": "用一句话介绍 DeltaNet。"}]
 
@@ -45,12 +46,13 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("checkpoint", type=Path, help="official Qwen3.5-0.8B checkpoint directory")
     parser.add_argument("--weights", type=Path,
                         help="optional qwen35 packed weights; omit to create a temporary one")
-    parser.add_argument("--cpu-engine", default="./qwen35")
+    parser.add_argument("--cpu-engine", default="../lessons/09_qwen35_0_8b")
     parser.add_argument("--cuda-engine", default="./qwen35_cuda")
     parser.add_argument("--max-new-tokens", type=int, default=8)
-    # The threshold is intentionally much tighter than a BF16 comparison. It applies to every
-    # one of 248,320 logits, so an argmax-only regression cannot hide a large distribution drift.
-    parser.add_argument("--max-abs-error", type=float, default=1e-4)
+    # CPU 的阈值极紧，覆盖全部 248,320 logits；性能 CUDA 的 BF16 inputs 允许更大误差，
+    # 但仍要求同一条 greedy token 序列。
+    parser.add_argument("--cpu-max-abs-error", type=float, default=1e-4)
+    parser.add_argument("--cuda-max-abs-error", type=float, default=0.1)
     args = parser.parse_args()
     if args.max_new_tokens <= 0:
         parser.error("--max-new-tokens must be positive")
@@ -129,7 +131,7 @@ def compare_logits(name: str, official: np.ndarray, actual: np.ndarray, limit: f
 def make_temporary_weights(checkpoint: Path, directory: Path) -> Path:
     """Use the normal tiny packer so the oracle tests the same model-loading path users run."""
     weights = directory / "qwen35-0.8b.bin"
-    packer = Path(__file__).with_name("pack_weights.py")
+    packer = Path(__file__).parent.parent / "lessons" / "09_pack_weights.py"
     subprocess.run([sys.executable, str(packer), str(checkpoint), str(weights)], check=True)
     return weights
 
@@ -157,9 +159,10 @@ def run(args: argparse.Namespace, weights: Path) -> bool:
     print("official greedy:", " ".join(map(str, reference_tokens)) or "<stop>")
 
     passed = True
-    for name, engine in (("CPU", args.cpu_engine), ("CUDA", args.cuda_engine)):
+    for name, engine, limit in (("CPU", args.cpu_engine, args.cpu_max_abs_error),
+                                ("CUDA", args.cuda_engine, args.cuda_max_abs_error)):
         actual = command_logits(engine, weights, prompt_ids)
-        passed = compare_logits(name, reference, actual, args.max_abs_error) and passed
+        passed = compare_logits(name, reference, actual, limit) and passed
         generated = command_generate(engine, weights, prompt_ids, args.max_new_tokens)
         print(f"{name:5} greedy:", " ".join(map(str, generated)) or "<stop>")
         if generated != reference_tokens:
@@ -167,7 +170,7 @@ def run(args: argparse.Namespace, weights: Path) -> bool:
             passed = False
 
     if passed:
-        print("official oracle: passed (official FP32 == CPU == CUDA)")
+        print("official oracle: passed (CPU FP32-activation reference; CUDA BF16 Tensor Core path)")
     return passed
 
 

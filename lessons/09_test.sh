@@ -16,9 +16,9 @@ model_dir=$1
 course_bin=$(mktemp /tmp/qwen35-course-08b.XXXXXX.bin)
 trap 'rm -f "$course_bin" "$course_bin.tmp"' EXIT
 
-# pack_weights.py 做 dtype/shape 检查后按 qwen35.cpp 的读取顺序写出小格式权重。
-python3 pack_weights.py "$model_dir" "$course_bin" >/dev/null
-course_forward=$(./qwen35 --forward "$course_bin" 248044,198,198)
+# 09_pack_weights.py 做 dtype/shape 检查后按第 09 课的读取顺序写出小格式权重。
+python3 09_pack_weights.py "$model_dir" "$course_bin" >/dev/null
+course_forward=$(./09_qwen35_0_8b --forward "$course_bin" 248044,198,198)
 
 python3 - "$course_forward" <<'PY'
 import re
@@ -36,7 +36,7 @@ if abs(float(match.group(2)) - 17.2760) > 1e-3:
 PY
 
 # 再验证 state 跨八次 decode 持续更新；仅比较 greedy token id，避免 tokenizer 变体。
-course_generate=$(./qwen35 --generate "$course_bin" 248044,198,198 8)
+course_generate=$(./09_qwen35_0_8b --generate "$course_bin" 248044,198,198 8)
 expected_generate="generated: 198 198 198 198 198 198 198 198"
 if [[ "$course_generate" != "$expected_generate" ]]; then
     echo "course:   $course_generate" >&2

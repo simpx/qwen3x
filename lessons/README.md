@@ -8,8 +8,8 @@
 1. 不依赖 CUDA、PyTorch 或 Tensor framework；
 2. 不继承上一课的隐藏库；少量重复是故意的，读者可以只打开当前文件；
 3. 运行时先用玩具维度和手写权重，确保结果可以手算；
-4. 完成课程后再进入同级 `../qwen35-0.8b/`，验证同一套计算能跑真实
-   Qwen3.8-style hybrid 架构。
+4. 第 09 课直接运行真实 Qwen3.5-0.8B 权重；它是全课程唯一不使用 toy dimensions 的
+   CPU reference implementation。
 
 ## 课程地图
 
@@ -24,10 +24,11 @@
 | 06 | 06_deltanet_recurrence.cpp | Gated DeltaNet 的固定 recurrent state | 已完成 |
 | 07 | 07_deltanet_layer.cpp | Q/K/V 投影、causal conv、门控、DeltaNet layer | 已完成 |
 | 08 | 08_hybrid_qwen.cpp | 3 DeltaNet : 1 attention 的 Qwen hybrid stack | 已完成 |
+| 09 | 09_qwen35_0_8b.cpp | 固定 Qwen3.5-0.8B 的完整 text forward / prefill / decode | 已完成 |
 
-课程文件的总行数不会限制在 1000 行，因为每课为了自包含会重复少量代码；
-限制的是同级 [qwen35-0.8b/qwen35.cpp](../qwen35-0.8b/qwen35.cpp)。否则会为了
-“少几行”而把关键细节藏进帮助函数，反而失去教学价值。
+课程文件的总行数不会限制在 1000 行，因为每课为了自包含会重复少量代码；限制的是
+[09_qwen35_0_8b.cpp](09_qwen35_0_8b.cpp)。否则会为了“少几行”而把关键细节藏进帮助函数，
+反而失去教学价值。
 
 ## 运行
 
@@ -46,11 +47,21 @@ c++ -O2 -std=c++17 00_toy_logits.cpp -o 00_toy_logits
 ./00_toy_logits
 ~~~
 
-## 完成课程后
+## 第 09 课：真实 0.8B
 
-真实官方 0.8B 的固定权重程序、转换器与回归脚本都在同级
-[qwen35-0.8b](../qwen35-0.8b/README.md)。它刻意不混在本目录：这里始终只保留
-可手算、可逐步阅读的 lesson。
+真实权重的格式转换、CPU regression 和最小 chat wrapper 也属于第 09 课：
+
+~~~
+cd lessons
+make
+python3 09_pack_weights.py ../models/Qwen3.5-0.8B ../models/qwen35-0.8b.bin
+./09_qwen35_0_8b --generate ../models/qwen35-0.8b.bin 248044,198,198 16
+make model-test MODEL=../models/Qwen3.5-0.8B
+~~~
+
+`09_chat.py` 只在 Python 侧调用官方 tokenizer/chat template；`09_qwen35_0_8b.cpp`
+依旧只接收 token ids。CUDA 不在课程中：需要实际 GPU 性能时，才进入同级
+[qwen35-0.8b](../qwen35-0.8b/README.md)。
 
 ## 与旧 prototype 的关系
 

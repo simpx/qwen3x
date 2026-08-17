@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """一个刻意放在 C++ core 外面的最小 chat frontend。
 
-qwen35 / qwen35_cuda 只做一件事：token id -> next token id。这里才做两项文字
+09_qwen35_0_8b 只做一件事：token id -> next token id。这里才做两项文字
 外围工作：让官方 tokenizer 套用官方 chat template，以及把生成的 ids 解码为 UTF-8。
-因此读 qwen35.cpp 时，不必先理解 Jinja template、Unicode 或 Python subprocess。
+因此读 09_qwen35_0_8b.cpp 时，不必先理解 Jinja template、Unicode 或 Python subprocess。
 
 这是教学用的逐回合 frontend：每次对话都会把完整 history 再喂给 executable，
 所以 C++ 程序无需为 server、流式输出或跨进程 state 增添复杂度。
@@ -33,10 +33,10 @@ def generate(tokenizer, messages, engine: str, weights: str, max_new_tokens: int
     prompt_ids = tokenizer.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=True, return_dict=False
     )
-    if len(prompt_ids) + max_new_tokens > 2048:
+    if len(prompt_ids) + max_new_tokens > 4096:
         raise RuntimeError(
             f"prompt ({len(prompt_ids)}) + generation ({max_new_tokens}) exceeds "
-            "the teaching engine's 2048-token limit"
+            "the teaching engine's 4096-token limit"
         )
     if show_ids:
         print("prompt ids:", ",".join(map(str, prompt_ids)), file=sys.stderr)
@@ -60,15 +60,13 @@ def add_arguments() -> argparse.Namespace:
     parser.add_argument("--model", required=True,
                         help="official Qwen3.5-0.8B checkpoint directory (tokenizer only)")
     parser.add_argument("--weights", required=True,
-                        help="qwen35 binary weights created by pack_weights.py")
+                        help="binary weights created by 09_pack_weights.py")
     parser.add_argument("--prompt", help="one user turn; prints one answer and exits")
     parser.add_argument("--interactive", action="store_true",
                         help="read multiple user turns; /exit leaves the chat")
     parser.add_argument("--system", help="optional system message")
     parser.add_argument("--max-new-tokens", type=int, default=128)
-    parser.add_argument("--engine", help="path to qwen35 or qwen35_cuda")
-    parser.add_argument("--cuda", action="store_true",
-                        help="shortcut for --engine ./qwen35_cuda")
+    parser.add_argument("--engine", help="optional token-id engine; defaults to the CPU lesson binary")
     parser.add_argument("--show-ids", action="store_true",
                         help="also print the token ids crossing the Python/C++ boundary")
     args = parser.parse_args()
@@ -76,16 +74,14 @@ def add_arguments() -> argparse.Namespace:
         parser.error("pass exactly one of --prompt or --interactive")
     if args.max_new_tokens <= 0:
         parser.error("--max-new-tokens must be positive")
-    if args.engine and args.cuda:
-        parser.error("use either --engine or --cuda, not both")
     return args
 
 
 def main() -> None:
     args = add_arguments()
     # 默认 binary 相对本脚本定位，而非相对 shell 当前目录；README 里的 `cd` 只是让
-    # 命令更短，用户从仓库根目录执行 `python qwen35-0.8b/chat.py ...` 也应当可用。
-    default_engine = Path(__file__).with_name("qwen35_cuda" if args.cuda else "qwen35")
+    # 命令更短，用户从仓库根目录执行 `python lessons/09_chat.py ...` 也应当可用。
+    default_engine = Path(__file__).with_name("09_qwen35_0_8b")
     engine = args.engine or str(default_engine)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 

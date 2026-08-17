@@ -1,161 +1,79 @@
-# 真实 Qwen3.5-0.8B text inference
+# Qwen3.5-0.8B CUDA performance path
 
-qwen35.cpp 是课程后的真实权重整合答案，目前少于 1000 行。它不是通用 runtime：
+这里不是第二套教学实现。模型结构、权重格式和可逐行阅读的 CPU forward 都在
+[`../lessons/09_qwen35_0_8b.cpp`](../lessons/09_qwen35_0_8b.cpp)。本目录只回答另一个问题：
+同一个固定 Qwen3.5-0.8B，在 NVIDIA GPU 上怎样避免明显的工程浪费。
 
-- 固定 Qwen3.5-0.8B 的 24 层 text backbone；
-- CPU、batch 1、贪婪生成、最多 4096 token；
-- BF16 权重即时转 FP32，DeltaNet recurrent state 与 KV cache 都保留 FP32；
-- 同时识别 Qwen text EOS 与 chat template 的 assistant 回合结束 token；
-- 忽略视觉 encoder、MTP、量化、Metal、通用 safetensors 兼容和 CUDA 性能优化。
+它仍然不是通用 runtime：只支持这个模型、text、batch=1、单 GPU 和 greedy decoding；没有
+Tensor class、operator registry 或模型分发器。不同点是性能必要项可以出现：
 
-这个 0.8B 模型与 Qwen3.8-27B 共享 Qwen3.5 hybrid text 架构：每四层中前三层
-是 Gated DeltaNet，第四层是 Gated Attention。尺寸、层数和 embedding/lm_head
-tied 策略不同，但 forward 的概念和顺序相同。
+- 所有重 linear `W*x` 使用 cuBLAS Tensor Cores；weight 与 linear 输入是 BF16，累加、
+  branch 和 recurrent state 是 FP32；
+- logits argmax 留在 GPU，正常 decode 不再每 token 下载完整 vocabulary；
+- `--serve` 将模型、GPU 权重和 work buffers 常驻，评测的每道题只 reset cache/state，
+  不再重新启动进程、上传 checkpoint。
 
-## 运行 token-id 版本
-
-先下载官方 Qwen3.5-0.8B checkpoint 到仓库根目录的
-`models/Qwen3.5-0.8B`；随后进入本目录并转换：
+## 编译
 
 ~~~
 cd qwen35-0.8b
+make                     # nvcc + cuBLAS，默认 sm_89；可用 CUDA_ARCH 覆盖
+make cuda-test
+~~~
+
+在某些 WSL 安装里，系统残留的旧 `libcuda.so` 会盖过 Windows driver；Make targets 会在
+启动前把 `/usr/lib/wsl/lib` 放进 `LD_LIBRARY_PATH`。直接运行 binary 时也使用同样前缀：
+
+~~~
+LD_LIBRARY_PATH=/usr/lib/wsl/lib:$LD_LIBRARY_PATH ./qwen35_cuda --self-test
+~~~
+
+CPU 教学版与权重 packer 在 `../lessons/`：
+
+~~~
+cd ../lessons
 make
-python3 pack_weights.py ../models/Qwen3.5-0.8B out/qwen35-0.8b.bin
-./qwen35 --forward out/qwen35-0.8b.bin 248044,198,198
-./qwen35 --generate out/qwen35-0.8b.bin 248044,198,198 16
+python3 09_pack_weights.py ../models/Qwen3.5-0.8B ../models/qwen35-0.8b.bin
 ~~~
 
-转换器逐 tensor 拷贝原始 safetensors 字节，所以不需要 PyTorch、NumPy 或
-safetensors Python 包。它的输出约 1.4 GiB：只包含 language model 所需的
-320 个 text tensors，不包含视觉和 MTP tensors。
-
-有本地官方 checkpoint 时，可运行以下 regression；它会临时转换权重，并检查
-一个已固定的官方权重 forward logit 和八个 greedy token：
+回到本目录运行 GPU：
 
 ~~~
-make oracle-test MODEL=../models/Qwen3.5-0.8B
+./qwen35_cuda --forward ../models/qwen35-0.8b.bin 248044,198,198
+./qwen35_cuda --generate ../models/qwen35-0.8b.bin 248044,198,198 16
 ~~~
 
-本课程的 C++ 只接受和输出 token id。文本 tokenizer 是独立外围工具：可用
-官方 Python tokenizer、Transformers 或任意兼容工具把 text 编码为这些 id，
-再将生成 id 解码回来；它不进入本仓库的 C++ build。
+## 正确性先于性能
 
-### 最强回归：官方 FP32 end-to-end oracle
-
-`oracle-test` 使用固定值防止日常重构回归；`official-oracle` 则是更强的开发期测试。
-它将一条真实 text chat 用 checkpoint 自带的官方 tokenizer/template 编码，并以相同的
-token ids 分别运行官方 Transformers FP32 model、`qwen35` 与 `qwen35_cuda`。它检查：
-
-- 全部 248,320 个 prefill logits 的 max/mean absolute error 与 argmax；
-- 八步 greedy decode token，因而覆盖 attention KV cache 和 DeltaNet recurrent state；
-- CPU 与 CUDA 都直接对官方 reference，而不只是彼此相同。
-
-Qwen3.5 支持需要较新的 Transformers；这个只用于开发期 oracle，不是 C++ runtime 依赖：
+每次改 kernel 或 cuBLAS 调用，都先对照第 09 课和官方 checkpoint：
 
 ~~~
-pip install 'transformers>=5.0' torch
-make official-oracle MODEL=../models/Qwen3.5-0.8B
+make cuda-oracle MODEL=../models/Qwen3.5-0.8B
 
-# 已有权重包时可跳过临时 pack：
-make official-oracle MODEL=../models/Qwen3.5-0.8B WEIGHTS=out/qwen35-0.8b.bin
+# 需要 Transformers >= 5、torch 和 CUDA；比较完整 vocabulary logits 与 greedy ids。
+make official-oracle MODEL=../models/Qwen3.5-0.8B WEIGHTS=../models/qwen35-0.8b.bin
 ~~~
 
-测试有意让官方模型以 FP32 运行。本项目的语义是“BF16 权重 + FP32 activation/state”；
-默认要求全词表 max absolute error 不超过 `1e-4`。若把官方 model 以 BF16 运行，每一层
-matmul 的舍入会放大为明显的最终 logit 差异，不能
-当作这个 CPU/CUDA reference implementation 的数值黄金值。
+第一项是快速的 pinned regression；第二项以官方 `Qwen3_5ForCausalLM` FP32 forward 为黄金值。
+高性能路径比第 09 课多了每个 linear 输入的 BF16 舍入；因此 CPU 的全词表阈值为 `1e-4`，CUDA
+为 `0.1`，但两者都必须保持官方的 greedy tokens。这是明确的性能精度边界，而不是把 GPU
+近似结果伪装成 FP32-activation 数值黄金值。
 
-### 最终回答质量：生成式 MMLU score
+## 持久 worker 与评测
 
-数值 oracle 证明实现没有偏离官方；[eval_mmlu.py](eval_mmlu.py) 则让模型实际回答
-公开 MMLU 选择题，并按标准答案计算 accuracy。它使用官方 tokenizer/chat template，要求
-模型只生成 `A` / `B` / `C` / `D`，默认跑一个完整的 100 题 subject：
+`--serve` 的 stdin 每一行是 `new_tokens<TAB>id,id,...`，输出一行 `generated: ...`。它不是
+HTTP server，只是给本目录的 Python evaluator 使用的极小进程协议。`eval_mmlu.py` 和
+`eval_mmlu_pro.py` 会自动使用它，因此权重只上传一次：
 
 ~~~
-pip install transformers datasets
-make mmlu-eval MODEL=../models/Qwen3.5-0.8B WEIGHTS=out/qwen35-0.8b.bin \
+pip install transformers datasets duckdb huggingface_hub
+make mmlu-eval MODEL=../models/Qwen3.5-0.8B WEIGHTS=../models/qwen35-0.8b.bin \
   SUBJECT=abstract_algebra
+
+make mmlu-pro-eval MODEL=../models/Qwen3.5-0.8B WEIGHTS=../models/qwen35-0.8b.bin LIMIT=20
 ~~~
 
-这是 **zero-shot generative MMLU accuracy**，不是 lm-eval-harness 的官方 MMLU protocol：
-后者为四个候选答案计算 log-likelihood。本项目选择生成一个答案字母，是为了不把通用
-evaluation framework 或额外 runtime 塞进教学 C++；因此这个 score 只适合同一 prompt 和
-同一 subject/limit 的横向比较，不能直接与公开 leaderboard 比较。
-
-### 对照官方报告：MMLU-Pro
-
-Qwen 的 [Qwen3.5-0.8B 模型卡](https://huggingface.co/Qwen/Qwen3.5-0.8B/blob/main/README.md)
-报告 non-thinking 的 **MMLU-Pro 为 29.7%**。`eval_mmlu_pro.py` 采用
-[MMLU-Pro 官方 runner](https://github.com/TIGER-AI-Lab/MMLU-Pro) 的 5-shot CoT prompt、
-greedy decode 与答案抽取规则，作为 C++ engine 的端到端质量检查：
-
-~~~
-pip install duckdb huggingface_hub transformers
-make mmlu-pro-eval MODEL=../models/Qwen3.5-0.8B WEIGHTS=out/qwen35-0.8b.bin LIMIT=20
-~~~
-
-它会从官方 12,032 道 test 题中用固定 seed 抽题，并自动下载固定 revision 的 parquet。
-这不是官方分数的完整复现：教学 engine 的 context 上限也为 4096，但它没有 tokenizer-aware
-的 `Question:` stop，故为避免在答案后继续无意义 decode，默认只生成 512 token（并报告未能抽取
-答案的次数）；官方 runner 的 `max_new_tokens` 是 2048。同时本项目的 direct-GEMV CUDA 不应为
-全量 benchmark 运行数小时。
-输出应只被解读为「这份小样本是否大致落在官方 29.7% 附近」；20 题样本的 1-sigma 抽样误差约为
-10 个百分点，不能据此宣布精确对齐。要扩大样本可改 `LIMIT`，但它仍不替代官方完整运行。
-
-本机固定 `LIMIT=20`、`seed=12345` 的一次实际运行得到 **4/20 = 20.0%**，其中 6 次没有
-抽取到最终答案格式。它比 29.7% 低 9.7 个百分点，但这小于该样本约 10.2 个百分点的标准误，
-所以结果与官方分数**统计上不矛盾**，却也不足以声称数值复现。这个诚实的限制正是保留
-`invalid responses` 和不把抽样分数写成 leaderboard 成绩的原因。
-
-CPU reference 的目标是 correctness，不适合完整 100 题跑分。可先在少量固定题上确认其与
-CUDA 输出一致：
-
-~~~
-python3 eval_mmlu.py ../models/Qwen3.5-0.8B out/qwen35-0.8b.bin \
-  --engine ./qwen35 --subject abstract_algebra --limit 5
-~~~
-
-## Chat：官方 tokenizer 留在 Python
-
-`chat.py` 是不到 130 行的外围 wrapper，不属于 C++ inference core。它读取官方
-checkpoint 的 tokenizer 和 chat template，调用 C++ binary，最后 decode 输出 ids：
-
-~~~
-# 第一次只需安装文字外围依赖；它不是 C++ runtime dependency。
-pip install transformers
-
-# 先创建一次 C++ 可 mmap 的权重包。
-python3 pack_weights.py ../models/Qwen3.5-0.8B out/qwen35-0.8b.bin
-
-# 单轮 chat（默认 CPU）。
-python3 chat.py --model ../models/Qwen3.5-0.8B \
-  --weights out/qwen35-0.8b.bin --prompt "用一句话介绍 DeltaNet。"
-
-# 同一套 tokenizer/chat template，换成 CUDA executable。
-python3 chat.py --cuda --model ../models/Qwen3.5-0.8B \
-  --weights out/qwen35-0.8b.bin --prompt "用一句话介绍 DeltaNet。"
-
-# 多轮演示；为保持 C++ 课程可读性，每回合会重新 prefill 完整 history。
-python3 chat.py --cuda --interactive --model ../models/Qwen3.5-0.8B \
-  --weights out/qwen35-0.8b.bin
-~~~
-
-传 `--show-ids` 可以看到 Python/C++ 边界上的 prompt 和 output token ids。这样 chat
-template、Unicode、history 都在 Python，而 `qwen35.cpp` 和 `qwen35_cuda.cu` 继续只做
-模型 forward。
-
-## 可选 CUDA backend
-
-CPU `qwen35.cpp` 永远是直接、可读的 correctness reference。CUDA 不修改它，
-而是作为平行的 `qwen35_cuda.cu` 编译为另一个 binary：权重、hidden、KV cache 与
-DeltaNet recurrent state 都常驻 GPU；矩阵向量乘和模型专属小算子直接在 CUDA 上执行。
-
-~~~
-make cuda                 # 当前 RTX 4080 SUPER 默认使用 sm_89
-make cuda-test            # 不读取 checkpoint，只确认 GPU runtime 可用
-make cuda-oracle-test MODEL=../models/Qwen3.5-0.8B
-~~~
-
-最后一个命令会在相同官方权重上比较 CPU 与 CUDA 的 prefill next-token/logit，并比较
-八步 greedy decode。不同 reduction 顺序会带来极小 FP32 logit 差异，当前容差为 `1e-3`。
-其他 GPU 可以覆盖 arch，例如 `make cuda CUDA_ARCH=120`。
+MMLU-Pro 的 Qwen model-card non-thinking 参考值为 29.7%。当前脚本复用官方 runner 风格的
+5-shot CoT prompt 和答案抽取，但仍是固定抽样而非 leaderboard 复现：官方跑完整 12,032 题，
+并具有更复杂的 textual stop/batching。这里的目标是让性能版本能作为实际、可重复的 GPU
+runner，同时不把这些 serving 功能带回第 09 课。

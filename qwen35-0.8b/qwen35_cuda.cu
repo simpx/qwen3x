@@ -1,16 +1,17 @@
-// qwen35_cuda.cu -- qwen35.cpp 的可选 CUDA backend。
+// qwen35_cuda.cu -- Qwen3.5-0.8B 的 CUDA performance backend。
 //
-// CPU 文件仍是唯一的数学 reference。本文件故意不设计 Backend class：它直接复用
-// qwen35.cpp 的 Model loader/weight structs，然后把同一批固定权重和 state 放到 GPU。
-// 这版以直接 GEMV kernel 保持 BF16 weight / FP32 activation 的 reference 语义；其余
-// 小而模型特定的算子也在下面以直接 kernel 写出。
+// CPU 数学 reference 已是课程的 ../lessons/09_qwen35_0_8b.cpp。本文件直接复用它的
+// 固定 loader/weight structs，却把权重和 state 留在 GPU。没有 Backend class：性能路径
+// 也只服务这一种模型、这一种 batch=1 token forward。
 
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
+#include <iostream>
 
 // 复用 CPU 的文件格式、权重 structs、parse_ids/argmax 和数学 self-test。把原 main
 // 改名即可避免两个入口；CUDA 的真正 forward 在本文件下半部分。
 #define main qwen35_cpu_reference_main
-#include "qwen35.cpp"
+#include "../lessons/09_qwen35_0_8b.cpp"
 #undef main
 
 namespace qwen35 {
@@ -24,6 +25,10 @@ constexpr int THREADS = 256;
 
 void cuda_ok(cudaError_t status, const char* where) {
     if (status != cudaSuccess) cuda_die(where, cudaGetErrorString(status));
+}
+
+void cublas_ok(cublasStatus_t status, const char* where) {
+    if (status != CUBLAS_STATUS_SUCCESS) cuda_die(where, "cuBLAS call failed");
 }
 
 // device 端 BF16->FP32。权重保持 BF16；activation/state 一律 FP32，和 CPU reference
@@ -68,17 +73,14 @@ __global__ void k_embed(const B* table, int token, float* out) {
     if (i < H) out[i] = dbf(table[static_cast<size_t>(token) * H + i]);
 }
 
-// 一 block 计算 W 的一行。它与 CPU mv() 的循环完全同构：只把每一行的 col 求和
-// 并行化。batch=1 的 correctness backend 优先保留这份直接的 GEMV，而非改变 activation
-// 精度去迁就某个 cuBLAS GEMV API 组合。
-__global__ void k_gemv(const B* weight, int rows, int cols, const float* input, float* output) {
-    const int row = blockIdx.x;
-    if (row >= rows) return;
-    float sum = 0.0f;
-    const B* weights = weight + static_cast<size_t>(row) * cols;
-    for (int col = threadIdx.x; col < cols; col += blockDim.x) sum += dbf(weights[col]) * input[col];
-    const float total = block_sum(sum);
-    if (threadIdx.x == 0) output[row] = total;
+// cuBLAS 的 Tensor Core BF16 GEMV 要求两侧矩阵都是 BF16。每个 linear 前把短 activation
+// 向量舍入一次；权重本来就是 BF16，累加和 branch/state 仍保留 FP32。
+__global__ void k_f32_to_bf16(const float* input, B* output, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const uint32_t bits = __float_as_uint(input[i]);
+    const uint32_t bias = 0x7fffu + ((bits >> 16) & 1u);  // round-to-nearest-even
+    output[i] = static_cast<B>((bits + bias) >> 16);
 }
 
 // Qwen ordinary RMSNorm: x / RMS(x) * (1 + weight)。一个 block 处理一个向量。
@@ -298,6 +300,41 @@ __global__ void k_attention_values(const float* scores, const float* values, int
     out[head * AD + i] = sum * dsigmoid(gate[head * AD + i]);
 }
 
+// 生成不需要把 V=248320 个 logits 都传回 CPU：最后只要一个 token id。这个单 block
+// reduction 每个 thread 扫一部分 vocabulary，避免每个 decode token 都有 1 MiB D2H copy。
+__global__ void k_argmax(const float* logits, int* index_out, float* value_out) {
+    __shared__ float values[THREADS];
+    __shared__ int indices[THREADS];
+    float best = -1.0e30f;
+    int best_index = 0;
+    for (int index = threadIdx.x; index < V; index += blockDim.x) {
+        const float value = logits[index];
+        if (value > best || (value == best && index < best_index)) {
+            best = value;
+            best_index = index;
+        }
+    }
+    values[threadIdx.x] = best;
+    indices[threadIdx.x] = best_index;
+    __syncthreads();
+    for (int stride = THREADS / 2; stride > 0; stride /= 2) {
+        if (threadIdx.x < stride) {
+            const float other_value = values[threadIdx.x + stride];
+            const int other_index = indices[threadIdx.x + stride];
+            if (other_value > values[threadIdx.x] ||
+                (other_value == values[threadIdx.x] && other_index < indices[threadIdx.x])) {
+                values[threadIdx.x] = other_value;
+                indices[threadIdx.x] = other_index;
+            }
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        *index_out = indices[0];
+        *value_out = values[0];
+    }
+}
+
 // C++ host side ---------------------------------------------------------------
 
 struct CudaArena {
@@ -315,6 +352,12 @@ struct CudaArena {
     B* bf16s(size_t count) {
         B* pointer = nullptr;
         cuda_ok(cudaMalloc(&pointer, count * sizeof(B)), "cudaMalloc BF16");
+        pointers.push_back(pointer);
+        return pointer;
+    }
+    int* ints(size_t count) {
+        int* pointer = nullptr;
+        cuda_ok(cudaMalloc(&pointer, count * sizeof(int)), "cudaMalloc int");
         pointers.push_back(pointer);
         return pointer;
     }
@@ -391,17 +434,39 @@ struct CudaState {
             }
         }
     }
+    void reset() {
+        // 下一请求的 DeltaNet 不能带上前一请求的 recurrent/conv state。attention cache 则
+        // 不必清零：position 从 0 重新开始，forward 会在读取之前覆写所有可见 token。
+        position = 0;
+        for (int layer = 0; layer < N; ++layer) {
+            if (layer % 4 != 3) {
+                cuda_ok(cudaMemset(conv[layer], 0, static_cast<size_t>(DQKV) * (CK - 1) * sizeof(float)),
+                        "reset DeltaNet convolution");
+                cuda_ok(cudaMemset(recurrent[layer], 0, static_cast<size_t>(VH) * KD * VD * sizeof(float)),
+                        "reset DeltaNet recurrent state");
+            }
+        }
+    }
 };
 
 struct CudaWork {
     CudaArena arena;
-    float *h, *n, *mix, *gate, *up, *logits;
+    // cuBLAS 是唯一引入的性能库：每个 linear 仍明确写在 forward 中，只把最无聊、
+    // 最重的 W*x 换成成熟且调优过的 GEMV 实现。
+    cublasHandle_t blas = nullptr;
+    float *h, *n, *mix, *gate, *up, *logits, *best_logit;
+    B* gemv_input;
+    int* best_token;
     float *qkv, *z, *da, *db, *dq, *dk, *dout, *beta, *decay, *memory;
     float *aqp, *aq, *ag, *ak, *av, *ao, *scores;
     std::vector<float> host_logits = std::vector<float>(V);
     CudaWork() {
+        cublas_ok(cublasCreate(&blas), "cublasCreate");
+        cublas_ok(cublasSetPointerMode(blas, CUBLAS_POINTER_MODE_HOST), "cublasSetPointerMode");
         h = arena.floats(H); n = arena.floats(H); mix = arena.floats(H);
         gate = arena.floats(I); up = arena.floats(I); logits = arena.floats(V);
+        gemv_input = arena.bf16s(I);  // 所有 W*x 的 input 宽度都不超过 SwiGLU 的 I=3584。
+        best_logit = arena.floats(1); best_token = arena.ints(1);
         qkv = arena.floats(DQKV); z = arena.floats(DO); da = arena.floats(VH); db = arena.floats(VH);
         dq = arena.floats(DO); dk = arena.floats(DO); dout = arena.floats(DO);
         beta = arena.floats(VH); decay = arena.floats(VH); memory = arena.floats(DO);
@@ -409,18 +474,33 @@ struct CudaWork {
         ak = arena.floats(KVS); av = arena.floats(KVS); ao = arena.floats(AS);
         scores = arena.floats(static_cast<size_t>(AH) * MAX_TOKENS);
     }
+    ~CudaWork() { if (blas) cublasDestroy(blas); }
+    CudaWork(const CudaWork&) = delete;
 };
 
-void gemv(const Linear& weight, const float* input, float* output) {
-    k_gemv<<<weight.rows, THREADS>>>(weight.w, weight.rows, weight.cols, input, output);
+void gemv(CudaWork& work, const Linear& weight, const float* input, float* output) {
+    // 权重实际是 row-major W[rows,cols]。cuBLAS 只看 column-major，故把同一段内存解释为
+    // W^T[cols,rows]，再请求 transpose：output[rows,1] = W * input[cols,1]。
+    // 为让 Tensor Cores 可用，短 activation 向量也临时转 BF16；output 和所有 recurrent
+    // state 仍是 FP32。第 09 课保留无此舍入的 CPU correctness oracle。
+    const float one = 1.0f, zero = 0.0f;
+    k_f32_to_bf16<<<(weight.cols + THREADS - 1) / THREADS, THREADS>>>(input, work.gemv_input,
+                                                                        weight.cols);
+    cublas_ok(cublasGemmEx(work.blas, CUBLAS_OP_T, CUBLAS_OP_N,
+                            weight.rows, 1, weight.cols, &one,
+                            weight.w, CUDA_R_16BF, weight.cols,
+                            work.gemv_input, CUDA_R_16BF, weight.cols, &zero,
+                            output, CUDA_R_32F, weight.rows,
+                            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
+              "cublasGemmEx W*x");
 }
 
 void deltanet_cuda(const Delta& d, float* conv, float* recurrent, const float* input,
                    CudaWork& w, float* out) {
-    gemv(d.qkv, input, w.qkv);
-    gemv(d.z, input, w.z);
-    gemv(d.a, input, w.da);
-    gemv(d.b, input, w.db);
+    gemv(w, d.qkv, input, w.qkv);
+    gemv(w, d.z, input, w.z);
+    gemv(w, d.a, input, w.da);
+    gemv(w, d.b, input, w.db);
     k_conv<<<(DQKV + THREADS - 1) / THREADS, THREADS>>>(w.qkv, d.conv, conv);
     k_delta_prepare_qk<<<VH, THREADS>>>(w.qkv, w.qkv + DQK, w.dq, w.dk);
     k_delta_params<<<1, THREADS>>>(w.da, w.db, d.alog, d.dt, w.beta, w.decay);
@@ -431,14 +511,14 @@ void deltanet_cuda(const Delta& d, float* conv, float* recurrent, const float* i
                                                                         w.beta, w.memory, recurrent);
     k_delta_read<<<VH * VD, THREADS>>>(w.dq, recurrent, w.dout);
     k_gated_rms<<<VH, THREADS>>>(w.dout, d.norm, w.z);
-    gemv(d.out, w.dout, out);
+    gemv(w, d.out, w.dout, out);
 }
 
 void attention_cuda(const Attention& a, float* keys, float* values, int position,
                     const float* input, CudaWork& w, float* out) {
-    gemv(a.q, input, w.aqp);
-    gemv(a.k, input, w.ak);
-    gemv(a.v, input, w.av);
+    gemv(w, a.q, input, w.aqp);
+    gemv(w, a.k, input, w.ak);
+    gemv(w, a.v, input, w.av);
     k_attention_q_prepare<<<AH, THREADS>>>(w.aqp, a.qnorm, position, w.aq, w.ag);
     k_attention_k_prepare<<<KVH, THREADS>>>(w.ak, a.knorm, position);
     k_cache_write<<<(KVS + THREADS - 1) / THREADS, THREADS>>>(w.ak, w.av, position, keys, values);
@@ -446,17 +526,31 @@ void attention_cuda(const Attention& a, float* keys, float* values, int position
     k_attention_scores<<<dim3(AH, tokens), THREADS>>>(w.aq, keys, tokens, w.scores);
     k_attention_softmax<<<AH, THREADS>>>(w.scores, tokens);
     k_attention_values<<<AH, THREADS>>>(w.scores, values, tokens, w.ag, w.ao);
-    gemv(a.out, w.ao, out);
+    gemv(w, a.out, w.ao, out);
 }
 
 void mlp_cuda(const Layer& layer, const float* input, CudaWork& w, float* out) {
-    gemv(layer.gate, input, w.gate);
-    gemv(layer.up, input, w.up);
+    gemv(w, layer.gate, input, w.gate);
+    gemv(w, layer.up, input, w.up);
     k_swiglu<<<(I + THREADS - 1) / THREADS, THREADS>>>(w.gate, w.up);
-    gemv(layer.down, w.gate, out);
+    gemv(w, layer.down, w.gate, out);
 }
 
-void forward_cuda(const DeviceModel& model, CudaState& state, int token, CudaWork& work) {
+struct DeviceTop { int token; float logit; };
+
+DeviceTop argmax_cuda(CudaWork& work) {
+    k_argmax<<<1, THREADS>>>(work.logits, work.best_token, work.best_logit);
+    cuda_ok(cudaGetLastError(), "CUDA argmax kernel launch");
+    DeviceTop result {};
+    cuda_ok(cudaMemcpy(&result.token, work.best_token, sizeof(result.token), cudaMemcpyDeviceToHost),
+            "download argmax token");
+    cuda_ok(cudaMemcpy(&result.logit, work.best_logit, sizeof(result.logit), cudaMemcpyDeviceToHost),
+            "download argmax logit");
+    return result;
+}
+
+void forward_cuda(const DeviceModel& model, CudaState& state, int token, CudaWork& work,
+                  bool download_all_logits = false) {
     if (state.position >= MAX_TOKENS) cuda_die("forward", "maximum context is 4096 tokens");
     k_embed<<<(H + THREADS - 1) / THREADS, THREADS>>>(model.embedding, token, work.h);
     for (int index = 0; index < N; ++index) {
@@ -470,23 +564,61 @@ void forward_cuda(const DeviceModel& model, CudaState& state, int token, CudaWor
         k_add<<<(H + THREADS - 1) / THREADS, THREADS>>>(work.h, work.mix, H);
     }
     k_rms_bf16<<<1, THREADS>>>(work.h, model.final_norm, H, work.n);
-    gemv({model.embedding, V, H}, work.n, work.logits);  // tied lm_head。
+    gemv(work, {model.embedding, V, H}, work.n, work.logits);  // tied lm_head。
     cuda_ok(cudaGetLastError(), "CUDA forward kernel launch");
-    cuda_ok(cudaMemcpy(work.host_logits.data(), work.logits, static_cast<size_t>(V) * sizeof(float),
-                       cudaMemcpyDeviceToHost), "download logits");
+    if (download_all_logits) {
+        cuda_ok(cudaMemcpy(work.host_logits.data(), work.logits, static_cast<size_t>(V) * sizeof(float),
+                           cudaMemcpyDeviceToHost), "download logits");
+    }
     ++state.position;
 }
 
-void generate_cuda(const char* path, const std::vector<int>& prompt, int count, std::vector<int>* result) {
-    DeviceModel model(path);  // 上传全部 BF16/F32 权重一次。
-    CudaState state;          // generation 的 KV cache / DeltaNet state 也只分配一次。
-    CudaWork work;
+void generate_cuda(const DeviceModel& model, CudaState& state, CudaWork& work,
+                   const std::vector<int>& prompt, int count, std::vector<int>* result) {
+    state.reset();
     for (int token : prompt) forward_cuda(model, state, token, work);
     for (int step = 0; step < count; ++step) {
-        const int next = argmax(work.host_logits);
-        if (next == 248044 || next == 248046) break;
-        result->push_back(next);
-        if (step + 1 < count) forward_cuda(model, state, next, work);
+        const DeviceTop next = argmax_cuda(work);
+        if (next.token == 248044 || next.token == 248046) break;
+        result->push_back(next.token);
+        if (step + 1 < count) forward_cuda(model, state, next.token, work);
+    }
+}
+
+void generate_cuda(const char* path, const std::vector<int>& prompt, int count, std::vector<int>* result) {
+    DeviceModel model(path);  // 普通 CLI 一次调用仍然简单、无隐式后台服务。
+    CudaState state;
+    CudaWork work;
+    generate_cuda(model, state, work, prompt, count, result);
+}
+
+void serve_cuda(const char* path) {
+    // 评测时唯一值得持久化的东西是模型、GPU work buffers 和 cache allocation；每个请求
+    // 仍独立 reset state。stdin 协议刻意只有一行：`new_tokens<TAB>id,id,...`。
+    DeviceModel model(path);
+    CudaState state;
+    CudaWork work;
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line == "quit") return;
+        const size_t tab = line.find('\t');
+        if (tab == std::string::npos) {
+            std::printf("error: expected new_tokens<TAB>id,id,...\n");
+            std::fflush(stdout);
+            continue;
+        }
+        const int count = std::atoi(line.substr(0, tab).c_str());
+        if (count <= 0) {
+            std::printf("error: new_tokens must be positive\n");
+            std::fflush(stdout);
+            continue;
+        }
+        std::vector<int> output;
+        generate_cuda(model, state, work, parse_ids(line.c_str() + tab + 1), count, &output);
+        std::printf("generated:");
+        for (int token : output) std::printf(" %d", token);
+        std::putchar('\n');
+        std::fflush(stdout);
     }
 }
 
@@ -503,6 +635,7 @@ void cuda_usage(const char* program) {
     std::printf("       %s --forward <qwen35-0.8b.bin> <id,id,...>\n", program);
     std::printf("       %s --logits <qwen35-0.8b.bin> <id,id,...>\n", program);
     std::printf("       %s --generate <qwen35-0.8b.bin> <id,id,...> <new-tokens>\n", program);
+    std::printf("       %s --serve <qwen35-0.8b.bin>  # stdin: new-tokens<TAB>id,id,...\n", program);
 }
 
 }  // namespace qwen35
@@ -513,14 +646,14 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "--forward") == 0 && argc == 4) {
         DeviceModel model(argv[2]); CudaState state; CudaWork work;
         for (int token : parse_ids(argv[3])) forward_cuda(model, state, token, work);
-        const int next = argmax(work.host_logits);
-        std::printf("next token: %d, logit: %.6f\n", next, work.host_logits[next]);
+        const DeviceTop next = argmax_cuda(work);
+        std::printf("next token: %d, logit: %.6f\n", next.token, next.logit);
         return 0;
     }
     if (std::strcmp(argv[1], "--logits") == 0 && argc == 4) {
         // 复用 CPU 文件的 dump format；区别只是 logits 已由 forward_cuda 下载到 host。
         DeviceModel model(argv[2]); CudaState state; CudaWork work;
-        for (int token : parse_ids(argv[3])) forward_cuda(model, state, token, work);
+        for (int token : parse_ids(argv[3])) forward_cuda(model, state, token, work, true);
         dump_logits(work.host_logits);
         return 0;
     }
@@ -532,6 +665,7 @@ int main(int argc, char** argv) {
         std::putchar('\n');
         return 0;
     }
+    if (std::strcmp(argv[1], "--serve") == 0 && argc == 3) { serve_cuda(argv[2]); return 0; }
     cuda_usage(argv[0]);
     return 1;
 }

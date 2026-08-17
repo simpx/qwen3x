@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """把固定的 Qwen3.5-0.8B text backbone 转为课程使用的顺序二进制文件。
 
-这不是通用模型转换器。它只做一件事：以同目录 qwen35.cpp 前向执行所需的
+这不是通用模型转换器。它只做一件事：以同目录 09_qwen35_0_8b.cpp 前向执行所需的
 顺序写出原始 BF16/F32 tensor 字节。这样 C++ 代码不必包含 JSON parser、
 safetensors schema 或多模型分发器。
 
 用法：
-    cd qwen35-0.8b
-    python3 pack_weights.py ../models/Qwen3.5-0.8B out/qwen35-0.8b.bin
+    cd lessons
+    python3 09_pack_weights.py ../models/Qwen3.5-0.8B ../models/qwen35-0.8b.bin
 
 输入目录需要官方 config.json、model.safetensors.index.json 和对应 shard。
 脚本只用 Python 标准库；它不会把 1.6 GiB 权重整体读入内存。
 
 阅读提示：expected_tensors() 是这个小格式的完整 schema。每次 yield 的 name、
 dtype、shape 和顺序同时是三份契约：官方 checkpoint 的 tensor 名、输出 bin 的
-字节布局，以及 qwen35.cpp 中 Model 构造函数下一次 Reader.take() 应读到的内容。
+字节布局，以及 09_qwen35_0_8b.cpp 中 Model 构造函数下一次 Reader.take() 应读到的内容。
 """
 
 import argparse
@@ -26,7 +26,7 @@ ALIGNMENT = 64  # 每个 tensor 起点向上对齐，和 C++ Reader.align() 一�
 MAGIC = b"Q35COUR\0"  # 防止把任意文件误当作本课程 model.bin。
 HEADER = struct.Struct("<8sII")  # magic、格式版本、保留字段，共固定 16 字节。
 
-# 以下常数与同目录 qwen35.cpp 完全重复，是刻意的“显式固定模型”，不是遗漏。
+# 以下常数与同目录 09_qwen35_0_8b.cpp 完全重复，是刻意的“显式固定模型”，不是遗漏。
 # 转换器首先用 config.json 检查一部分关键值，避免看似成功地转换了相近但不兼容的模型。
 V = 248320
 H = 1024
