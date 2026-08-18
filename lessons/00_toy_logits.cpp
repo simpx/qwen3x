@@ -32,6 +32,17 @@ void embedding_lookup(int token, float* hidden) {
     for (int i = 0; i < kHiddenSize; ++i) hidden[i] = kEmbedding[token][i];
 }
 
+// dot（点积）把两个同长度向量压成一个数：每一对对应位置相乘，再把结果相加。
+// 它回答的不是“两个向量是否完全相同”，而是“它们的方向和大小有多匹配”。例如：
+//   dot([1, 2], [3, 4]) = 1*3 + 2*4 = 11。
+// 第一个参数只是数组开头的指针，本身不携带长度，所以和 argmax 一样需要 count
+// 告诉循环何时停止。真正模型里的矩阵乘法，本质上也是很多次这样的点积。
+float dot(const float* left, const float* right, int count) {
+    float sum = 0.0f;
+    for (int i = 0; i < count; ++i) sum += left[i] * right[i];
+    return sum;
+}
+
 // lm_head 是模型的最后一层：它把一个 hidden[hidden_size] 向量，变成 vocabulary 个分数。
 // 换言之，它要回答“当前上下文之后，词表中每一个 token 分别有多合适？”
 //
@@ -49,10 +60,8 @@ void tied_lm_head(const float* hidden, float* logits) {
     // 输出 shape 是 [vocab]。这里没有 softmax，因为 argmax 前 softmax 不会改变
     // 最大值的位置；真正 sampling 才会在 logits 上做 temperature/softmax。
     for (int vocabulary_id = 0; vocabulary_id < kVocabSize; ++vocabulary_id) {
-        float sum = 0.0f;
         // 固定一个候选 token，计算“当前 hidden”和该 token embedding 有多匹配。
-        for (int i = 0; i < kHiddenSize; ++i) sum += hidden[i] * kEmbedding[vocabulary_id][i];
-        logits[vocabulary_id] = sum;
+        logits[vocabulary_id] = dot(hidden, kEmbedding[vocabulary_id], kHiddenSize);
     }
 }
 
@@ -66,6 +75,10 @@ int argmax(const float* values, int count) {
 }
 
 void self_test() {
+    const float left[2] = {1.0f, 2.0f};
+    const float right[2] = {3.0f, 4.0f};
+    assert(std::fabs(dot(left, right, 2) - 11.0f) < 1e-6f);
+
     float hidden[kHiddenSize] = {};
     float logits[kVocabSize] = {};
     embedding_lookup(2, hidden);
