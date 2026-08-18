@@ -6,6 +6,10 @@
 // 本课把两个上投影的结果直接写成 gate/up，先隔离理解非线性和 residual。
 // 真实模型中 gate_proj 和 up_proj 都把 [hidden] 投到更宽的 [intermediate]，
 // down_proj 再投回 [hidden]；这里让三个长度都为 3，只为让公式一眼可见。
+//
+// 白话记忆：FFN 不读取别的 token；它是每个 token 自己的“小型非线性思考器”。up
+// 提供候选信息，gate 决定每个候选通道开多大，down 再把变宽后的结果压回 hidden。
+// residual 的 x + ffn(x) 则表示“保留原句的表示，只加上本分支学到的修正”，不是覆盖 x。
 
 #include <cassert>
 #include <cmath>

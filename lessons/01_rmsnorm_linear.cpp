@@ -7,6 +7,10 @@
 // RMSNorm 只按向量的均方根缩放，不像 LayerNorm 那样先减去均值。它不混合
 // hidden dimension；真正混合维度的是后面的 linear。Qwen 的 layer 是 pre-norm：
 // 先 norm，再把结果送入 attention/DeltaNet 或 FFN 分支。
+//
+// 白话记忆：hidden 是当前 token 的一排特征数字。RMSNorm 先把这排数字的整体音量
+// 调到稳定范围；linear 再让每个输出特征读取所有输入特征，并把它们混合成新特征。
+// 本课不会让 token 互相通信；“看前文”是 attention/DeltaNet 在后续课程负责的事。
 
 #include <cassert>
 #include <cmath>

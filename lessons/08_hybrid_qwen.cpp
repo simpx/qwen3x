@@ -5,6 +5,10 @@
 // 的 attention 则追加 KV cache。真正权重和完整张量维度在 capstone 中出现。
 // 这里的 mixer/ffn 都是故意简化的标量函数；本课的唯一新知识是“每层选择哪类
 // mixer，以及两类 state 为什么必须都放在 generation State 中”。
+//
+// 白话记忆：一层 Qwen 不会同时跑 attention 和 DeltaNet；它选择其中一个 mixer，然后
+// 再跑同样的 FFN。当前 token 穿过多层时，DeltaNet 的固定大小 state 和 attention 的可增长
+// KV cache 都必须随它一起保存到下一个 token。丢掉 State 就等于模型每个字都失忆。
 
 #include <cassert>
 #include <cstdio>

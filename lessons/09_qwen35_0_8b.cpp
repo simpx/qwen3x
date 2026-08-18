@@ -8,6 +8,11 @@
 // 建议的阅读顺序：先看常数和 Model，了解权重/状态的 shape；再看 mv、rms、rope
 // 等小算子；随后按 deltanet、attention、mlp 的顺序读三个分支；最后看 forward
 // 和 generate。这样本文件就是一次 token inference 的可执行章节，而非框架源码。
+//
+// 白话总览：tokenizer 在本文件外把文字变成整数 id；forward() 接受一个 id，更新所有
+// layer 的 state，并在 work.logits 留下“下一个 id 的全词表分数”。generate() 重复执行
+// `argmax(logits) -> 把选中的 id 再喂给 forward()`。因此读懂 forward/generate 的交界，
+// 就读懂了模型怎样从 prompt 一字一字续写文本。
 
 #include <algorithm>
 #include <array>
@@ -153,6 +158,8 @@ struct Layer {
 struct Model {
     File file;
     Reader reader;
+    // 同一张 [V,H] 表既用于开头的 token -> hidden 查表，也在结尾作为 tied lm_head：
+    // final hidden 与表的每一行点积，得到 V 个“下一个 token”分数。
     const B* embedding = nullptr;
     const B* final_norm = nullptr;
     std::array<Layer, N> layer {};
@@ -437,8 +444,11 @@ void forward(const Model& m, State& s, int token, Work& w) {
         mlp(l, w.n.data(), w, w.mix.data());
         add(w.h.data(), w.mix.data());                 // 第二个 residual，进入下一 layer。
     }
-    rms(w.h.data(), m.final_norm, H, w.n.data());      // final hidden。
-    mv({m.embedding, V, H}, w.n.data(), w.logits.data());  // 0.8B 的 lm_head 与 embedding tied。
+    rms(w.h.data(), m.final_norm, H, w.n.data());      // final hidden：它已编码到目前为止的上下文。
+    // lm_head：为词表的每一个候选 token 各算一个 logit。这里 W 直接重用 m.embedding：
+    // logits[v] = dot(final_hidden, embedding[v])。这叫 tied embedding，避免再存一份 [V,H]
+    // 输出矩阵；它与开头 embed() 的“按 token id 取同一张表的一行”正好相对。
+    mv({m.embedding, V, H}, w.n.data(), w.logits.data());
     ++s.position;
 }
 

@@ -1,7 +1,7 @@
 // 第 00 课：最小 language model 的一整步。
 //
 // 真正模型的第一个和最后一个操作也是这里的两件事：
-//   token id -> embedding 向量 -> lm_head -> vocabulary logits -> 选一个 token。
+//   token id -> embedding 向量 -> （许多 layers）-> lm_head -> vocabulary logits -> 选一个 token。
 // 为了只学习这一条数据流，本课没有 layer、attention 或 tokenizer。
 //
 // 阅读提示：tokenizer 属于本文件外的文字<->整数转换器；进入模型之后，模型只
@@ -17,8 +17,8 @@ namespace lesson00 {
 constexpr int kVocabSize = 4;  // 玩具词表中只有 4 个 token，即 4 个候选输出。
 constexpr int kHiddenSize = 3; // hidden vector 的宽度；真实模型会大得多。
 
-// 行号就是 token id，列是 hidden dimension。
-// 真正 Qwen 的 embedding 有 248320 行、1024 或 5120 列；数学完全一样。
+// 行号就是 token id，列是 hidden dimension。它可看成一个“token -> 小数向量”的查表字典：
+// token 2 就取第 2 行 [0, 0, 1]。真正 Qwen 的表是 [248320, 1024]；数学完全一样。
 const float kEmbedding[kVocabSize][kHiddenSize] = {
     {1.0f, 0.0f, 0.0f},  // token 0
     {0.0f, 1.0f, 0.0f},  // token 1
@@ -32,13 +32,25 @@ void embedding_lookup(int token, float* hidden) {
     for (int i = 0; i < kHiddenSize; ++i) hidden[i] = kEmbedding[token][i];
 }
 
-// 本课模拟 tied word embeddings：lm_head 的每一行复用 embedding 的同一行。
-// 因而 logits[v] = dot(hidden, embedding[v])。
+// lm_head 是模型的最后一层：它把一个 hidden[hidden_size] 向量，变成 vocabulary 个分数。
+// 换言之，它要回答“当前上下文之后，词表中每一个 token 分别有多合适？”
+//
+// 正常（untied）写法会另存一个很大的输出矩阵 W[vocab_size, hidden_size]，并计算
+//   logits[v] = dot(hidden, W[v])。
+// Qwen3.5-0.8B 采用 tied lm_head：不另存 W，而是直接重用输入 embedding 表作为 W。
+// 因而同一张表既负责：
+//   输入时：token id -> embedding 的第 token 行；
+//   输出时：hidden 和 embedding 的每一行点积 -> 该 token 的 logit。
+// 这会少存一份约 V*H 的权重，也让“适合作为下一个 token”的方向和 token embedding
+// 共用同一套坐标系。它不是在做严格的 cosine similarity：向量长度也会影响分数。
+//
+// 公式是 logits[v] = dot(hidden, embedding[v])。v 是候选的下一个 token id。
 void tied_lm_head(const float* hidden, float* logits) {
     // 输出 shape 是 [vocab]。这里没有 softmax，因为 argmax 前 softmax 不会改变
     // 最大值的位置；真正 sampling 才会在 logits 上做 temperature/softmax。
     for (int vocabulary_id = 0; vocabulary_id < kVocabSize; ++vocabulary_id) {
         float sum = 0.0f;
+        // 固定一个候选 token，计算“当前 hidden”和该 token embedding 有多匹配。
         for (int i = 0; i < kHiddenSize; ++i) sum += hidden[i] * kEmbedding[vocabulary_id][i];
         logits[vocabulary_id] = sum;
     }
@@ -59,7 +71,9 @@ void self_test() {
     embedding_lookup(2, hidden);
     tied_lm_head(hidden, logits);
 
-    // token 2 的 embedding 是 [0, 0, 1]；与第 2 行点积为 1，是最大值。
+    // token 2 的 embedding 是 [0, 0, 1]；它和第 2 行点积为 1，是最大值。
+    // 所以这个特意构造的玩具模型会选 token 2。真实模型并不是简单复制输入 token：
+    // 真实 hidden 已经由所有 Transformer/DeltaNet layer 根据整个前文改写过了。
     // 这个断言同时固定了 embedding lookup、tied lm_head 和 argmax 三个概念。
     assert(std::fabs(logits[0] - 0.0f) < 1e-6f);
     assert(std::fabs(logits[2] - 1.0f) < 1e-6f);

@@ -9,6 +9,11 @@
 // 这里 query_heads=2、kv_heads=1，所以每个 KV head 服务 2 个 Q head。真实 Qwen
 // 的映射也一样简单：q_head / (query_heads / kv_heads) 就是它应读取的 KV head。
 // 注意 cache 保存的是投影并 RoPE 后的 K、以及未旋转的 V，不是原始 hidden。
+//
+// 白话记忆：prompt 的 prefill 是把已有文本逐 token 写进 cache；随后每生成一个 token，
+// decode 只为新 token 算一次 Q/K/V，再读取旧 cache。没有 cache 时，每次生成一个字都要
+// 从头重新计算整段 prompt。GQA 的“grouped”只表示多个不同的 Q 共用较少的 K/V 存储；
+// 它们仍可以因为 Q 不同而关注不同历史位置。
 
 #include <cassert>
 #include <cmath>

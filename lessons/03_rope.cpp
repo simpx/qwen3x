@@ -6,6 +6,10 @@
 // [x0, x1, x2, x3] 中 (x0,x2) 与 (x1,x3) 分别组成两个旋转平面。
 // RoPE 不额外把 position 加到 hidden 上；它改写 Q/K，使 dot(q_p, k_t) 天然依赖
 // 相对位置 p-t。只有 attention 层的 Q/K 使用 RoPE；DeltaNet 层不走这条路径。
+//
+// 白话记忆：如果没有位置，两个内容相同的 token 在第 1 位或第 100 位看起来完全一样。
+// RoPE 不是把“位置编号”塞进向量末尾，而是按位置把 Q/K 的每一对数字转一个不同角度；
+// 之后做 q·k 时，结果自然会随两个 token 的相对距离改变。
 
 #include <cassert>
 #include <cmath>

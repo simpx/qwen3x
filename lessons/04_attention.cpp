@@ -8,6 +8,10 @@
 // 与当前 token，未来 token 从来不会传进来。
 // 在 prompt 的 prefill 中，实际实现可一次计算整个下三角 attention matrix；本课
 // 用逐 token 的 decode 写法表达同一条因果规则，也正是 KV cache 所需的形式。
+//
+// 白话记忆：attention 分两步。query（Q）是当前 token 想找什么；每个 key（K）像一张
+// 可匹配的地址卡；softmax 根据 Q 和各 K 的匹配程度给历史位置分配权重，最后取这些位置
+// value（V，真正要带回来的内容）的加权平均。Q 用来“找”，V 用来“读”。
 
 #include <cassert>
 #include <cmath>

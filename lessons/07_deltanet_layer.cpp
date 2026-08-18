@@ -8,6 +8,10 @@
 // 这不是一个可泛化的 DeltaNet 实现：权重固定在函数中，conv kernel 也特意取成
 // [0, 1]。它的任务是把上一课的 recurrence 放回真实 layer 的前后投影、门控和
 // normalization 之间，回答“一个 token 进入 DeltaNet layer 时具体经过什么”。
+//
+// 白话记忆：本课的 input 是“已经经过前面 layer 的当前 token hidden”。四个投影不是四份
+// 不同 token：qkv 产生读/写记忆所需的 Q、K、V；z 控制最终输出门；a 控制遗忘；b 控制
+// 写入力度。它们都只是从同一个 input 向量线性算出的不同视角。
 
 #include <cassert>
 #include <cmath>

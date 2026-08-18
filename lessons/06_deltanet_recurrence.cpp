@@ -15,6 +15,11 @@
 // [key_dim, value_dim]。所以 k^T @ S 读出一个 value 向量，k outer delta
 // 把一个 value 向量写进 S。本课把 batch、head 都固定为 1，真实模型在每个
 // value head 上独立维护一份 S。
+//
+// 白话记忆：DeltaNet 也是“写记忆、读记忆”，但不把每个旧 token 排成越来越长的列表。
+// S 是固定大小的压缩笔记本：key 决定往笔记本的哪个地址写，value 是写入的内容，query
+// 决定从哪里读；decay 是遗忘速度，beta 是这次改写笔记本的力度。这些数都由模型在每个
+// token 动态产生，不是训练时的优化器学习率。
 
 #include <cassert>
 #include <cmath>
