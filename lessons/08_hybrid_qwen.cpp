@@ -1,5 +1,11 @@
 // 第 08 课：Qwen hybrid stack 的控制流。
 //
+// 阅读路线：
+//   已经会：attention 和 DeltaNet 都能读取前文，只是分别保存 KV cache 与固定 recurrent state。
+//   本课只加：Qwen 每四层选择 3 个 DeltaNet + 1 个 attention；两类 state 都属于 generation State。
+//   运行后看：同样输入的第二 token 会因复用两类旧 state 而得到不同输出。
+//   下一课：拿掉玩具数字，按同样的控制流运行真实 Qwen3.5-0.8B 权重。
+//
 // lessons 04-07 已分别给出 attention 与 DeltaNet 的数学。本课只把焦点放在
 // “一次 token 如何穿过四层”：三个 DeltaNet layer 的 state 不断更新，第四层
 // 的 attention 则追加 KV cache。真正权重和完整张量维度在 capstone 中出现。

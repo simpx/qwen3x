@@ -1,5 +1,11 @@
 // 第 00 课：最小 language model 的一整步。
 //
+// 阅读路线：
+//   已经会：文字已在课程外由 tokenizer 变成一个 token id。
+//   本课只加：id 查 embedding、tied lm_head 打分、argmax 选下一个 id。
+//   运行后看：输入 id 2 如何得到 4 个 logits，最后为什么选 id 2。
+//   下一课：从这里的 hidden 向量出发，先学习一层内部最常见的 RMSNorm 与 linear。
+//
 // 真正模型的第一个和最后一个操作也是这里的两件事：
 //   token id -> embedding 向量 -> （许多 layers）-> lm_head -> vocabulary logits -> 选一个 token。
 // 为了只学习这一条数据流，本课没有 layer、attention 或 tokenizer。

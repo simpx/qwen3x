@@ -1,5 +1,11 @@
 // 第 02 课：SwiGLU FFN 与 residual connection。
 //
+// 阅读路线：
+//   已经会：linear 可以把一排 hidden 数字变成另一排数字。
+//   本课只加：SwiGLU 用 gate 开关信息，再用 residual 把分支结果加回原 hidden。
+//   运行后看：gate=0 的第一个通道确实为 0；residual 后原 hidden 仍然保留。
+//   下一课：FFN 只处理当前 token；先给之后的 attention 准备“位置”这个信息。
+//
 // 一个 Qwen FFN 的完整公式是：
 //   ffn(x) = down_proj( SiLU(gate_proj(x)) * up_proj(x) )
 //   output = x + ffn(x)

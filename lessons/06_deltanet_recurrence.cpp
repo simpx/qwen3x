@@ -1,5 +1,11 @@
 // 第 06 课：Gated DeltaNet 的 recurrent state。
 //
+// 阅读路线：
+//   已经会：attention 用会随文本增长的 KV cache 记住历史。
+//   本课只加：DeltaNet 用固定大小的矩阵 S 写入、遗忘并读回前文。
+//   运行后看：无论已处理多少 token，S 始终只有 key_dim * value_dim 个数。
+//   下一课：把这条 recurrence 放回真实 DeltaNet layer 的投影、卷积、门控和输出投影之间。
+//
 // attention 的 KV cache 会随着 token 数增长；DeltaNet 不保存全部历史，
 // 而是为每个 head 保存一个固定大小矩阵 S[key_dim][value_dim]。
 // 每个 token 的核心更新是：

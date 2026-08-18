@@ -1,5 +1,11 @@
 // 第 01 课：Qwen 的 ordinary RMSNorm 与一个线性层。
 //
+// 阅读路线：
+//   已经会：一个 token 已经是 hidden 向量；00 课演示了它最终会变成 logits。
+//   本课只加：RMSNorm 稳定这排数字，再用 linear 让各 hidden dimension 相互混合。
+//   运行后看：同一个输入在 RMSNorm 前后长度改变，linear 则从全部输入维度计算每个输出维度。
+//   下一课：把两条 linear 支路接成每个 token 自己的非线性 FFN。
+//
 // 上一课的 embedding 只是“取一行”。真实模型随后反复执行：
 //   y = RMSNorm(x) -> W * y
 // 这里保留最小向量，读者可以用纸笔复算每个数。

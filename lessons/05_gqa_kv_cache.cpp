@@ -1,5 +1,11 @@
 // 第 05 课：GQA 与 KV cache。
 //
+// 阅读路线：
+//   已经会：attention 要拿当前 Q 和所有历史 K/V 计算一次加权平均。
+//   本课只加：历史 K/V 只算一次并 append 到 cache；多个 Q head 可以共用较少的 KV head。
+//   运行后看：cache token 数随两次 append 增长，而两个 Q head 都读取同一个 KV head。
+//   下一课：学习另一种读取前文的方法：不保存 token 列表、而是更新固定大小的 DeltaNet state。
+//
 // 在 decode 阶段，旧 token 的 K/V 不应每次重算。每层保存：
 //   key_cache[position][kv_head][head_dim]
 //   value_cache[position][kv_head][head_dim]

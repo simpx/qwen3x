@@ -1,5 +1,11 @@
 // 第 04 课：一个 head 的 causal attention。
 //
+// 阅读路线：
+//   已经会：Q/K 可以带上位置；每个 token 也能经 FFN 独立处理自己。
+//   本课只加：当前 Q 对历史 K 打分，用 softmax 得到权重，再从历史 V 取回信息。
+//   运行后看：输出是多个 V 的加权平均，不是选择一个 V，也不会读取未来 token。
+//   下一课：把每个旧 token 的 K/V 留下来，避免每次生成都从头计算。
+//
 // 当前 token 的 query 只能读取当前位置及其之前的 key/value：
 //   score[t] = dot(q, k[t]) / sqrt(head_dim)
 //   p = softmax(score)

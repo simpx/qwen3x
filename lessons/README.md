@@ -11,20 +11,49 @@
 4. 第 09 课直接运行真实 Qwen3.5-0.8B 权重；它是全课程唯一不使用 toy dimensions 的
    CPU reference implementation。
 
+## 先记住一条完整主线
+
+不管模型有 0.8B 还是 27B 参数，生成一个 token 的主线始终是：
+
+~~~text
+文字 -- tokenizer（Python，课程外）--> token ids
+     --> embedding --> 重复 N 次 [mixer + FFN]
+     --> final RMSNorm --> tied lm_head --> logits
+     --> 选一个 token --> 回到下一次 forward
+~~~
+
+其中 mixer 是两种“让当前 token 读取前文”的方式之一：attention 读取会增长的 KV
+cache，DeltaNet 读取固定大小的 recurrent state。00--08 课把这条线拆开练习；09 课把
+所有真实部分接回一条可运行的 Qwen3.5-0.8B forward。
+
+## 像读 buildyourownllm 一样读
+
+`buildyourownllm` 的可读性来自“每个文件只前进一小步，而且运行后能看到结果”。这里也
+采用这个约定：每个 `.cpp` 开头都会固定写出四件事：
+
+1. **已经会**：把本课放回上面的整条主线；
+2. **本课只加**：这一次真正需要理解的新概念；
+3. **运行后看**：运行程序时哪一行输出或断言最值得看；
+4. **下一课**：新概念会在完整 forward 的哪个位置继续出现。
+
+这些是**概念上连续的快照**，不是相互 `#include` 的代码版本。刻意重复十几行循环，
+比把读者带去 `common.h`、Tensor 类或抽象 backend 更适合教学：打开任意一课就能读完、
+编译并手算。
+
 ## 课程地图
 
-| 课 | 文件 | 新增概念 | 当前状态 |
+| 课 | 已经会 | 本课只加 | 运行后看 |
 | --- | --- | --- | --- |
-| 00 | 00_toy_logits.cpp | token id、embedding、tied lm_head、argmax | 已完成 |
-| 01 | 01_rmsnorm_linear.cpp | Qwen ordinary RMSNorm、线性层 | 已完成 |
-| 02 | 02_swiglu_residual.cpp | SwiGLU FFN、residual | 已完成 |
-| 03 | 03_rope.cpp | RoPE | 已完成 |
-| 04 | 04_attention.cpp | causal attention | 已完成 |
-| 05 | 05_gqa_kv_cache.cpp | GQA、prefill、decode、KV cache | 已完成 |
-| 06 | 06_deltanet_recurrence.cpp | Gated DeltaNet 的固定 recurrent state | 已完成 |
-| 07 | 07_deltanet_layer.cpp | Q/K/V 投影、causal conv、门控、DeltaNet layer | 已完成 |
-| 08 | 08_hybrid_qwen.cpp | 3 DeltaNet : 1 attention 的 Qwen hybrid stack | 已完成 |
-| 09 | 09_qwen35_0_8b.cpp | 固定 Qwen3.5-0.8B 的完整 text forward / prefill / decode | 已完成 |
+| 00 | token id 已经由 tokenizer 给出 | embedding、tied lm_head、argmax | id 2 如何得到四个分数并选回 id 2 |
+| 01 | 一个 token 的 hidden 向量 | ordinary RMSNorm、线性层 | 先稳定数值，再混合各维度 |
+| 02 | 线性层可以产生新特征 | SwiGLU FFN、residual | gate=0 怎样关闭一个通道 |
+| 03 | 之后 attention 会比较 Q/K | RoPE | 同一向量在不同位置怎样旋转 |
+| 04 | Q/K/V 都是向量 | causal attention | Q 怎样找 K、从 V 取回内容 |
+| 05 | attention 能读取已有 token | GQA、prefill、decode、KV cache | 两个 Q head 共用一组 K/V |
+| 06 | 前文可以储存起来 | DeltaNet 固定 recurrent state | state 不随 context 变大 |
+| 07 | DeltaNet 的写入/读取公式 | 投影、causal conv、门控、完整 DeltaNet layer | 一个 token 怎样更新一个 DeltaNet layer |
+| 08 | 两种 mixer 都有各自 state | 3 DeltaNet : 1 attention 的 hybrid stack | 第二个 token 为何和第一个不同 |
+| 09 | 前面所有数学零件 | 固定 Qwen3.5-0.8B 的真实 forward / prefill / decode | token id 如何走完整模型并产生下一个 logit |
 
 课程文件的总行数不会限制在 1000 行，因为每课为了自包含会重复少量代码；限制的是
 [09_qwen35_0_8b.cpp](09_qwen35_0_8b.cpp)。否则会为了“少几行”而把关键细节藏进帮助函数，

@@ -1,5 +1,11 @@
 // 第 03 课：RoPE（Rotary Position Embedding）。
 //
+// 阅读路线：
+//   已经会：每个 token 的 hidden 会经过 linear 产生不同用途的向量。
+//   本课只加：在 attention 读取前文之前，按 token position 旋转它的 Q/K 向量。
+//   运行后看：position 0 不旋转；position 约等于 pi/2 时二维向量转了四分之一圈。
+//   下一课：把带位置的 Q/K 真正用于 causal attention 的“找”和“读”。
+//
 // attention 本身只比较向量内容，不知道 token 在第几个位置。Qwen 在每层
 // attention 的 Q 与 K 上做 RoPE，把 position 变成二维平面的旋转角度。
 // 本课只处理一个 head 的 4 个通道，且使用 Qwen 的 half-rotation 布局：

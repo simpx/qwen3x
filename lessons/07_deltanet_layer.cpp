@@ -1,5 +1,11 @@
 // 第 07 课：把 DeltaNet 的零件组装成一个真正的 toy layer。
 //
+// 阅读路线：
+//   已经会：DeltaNet 的 S 如何按 Q/K/V、decay 和 beta 逐 token 更新。
+//   本课只加：同一个 hidden 怎样先投影成 q/k/v/z/a/b，再走完整 DeltaNet 分支并投影回来。
+//   运行后看：同一个 State 连续处理两个 token 时，第二次输出会依赖第一次写入的记忆。
+//   下一课：把 DeltaNet layer 和 attention layer 按 Qwen 的固定顺序放进同一个模型。
+//
 // 执行顺序与 Qwen 相同：
 //   in_proj_qkv / z / a / b -> depthwise causal conv -> q/k L2 norm
 //   -> gated delta recurrence -> gated RMSNorm -> out_proj。

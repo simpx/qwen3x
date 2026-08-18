@@ -1,5 +1,11 @@
 // 09_qwen35_0_8b.cpp -- 一个固定 Qwen3.5-0.8B text backbone 的 CPU 推理器。
 //
+// 阅读路线：
+//   已经会：00--08 分别解释了 token 的入口/出口、FFN、RoPE、attention cache 与 DeltaNet state。
+//   本课只加：用真实 Qwen3.5-0.8B 的维度和权重，把这些零件按实际 forward 顺序接起来。
+//   运行后看：--forward 输出一次 token 的 logits；--generate 重复“选 id，再 forward”来续写。
+//   下一步：需要 GPU 性能时读 ../qwen35-0.8b；教学课本保持这份 CPU reference 的直接性。
+//
 // 这是课程的最后一课：没有 Tensor 类、没有算子注册表、没有通用模型兼容层。
 // 09_pack_weights.py 已按本文件读取的顺序排好权重，因此这里从上到下就是一次 token
 // 的真实 Qwen hybrid forward。Qwen3.8-27B 与它有同样的 3 DeltaNet : 1
