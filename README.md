@@ -55,6 +55,23 @@ make test
 顺序直接扩大为真实 0.8B 权重。CUDA 不放进 lesson，避免读到模型数学时被 GPU runtime、库句柄
 和性能细节打断。
 
+## 课程之后：真实 0.8B 的验证阶梯
+
+`lessons/` 解释数学并保持冻结；从真实权重、CPU、CUDA 到文本入口则按下面四个独立 stage 前进。
+它们刻意少量复制代码，避免为了共享而引入 `Tensor`、`Backend` 或 engine/session 框架。完整方向见
+[roadmap.md](roadmap.md)。
+
+| 目录 | 做什么 | 主要验收命令 |
+| --- | --- | --- |
+| [01-hf-reference/](01-hf-reference/README.md) | 官方 PyTorch/Transformers 的 CPU/CUDA FP32 logits oracle | `make -C 01-hf-reference cpu` / `cuda` |
+| [02-cpu-0.8b/](02-cpu-0.8b/README.md) | plain C++ `Model + State + Work` CPU forward | `make -C 02-cpu-0.8b test` |
+| [03-cuda-0.8b/](03-cuda-0.8b/README.md) | 直接 CUDA kernels + cuBLAS，state 留在 GPU | `make -C 03-cuda-0.8b test` |
+| [04-0.8b-e2e/](04-0.8b-e2e/README.md) | 官方 tokenizer/chat template 薄壳与真实文本 smoke test | `make -C 04-0.8b-e2e test` |
+
+每一层都用前一层无法伪造的证据验证：HF full logits → C++ CPU full logits → CUDA full logits →
+真实 prompt 的 tokenizer ids 与 greedy text。Python 只用于 reference、转换和这个暂时的 tokenizer
+wrapper；C++ inference core 不依赖 Python。
+
 ## 真实 0.8B
 
 [lessons/09_qwen35_0_8b.cpp](lessons/09_qwen35_0_8b.cpp) 是约 520 行的整合版。它严格固定为

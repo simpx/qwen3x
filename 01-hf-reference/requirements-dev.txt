@@ -1,0 +1,5 @@
+# 开发期 oracle 依赖；绝不被 C++ runtime 使用。
+# Qwen3.5 的 `qwen3_5` model type 需要 Transformers 5 或更新版本。
+torch>=2.6
+transformers>=5.0.0
+numpy>=1.26

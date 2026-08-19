@@ -12,5 +12,10 @@
 /qwen35-0.8b/qwen35
 /qwen35-0.8b/qwen35_cuda
 /qwen35-0.8b/out/
+/01-hf-reference/build/
+/02-cpu-0.8b/build/
+/02-cpu-0.8b/qwen35
+/03-cuda-0.8b/build/
+/03-cuda-0.8b/qwen35_cuda
 __pycache__/
 *.pyc

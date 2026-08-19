@@ -49,9 +49,9 @@ correct → simple → readable → usable → fast
 lessons/                 前置课程：toy math + 已有的 0.8B CPU capstone；尽量冻结
 
 01-hf-reference/         Stage 1：官方 Qwen3.5-0.8B 的 PyTorch / Transformers oracle
-02-cpu-0.8b/             Stage 2：真实 0.8B 的可读 C++ CPU engine + session state
+02-cpu-0.8b/             Stage 2：真实 0.8B 的可读 C++ CPU forward + state
 03-cuda-0.8b/            Stage 3：同一 0.8B 的 CUDA first-correct version
-04-0.8b-runtime/         Stage 4：0.8B 的 session sync、CLI wrapper、test vectors、集成测试
+04-0.8b-e2e/             Stage 4：0.8B 的 CLI wrapper、test vectors、端到端集成测试
 05-qwen38-27b/           Stage 5：固定 Qwen3.8-27B CUDA correctness
 06-prefix-cache/         Stage 6：longest-prefix state snapshot / restore
 07-server/               Stage 7：tokenizer wrapper、CLI、streaming OpenAI-compatible API
@@ -63,7 +63,7 @@ lessons/                 前置课程：toy math + 已有的 0.8B CPU capstone�
 测试向量、权重格式和已验证公式，但不会在源码层 `#include` 前一阶段。
 
 目前的 `qwen35-0.8b/` 是已有 CUDA 性能实验，保留不动作为证据和对照。等 Stage 2 的 CPU
-session API 固定、Stage 3 的测试从零跑绿后，再将其有价值的实现迁入 `03-cuda-0.8b/`；不要在
+`prefill/decode/state` 语义固定、Stage 3 的测试从零跑绿后，再将其有价值的实现迁入 `03-cuda-0.8b/`；不要在
 今晚为了目录漂亮而移动正在工作的 CUDA 代码。
 
 未来每个 stage 内的实现文件可以很直接，例如 `model.cpp`、`weights.cpp`、`sampler.cpp`、
@@ -122,31 +122,30 @@ profiling、fusion 或 quantization。
 今晚不再复制一套 toy Python/C++ 模型；直接把这两个已有资产变成 **真实 0.8B 的 oracle、CPU
 engine、CUDA engine 和集成测试链**。目标是完成 Stage 1--4，明天切 27B 时不再修改基础语义。
 
-### 从 ds4 借用的最小边界
+### 从 ds4 借用的做法，而不是接口
 
-ds4 的有价值模式是“loaded engine 与 mutable session 分开”：模型权重属于一个长寿命 engine，
-一条会话独占它的 KV、recurrent state、logits 与已处理 token。我们只借这一个窄边界，不复制
-它的 multi-GPU、MTP、SSD streaming、GGUF 通用加载或 worker scheduler。
+ds4 值得借鉴的是模型专用、mmap 权重、CPU 只做 reference、测试先于速度这些做法。不要照搬它的
+公开 `engine/session` API：我们当前只服务 batch=1 的 Qwen，直接的三块数据已经足够。
 
 ~~~cpp
-struct Qwen35Engine;   // mmap 的固定 0.8B 权重、固定 config、CPU 或 CUDA 资源。
-struct Qwen35Session;  // 一条时间线：tokens、position、KV、GDN、conv、current logits。
+struct Model;  // mmap 的固定 0.8B weights。
+struct State;  // position、KV cache、GDN state、conv state；跨 token 保留。
+struct Work;   // 一次 forward 的 FP32 scratch 和 logits；下一 token 可覆盖。
 
-void session_reset(Qwen35Session&);
-void session_prefill(Qwen35Engine&, Qwen35Session&, const int* tokens, int count);
-void session_decode(Qwen35Engine&, Qwen35Session&, int token);
-void session_sync(Qwen35Engine&, Qwen35Session&, const int* full_tokens, int count);
+void forward(const Model&, State&, int token, Work&);
+void prefill(const Model&, State&, const int* tokens, int count, Work&);
+void decode(const Model&, State&, int token, Work&);
 ~~~
 
-这不是 abstract backend。每个 stage 仍有明确的 `matmul_cpu()` 或 `matmul_cuda()`；上面的四个
-函数只规定 state 的生命周期。`session_sync()` 首先只复用同一 session 的共同前缀：相同 prefix
-时只 decode suffix；不相同则 reset/replay。Stage 6 才把它扩展为跨 session 的 prefix snapshot
-cache。
+这不是 abstract backend。每个 stage 仍有明确的 `mv_cpu()` 或 `mv_cuda()`；`prefill()` 和
+`decode()` 也只是有名字的循环，内部仍直接调用 `forward()`。不同请求一律 `State{}` 重建；跨请求
+的最长前缀复用只在 Stage 6 用明确的 snapshot cache 实现。
 
 ### Stage 1 — `01-hf-reference/`：官方 0.8B oracle
 
 这里使用 **PyTorch + Transformers**，因为目的不是再写一份模型，而是调用官方 checkpoint 作为
-裁判。当前仓库已经有本地 `models/Qwen3.5-0.8B`，所以默认命令不需要下载模型。
+裁判。当前仓库已经有本地 `models/Qwen3.5-0.8B`，所以默认命令不需要下载模型。CPU FP32 和 CUDA
+FP32 的 vectors 分别保存到 `build/cpu/` 与 `build/cuda/`；测试会拒绝混用它们。
 
 ~~~text
 01-hf-reference/
@@ -157,33 +156,32 @@ cache。
   test_reference.py  # 验证 tokenizer、config fingerprint、vector 可重现性
 ~~~
 
-默认 vector 至少覆盖短 prefill、`prefill(ABCD)+decode(E)+decode(F)`、greedy continuation、
-EOS。vector metadata 必须记录 model revision、config、input ids、dtype 与允许误差；不能把
-“目前本机跑出来的数”变成无来源 golden file。
+默认 vector 覆盖短 prefill、`prefill(ABCD)+decode(E)+decode(F)`、greedy continuation 与一个
+真实官方 chat-template prompt。metadata 记录 checkpoint/tokenizer fingerprint、device、dtype、input
+ids、chat messages 与允许误差；不能把“目前本机跑出来的数”变成无来源 golden file。
 
-**验收：** `make -C 01-hf-reference test MODEL=../models/Qwen3.5-0.8B` 生成可复现 test vectors；
-`make dump` 第二次运行得到同一 config/input 和同一 greedy ids。默认只比较官方输出，不做
-performance benchmark。
+**验收：** `make -C 01-hf-reference cpu MODEL=../models/Qwen3.5-0.8B` 和同样的 `cuda` target
+各生成一份可复现 vectors；第二次运行得到同一 config/input 和同一 greedy ids。默认只比较官方
+输出，不做 performance benchmark。
 
 ### Stage 2 — `02-cpu-0.8b/`：真实 C++ CPU baseline
 
 以 `lessons/09_qwen35_0_8b.cpp` 为已验证数学来源，复制为一个可演进的、仍然模型专用的 CPU
-snapshot。先重命名 `Model/State/Work` 为清楚的 `Qwen35Engine/Qwen35Session/Qwen35Scratch`，然后
-显式实现上面的 prefill/decode/sync API。不要在这一步“重构成框架”。
+snapshot。保留朴素的 `Model/State/Work` 三个 struct；只将隐含在 `generate()` 的 prefill/decode
+循环写成两个小函数。不要在这一步“重构成框架”。
 
 ~~~text
 02-cpu-0.8b/
   README.md
   Makefile
-  qwen35.cpp          # 直接的 CPU forward 和 Engine / Session
-  pack_weights.py     # HF safetensors → 固定、mmap-friendly qwen35-0.8b.bin
-  test_cpu.py         # 读取 Stage 1 vectors，逐项比较 CPU 与官方结果
-  test_state.cpp      # 无需 checkpoint 的 state 生命周期单测
+ qwen35.cpp          # 直接的 CPU forward、Model / State / Work
+ pack_weights.py     # HF safetensors → 固定、mmap-friendly qwen35-0.8b.bin
+ test_cpu.py         # 读取 Stage 1 vectors，逐项比较 CPU 与官方结果
 ~~~
 
 **验收：** `make test MODEL=...` 同时跑 state tests、完整 vocabulary logits、greedy ids 与
-`session_sync()` 的 prefix reuse/rebuild 测试。第一处失败必须报出 `case/token/layer/tensor/
-max_abs_error`。CPU 就是以后所有 CUDA kernel 的 oracle，不追性能。
+`prefill(ABCD) → decode(E) → decode(F)` 的 state 等价测试。trace failure 会报告 case、最坏 token
+step 与 max-abs error；CPU 就是以后所有 CUDA kernel 的数学 oracle，不追性能。
 
 ### Stage 3 — `03-cuda-0.8b/`：CUDA first-correct
 
@@ -192,52 +190,51 @@ max_abs_error`。CPU 就是以后所有 CUDA kernel 的 oracle，不追性能。
 
 ~~~text
 03-cuda-0.8b/
-  README.md
-  Makefile
+ README.md
+ Makefile
+  qwen35_cpu.cpp      # 同一 stage 内的 mmap loader、固定 structs、CPU helpers
   qwen35_cuda.cu      # fixed 0.8B CUDA forward
   test_cuda.py        # CPU vector / CUDA vector 的完整比较
-  test_cuda.sh        # 无 Python 的 smoke/self-test wrapper
 ~~~
 
-linear 与 lm_head 首先用 cuBLAS；RMSNorm、RoPE、SiLU/multiply、residual、GDN、attention 是
-直白 kernels。所有 weights、work buffers、KV/GDN/conv state 必须留在 GPU；正常 decode 不得
-下载全 vocabulary logits。
+linear 与 lm_head 首先用 cuBLAS `sgemv`；checkpoint BF16 linear matrix 在加载时展开为 FP32，使
+CUDA correctness path 与 CPU 的 FP32 activation 语义一致。RMSNorm、RoPE、SiLU/multiply、residual、
+GDN、attention 是直白 kernels。所有 weights、work buffers、KV/GDN/conv state 必须留在 GPU；正常
+decode 不得下载全 vocabulary logits。
 
-**验收：** `make cuda-test` 通过无权重 self-test；`make oracle MODEL=... WEIGHTS=...` 以 Stage 2
-为 CPU oracle，比较全 logits、greedy ids、prefill/decode/state。GPU 阈值因 BF16 GEMV 路径可与
-CPU 不同，但必须写在 vector metadata/README 中，不能临时放宽。
+**验收：** `make cuda-test` 通过无权重 self-test；`make test MODEL=...` 生成独立 CUDA official
+vectors，再比较全 logits、greedy ids、prefill/decode/state。GPU 有自己的 reduction order 与 vector
+bundle，但门槛必须写在 metadata/README 中，不能临时放宽。
 
-### Stage 4 — `04-0.8b-runtime/`：将基础语义封口
+### Stage 4 — `04-0.8b-e2e/`：将 0.8B 测试封口
 
 这个目录不重新实现 layer math。它以 Stage 2/3 的 binary 作为黑盒，完成以后迁 27B 必须具备的
-运行契约：
+测试契约：
 
 ~~~text
-04-0.8b-runtime/
-  README.md
-  Makefile
+04-0.8b-e2e/
+ README.md
+ Makefile
   qwen35_chat.py      # 官方 tokenizer / chat template 的薄包装，不进入 C++ forward
-  test_vectors.py     # 启动 CPU/CUDA binaries，执行全部 versioned cases
-  test_e2e.py         # prompt → tokens → generate → decode 的固定 smoke tests
-  test_sync.py        # 相同前缀 append、较短前缀 replay、不同前缀 reset
+  test_e2e.py         # prompt → tokens → generate → decode 的固定 contract test
 ~~~
 
-此时仍不做 HTTP server 或跨 session prefix cache；但必须将 CLI/session contract 固定下来，保证
-接下来只替换 model dimensions/weights 而不是重做 API。可保留 MMLU-Pro short coverage 作为慢速
+此时仍不做 HTTP server 或跨 request prefix cache；但必须将 token-id CLI 与 state 测试固定下来，保证
+接下来只替换 model dimensions/weights 而不是重做基础循环。可保留 MMLU-Pro short coverage 作为慢速
 质量回归，但它不能代替数值 vectors。
 
 ### 今晚的严格顺序与停机条件
 
 | 顺序 | 自动任务 | 绿灯命令 | 禁止提前做的事 |
 | --- | --- | --- | --- |
-| 1 | Stage 1：生成官方 test vectors | `make -C 01-hf-reference test MODEL=../models/Qwen3.5-0.8B` | 不改 lessons 数学 |
-| 2 | Stage 2：从 lesson 09 建真实 CPU session API | `make -C 02-cpu-0.8b test MODEL=...` | 不优化 linear、不加 tokenizer |
-| 3 | Stage 3：迁现有 CUDA correct path | `make -C 03-cuda-0.8b cuda-test` + `make oracle` | 不写新 fused kernel |
-| 4 | Stage 4：固定 session/CLI/e2e contract | `make -C 04-0.8b-runtime test` | 不做 HTTP/prefix snapshot |
+| 1 | Stage 1：生成官方 CPU/CUDA test vectors | `make -C 01-hf-reference cpu` / `make -C 01-hf-reference cuda` | 不改 lessons 数学 |
+| 2 | Stage 2：从 lesson 09 建真实 CPU `Model/State/Work` API | `make -C 02-cpu-0.8b test MODEL=...` | 不优化 linear、不加 tokenizer |
+| 3 | Stage 3：CUDA + cuBLAS correctness path | `make -C 03-cuda-0.8b cuda-test` + `make test` | 不写新 fused kernel |
+| 4 | Stage 4：固定 CLI/e2e test contract | `make -C 04-0.8b-e2e test` | 不做 HTTP/prefix snapshot |
 | 5 | 总回归与提交 | 四个目录的 Makefile 都绿 | 不开始 27B |
 
 **今晚结束定义：** 真实官方 0.8B 权重能经过 HF → CPU → CUDA → tokenizer wrapper 的完整验证，
-并且 `Engine + Session + session_sync()` 的行为有固定测试。到这一步才能开始 `05-qwen38-27b/`。
+并且 `Model + State + Work + prefill/decode` 的行为有固定测试。到这一步才能开始 `05-qwen38-27b/`。
 任何 layer/logit/state 不一致都要先停在 0.8B 修复；绝不能携带“不知道为什么”的误差去 27B。
 
 ## 5. Stage 1 — 官方 Qwen3.5-0.8B Python oracle
@@ -285,7 +282,7 @@ decode(token);    // [1, H]；每次生成一个 token，复用 state
 状态应显式属于一条序列，而不是藏在全局变量中：
 
 ~~~cpp
-struct SequenceState {
+struct State {
     AttentionKV kv[...];
     GDNState    gdn[...];
     ConvState   conv[...];
@@ -317,13 +314,13 @@ E 或 F 重新计算 ABCD。到这里，已经是一个真正的 batch=1 LLM inf
 
 ## 9. Stage 4 — 0.8B runtime integration
 
-在切换 27B 前，将 Stage 2/3 的 `Engine + Session` 契约固定为一个真实可调用的 0.8B runtime：
-token id CLI、官方 tokenizer/chat template 薄包装、state sync regression、CPU/CUDA vector
+在切换 27B 前，将 Stage 2/3 的 `Model + State + Work` 数据流固定为一个真实可调用的 0.8B runtime：
+token id CLI、官方 tokenizer/chat template 薄包装、prefill/decode state regression、CPU/CUDA vector
 runner 与固定 prompt smoke test。这个 stage 只编排已经正确的 engines；不新增 layer math，也不
 开始 HTTP server。
 
-**验收：** 相同 full prefix 只运行 suffix；缩短或改变 prefix 必须安全 reset/replay；CPU/CUDA
-能被同一个 token-id case 调用；全部 0.8B 数值 vector、greedy vector 与文本 smoke test 一条
+**验收：** `prefill` 与逐 token `decode` 必须等价；reset 后状态不得泄漏；CPU/CUDA 能被同一个
+token-id case 调用；全部 0.8B 数值 vector、greedy vector 与文本 smoke test 一条
 命令执行。它是 27B 迁移前最后一道 gate。
 
 ## 10. Stage 5 — 切换到 Qwen3.8-27B
@@ -472,11 +469,11 @@ lessons/：公式与 toy state 已读懂
         ↓
 official Qwen3.5-0.8B HF vectors
         ↓
-0.8B CPU Engine + Session
+0.8B CPU Model + State + Work
         ↓
 0.8B CUDA + cuBLAS
         ↓
-0.8B runtime / session_sync / end-to-end regression
+0.8B tokenizer wrapper / end-to-end regression
         ↓
 Qwen3.8-27B CUDA correct
         ↓
@@ -495,7 +492,7 @@ Q8 / Q4 / FP8
 
 | 集中开发的累计时间 | 目标 |
 | --- | --- |
-| 今晚 | 建好并尽力跑通 0.8B Stage 1–4：official vectors、CPU/CUDA engine、session/runtime regression |
+| 今晚 | 建好并尽力跑通 0.8B Stage 1–4：official vectors、CPU/CUDA forward、tokenizer/e2e regression |
 | 1–3 天 | 修完 0.8B 的所有数值/state 差异，固定 weights、vectors 与 CLI contract |
 | 之后 2–4 天 | 27B CUDA 正确运行 |
 | 3–4 周 | 27B + prefix cache + server，开始自己用 |
