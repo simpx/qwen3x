@@ -48,10 +48,10 @@ correct → simple → readable → usable → fast
 ~~~text
 lessons/                 前置课程：toy math + 已有的 0.8B CPU capstone；尽量冻结
 
-01-python-reference/     Stage 1：小型 Qwen 的 PyTorch 数学 oracle
-02-cpu-tiny/             Stage 2：逐行对应的 C++ tiny CPU implementation
-03-cpu-0.8b/             Stage 3：真实 0.8B CPU，明确 prefill / decode / SequenceState
-04-cuda-0.8b/            Stage 4：0.8B CUDA first-correct version（cuBLAS + 简单 kernels）
+01-hf-reference/         Stage 1：官方 Qwen3.5-0.8B 的 PyTorch / Transformers oracle
+02-cpu-0.8b/             Stage 2：真实 0.8B 的可读 C++ CPU engine + session state
+03-cuda-0.8b/            Stage 3：同一 0.8B 的 CUDA first-correct version
+04-0.8b-runtime/         Stage 4：0.8B 的 session sync、CLI wrapper、test vectors、集成测试
 05-qwen38-27b/           Stage 5：固定 Qwen3.8-27B CUDA correctness
 06-prefix-cache/         Stage 6：longest-prefix state snapshot / restore
 07-server/               Stage 7：tokenizer wrapper、CLI、streaming OpenAI-compatible API
@@ -62,8 +62,8 @@ lessons/                 前置课程：toy math + 已有的 0.8B CPU capstone�
 `common/`、Tensor 类或 backend interface 把读者带出当前目录。后阶段可以读取前阶段生成的
 测试向量、权重格式和已验证公式，但不会在源码层 `#include` 前一阶段。
 
-目前的 `qwen35-0.8b/` 是已有 CUDA 性能实验，保留不动作为证据和对照。等 Stage 3 的 CPU
-state API 固定、Stage 4 的测试从零跑绿后，再将其有价值的实现迁入 `04-cuda-0.8b/`；不要在
+目前的 `qwen35-0.8b/` 是已有 CUDA 性能实验，保留不动作为证据和对照。等 Stage 2 的 CPU
+session API 固定、Stage 3 的测试从零跑绿后，再将其有价值的实现迁入 `03-cuda-0.8b/`；不要在
 今晚为了目录漂亮而移动正在工作的 CUDA 代码。
 
 未来每个 stage 内的实现文件可以很直接，例如 `model.cpp`、`weights.cpp`、`sampler.cpp`、
@@ -94,11 +94,11 @@ Python 工具调用官方 tokenizer 以保证 reference 一致；日常可用的
 每一层实现只向下游交付已经证明正确的行为：
 
 ~~~text
-official Python / HF reference
-             ↓  intermediate tensors + logits
-tiny C++ CPU reference
-             ↓  same input / same state
-Qwen3.5-0.8B CPU reference
+lessons/ 的手算 toy tests
+             ↓  已理解的公式
+official Python / HF reference（Qwen3.5-0.8B）
+             ↓  test vectors + logits
+Qwen3.5-0.8B C++ CPU engine
              ↓  same input / same state
 Qwen3.5-0.8B CUDA
              ↓  end-to-end regression
@@ -116,113 +116,144 @@ Qwen3.8-27B CUDA
 只有在 CPU 对 reference 正确后，CUDA 才以 CPU 为 oracle；只有在 CUDA 正确后，才讨论
 profiling、fusion 或 quantization。
 
-## 今晚的自动执行计划
+## 今晚的自动执行计划：完成 0.8B 基础，停在 27B 之前
 
-**今晚只完成 Stage 1 与 Stage 2，不开始真实 0.8B 重构、更不开始 CUDA。** 这能在不依赖
-下载 checkpoint、也不依赖 GPU 的条件下产出一条永久可跑的 correctness pipeline。
+`lessons/00--08` 已经承担 tiny/手算练习，`lessons/09` 已证明真实 0.8B CPU forward。因此
+今晚不再复制一套 toy Python/C++ 模型；直接把这两个已有资产变成 **真实 0.8B 的 oracle、CPU
+engine、CUDA engine 和集成测试链**。目标是完成 Stage 1--4，明天切 27B 时不再修改基础语义。
 
-### 先确定 Python 的职责
+### 从 ds4 借用的最小边界
 
-Python reference 使用 **PyTorch**，但不把 Hugging Face `model.generate()` 当作自己的
-实现：
-
-- `01-python-reference/tiny_qwen.py` 用直接、无 autograd 的 `torch` 张量运算写实际 tiny
-  Qwen forward；没有 `nn.Module` hierarchy、trainer 或 generic model code；
-- 一律 FP32、固定随机种子、固定输入，以便 C++ 能逐数比较；
-- `Transformers` 只放在独立的 `official_oracle.py`：未来读取官方 Qwen3.5-0.8B，dump
-  official logits/intermediates，验证 Stage 3；它不是默认测试，也不是 runtime 依赖。
-
-这样 PyTorch 是简洁且可靠的数学/张量记法，Transformers 是官方 checkpoint 的裁判；二者都
-不进入 C++ runtime。直接从 HF model class 开始会把 Qwen 的执行细节藏在数千行库代码里，
-不适合作为这条课程化引擎的第一步。
-
-### Task A — 建立 `01-python-reference/`
-
-创建如下最小、无需网络的目录：
-
-~~~text
-01-python-reference/
-  README.md                 # 输入、输出、运行命令、当前故意省略的部分
-  Makefile                  # make test；只是一两条 Python 命令
-  tiny_qwen.py              # H=64、4 layers、GDN/GDN/GDN/attention、FP32 forward
-  export_tiny.py            # 固定权重和固定 token case → 简单 f32 binary
-  test_tiny.py              # 算子、state、最终 logits 的 Python 断言
-  official_oracle.py        # 先放接口/说明；有本地 checkpoint 后才执行
-~~~
-
-tiny forward 必须包括 embedding、ordinary RMSNorm、GDN state + conv state、attention + KV
-cache、SwiGLU residual、final norm、tied lm_head。权重不训练：用固定 seed 产生可复现的小数。
-export 的格式只需一个魔数、version、shape 与按固定顺序写入的 FP32 arrays；它是教学格式，
-不是 GGUF 的雏形。
-
-**Task A 验收：** `make -C 01-python-reference test` 在 CPU 上几秒内通过；重复运行产生
-bitwise 相同的 `build/tiny-weights.bin` 与 golden case。不自动下载 HF checkpoint。
-
-### Task B — 建立 `02-cpu-tiny/`
-
-创建只含 C++17/20 与极简 Makefile 的对应实现：
-
-~~~text
-02-cpu-tiny/
-  README.md                 # 从 01 读取什么、C++ 新增什么、如何验证
-  Makefile                  # make test：编译、生成 Python golden、比较 C++ 结果
-  tiny_qwen.cpp             # 同一固定 config、直白 scalar loops、无 Tensor 类
-  test_against_python.py    # 调 C++ --dump，比较 logits 与全部跨 token state
-~~~
-
-`tiny_qwen.cpp` 从一开始就显式拥有：
+ds4 的有价值模式是“loaded engine 与 mutable session 分开”：模型权重属于一个长寿命 engine，
+一条会话独占它的 KV、recurrent state、logits 与已处理 token。我们只借这一个窄边界，不复制
+它的 multi-GPU、MTP、SSD streaming、GGUF 通用加载或 worker scheduler。
 
 ~~~cpp
-struct SequenceState { /* KV, GDN, conv */ };
-void prefill(...);
-void decode(...);
+struct Qwen35Engine;   // mmap 的固定 0.8B 权重、固定 config、CPU 或 CUDA 资源。
+struct Qwen35Session;  // 一条时间线：tokens、position、KV、GDN、conv、current logits。
+
+void session_reset(Qwen35Session&);
+void session_prefill(Qwen35Engine&, Qwen35Session&, const int* tokens, int count);
+void session_decode(Qwen35Engine&, Qwen35Session&, int token);
+void session_sync(Qwen35Engine&, Qwen35Session&, const int* full_tokens, int count);
 ~~~
 
-`prefill(ABCD) → decode(E) → decode(F)` 是第一个端到端测试。它不只比最终选中的 token；必须
-比较每一步 logits、position、KV rows、GDN state 与 conv state。C++ 所有算子先用最直接的
-scalar loop。
+这不是 abstract backend。每个 stage 仍有明确的 `matmul_cpu()` 或 `matmul_cuda()`；上面的四个
+函数只规定 state 的生命周期。`session_sync()` 首先只复用同一 session 的共同前缀：相同 prefix
+时只 decode suffix；不相同则 reset/replay。Stage 6 才把它扩展为跨 session 的 prefix snapshot
+cache。
 
-**Task B 验收：** `make -C 02-cpu-tiny test` 先触发 Python golden，再通过 C++/Python 全量
-比较；没有 GPU、没有模型下载、没有人为观察文本的步骤。
+### Stage 1 — `01-hf-reference/`：官方 0.8B oracle
 
-### 今晚的执行顺序与停机条件
-
-| 顺序 | 自动任务 | 完成证据 | 不做什么 |
-| --- | --- | --- | --- |
-| 1 | 建目录和 README/Makefile | `git diff --check` | 不移动 `lessons/` 或现有 CUDA 目录 |
-| 2 | 完成 Python tiny forward 与 state tests | `make -C 01-python-reference test` | 不下载 HF 模型 |
-| 3 | 导出固定权重与 golden case | 两次运行文件 hash 相同 | 不做 BF16、量化或 tokenizer |
-| 4 | 逐行移植成 C++ scalar loops | C++ 自测通过 | 不提前优化/复用抽象 |
-| 5 | Python ↔ C++ end-to-end regression | `make -C 02-cpu-tiny test` | 不以生成文字代替数值比较 |
-| 6 | 提交并 push | 两个 test 命令均为绿 | 不开始 Stage 3 |
-
-若 Task A 的 GDN 数值没有先确定，AI 必须停在 Python test 修正公式，不能继续写 C++。若 Task B
-有误差，必须先输出第一处不一致的 `layer / token / tensor / max_abs_error`，不能用放宽阈值绕过。
-今晚结束的定义不是“目录已经创建”，而是两条无需外部模型的绿灯命令。
-
-## 5. Stages 1–2 — Tiny reference
-
-**目标时间：1–2 天。**
-
-定义一个可手算的 tiny Qwen：
+这里使用 **PyTorch + Transformers**，因为目的不是再写一份模型，而是调用官方 checkpoint 作为
+裁判。当前仓库已经有本地 `models/Qwen3.5-0.8B`，所以默认命令不需要下载模型。
 
 ~~~text
-hidden = 64
-layers = 4
-layer pattern = GDN, GDN, GDN, Attention
-FFN intermediate = 128
-head dim = 16
-vocab = 256
+01-hf-reference/
+  README.md
+  Makefile
+  reference.py       # 加载官方 model；固定 FP32 / token ids；输出 logits 与 greedy ids
+  dump_vectors.py    # 生成 versioned binary test vectors；可选 module hooks dump layer tensors
+  test_reference.py  # 验证 tokenizer、config fingerprint、vector 可重现性
 ~~~
 
-先在 Stage 1 写 Python reference，再在 Stage 2 写逐行对应的 C++ CPU。实现并逐 tensor
-对比：RMSNorm、linear、RoPE、causal attention、GDN、SwiGLU 与 residual。
+默认 vector 至少覆盖短 prefill、`prefill(ABCD)+decode(E)+decode(F)`、greedy continuation、
+EOS。vector metadata 必须记录 model revision、config、input ids、dtype 与允许误差；不能把
+“目前本机跑出来的数”变成无来源 golden file。
 
-**验收：** 秒级运行；每项算子与 Python 对齐；失败时可定位到单个算子/单个 token。
-这一阶段不要求输出有意义文字。它是后续 CPU kernel、CUDA kernel 和优化 kernel 的
-永久 correctness test，不能跳过。
+**验收：** `make -C 01-hf-reference test MODEL=../models/Qwen3.5-0.8B` 生成可复现 test vectors；
+`make dump` 第二次运行得到同一 config/input 和同一 greedy ids。默认只比较官方输出，不做
+performance benchmark。
 
-## 6. Stage 3 — Qwen3.5-0.8B CPU reference
+### Stage 2 — `02-cpu-0.8b/`：真实 C++ CPU baseline
+
+以 `lessons/09_qwen35_0_8b.cpp` 为已验证数学来源，复制为一个可演进的、仍然模型专用的 CPU
+snapshot。先重命名 `Model/State/Work` 为清楚的 `Qwen35Engine/Qwen35Session/Qwen35Scratch`，然后
+显式实现上面的 prefill/decode/sync API。不要在这一步“重构成框架”。
+
+~~~text
+02-cpu-0.8b/
+  README.md
+  Makefile
+  qwen35.cpp          # 直接的 CPU forward 和 Engine / Session
+  pack_weights.py     # HF safetensors → 固定、mmap-friendly qwen35-0.8b.bin
+  test_cpu.py         # 读取 Stage 1 vectors，逐项比较 CPU 与官方结果
+  test_state.cpp      # 无需 checkpoint 的 state 生命周期单测
+~~~
+
+**验收：** `make test MODEL=...` 同时跑 state tests、完整 vocabulary logits、greedy ids 与
+`session_sync()` 的 prefix reuse/rebuild 测试。第一处失败必须报出 `case/token/layer/tensor/
+max_abs_error`。CPU 就是以后所有 CUDA kernel 的 oracle，不追性能。
+
+### Stage 3 — `03-cuda-0.8b/`：CUDA first-correct
+
+以现有 `qwen35-0.8b/` 的 cuBLAS、GPU-resident weights/state、GPU argmax 和 regression 作为
+材料迁入；不从头发明更快的实现。
+
+~~~text
+03-cuda-0.8b/
+  README.md
+  Makefile
+  qwen35_cuda.cu      # fixed 0.8B CUDA forward
+  test_cuda.py        # CPU vector / CUDA vector 的完整比较
+  test_cuda.sh        # 无 Python 的 smoke/self-test wrapper
+~~~
+
+linear 与 lm_head 首先用 cuBLAS；RMSNorm、RoPE、SiLU/multiply、residual、GDN、attention 是
+直白 kernels。所有 weights、work buffers、KV/GDN/conv state 必须留在 GPU；正常 decode 不得
+下载全 vocabulary logits。
+
+**验收：** `make cuda-test` 通过无权重 self-test；`make oracle MODEL=... WEIGHTS=...` 以 Stage 2
+为 CPU oracle，比较全 logits、greedy ids、prefill/decode/state。GPU 阈值因 BF16 GEMV 路径可与
+CPU 不同，但必须写在 vector metadata/README 中，不能临时放宽。
+
+### Stage 4 — `04-0.8b-runtime/`：将基础语义封口
+
+这个目录不重新实现 layer math。它以 Stage 2/3 的 binary 作为黑盒，完成以后迁 27B 必须具备的
+运行契约：
+
+~~~text
+04-0.8b-runtime/
+  README.md
+  Makefile
+  qwen35_chat.py      # 官方 tokenizer / chat template 的薄包装，不进入 C++ forward
+  test_vectors.py     # 启动 CPU/CUDA binaries，执行全部 versioned cases
+  test_e2e.py         # prompt → tokens → generate → decode 的固定 smoke tests
+  test_sync.py        # 相同前缀 append、较短前缀 replay、不同前缀 reset
+~~~
+
+此时仍不做 HTTP server 或跨 session prefix cache；但必须将 CLI/session contract 固定下来，保证
+接下来只替换 model dimensions/weights 而不是重做 API。可保留 MMLU-Pro short coverage 作为慢速
+质量回归，但它不能代替数值 vectors。
+
+### 今晚的严格顺序与停机条件
+
+| 顺序 | 自动任务 | 绿灯命令 | 禁止提前做的事 |
+| --- | --- | --- | --- |
+| 1 | Stage 1：生成官方 test vectors | `make -C 01-hf-reference test MODEL=../models/Qwen3.5-0.8B` | 不改 lessons 数学 |
+| 2 | Stage 2：从 lesson 09 建真实 CPU session API | `make -C 02-cpu-0.8b test MODEL=...` | 不优化 linear、不加 tokenizer |
+| 3 | Stage 3：迁现有 CUDA correct path | `make -C 03-cuda-0.8b cuda-test` + `make oracle` | 不写新 fused kernel |
+| 4 | Stage 4：固定 session/CLI/e2e contract | `make -C 04-0.8b-runtime test` | 不做 HTTP/prefix snapshot |
+| 5 | 总回归与提交 | 四个目录的 Makefile 都绿 | 不开始 27B |
+
+**今晚结束定义：** 真实官方 0.8B 权重能经过 HF → CPU → CUDA → tokenizer wrapper 的完整验证，
+并且 `Engine + Session + session_sync()` 的行为有固定测试。到这一步才能开始 `05-qwen38-27b/`。
+任何 layer/logit/state 不一致都要先停在 0.8B 修复；绝不能携带“不知道为什么”的误差去 27B。
+
+## 5. Stage 1 — 官方 Qwen3.5-0.8B Python oracle
+
+**目标：** 以官方 checkpoint 和 `Qwen3_5ForCausalLM` 建立带来源的 test vectors，而不是用
+“C++ 看起来生成了文字”做 golden。PyTorch / Transformers 只在本目录运行；它们永远不链接进
+C++ binary。
+
+HF reference 要支持固定 token ids 的 prefill、decode 和 greedy continuation；默认 dump final
+logits 与 token ids，并在需要定位误差时以 hooks/官方输出暴露 layer boundary tensors。它还验证
+config、tokenizer revision 与权重文件，避免不同 checkpoint 生成的 vector 混用。
+
+**验收：** 任意 Stage 2/3 regression 都能回溯到一个 versioned 的 `01-hf-reference` vector
+及其官方模型来源。
+
+## 6. Stage 2 — Qwen3.5-0.8B CPU reference
 
 **目标时间：3–5 天。**
 
@@ -240,7 +271,7 @@ greedy sampling。linear 可以很慢；本阶段唯一优先级是正确。
 **验收：** 官方 HF logits 与 CPU logits 在约定误差内一致；`Hello` 能正常续写；固定 prompt
 的 greedy token 序列稳定。当前 `lessons/09_qwen35_0_8b.cpp` 就是这一阶段的课程 capstone。
 
-## 7. Stage 3 的完成条件 — 明确 prefill、decode 与 state
+## 7. Stage 2 的完成条件 — 明确 prefill、decode 与 state
 
 **目标时间：2–3 天。**
 
@@ -264,7 +295,7 @@ struct SequenceState {
 **验收：** `prefill(ABCD) → decode(E) → decode(F)` 与 reference 的同一序列一致；不会为
 E 或 F 重新计算 ABCD。到这里，已经是一个真正的 batch=1 LLM inference engine。
 
-## 8. Stage 4 — CUDA first-correct version
+## 8. Stage 3 — CUDA first-correct version
 
 **目标时间：4–7 天。**
 
@@ -284,7 +315,18 @@ E 或 F 重新计算 ABCD。到这里，已经是一个真正的 batch=1 LLM inf
 
 能持续聊天，且 CUDA 与 CPU 的逐层/端到端 regression 均通过。
 
-## 9. Stage 5 — 切换到 Qwen3.8-27B
+## 9. Stage 4 — 0.8B runtime integration
+
+在切换 27B 前，将 Stage 2/3 的 `Engine + Session` 契约固定为一个真实可调用的 0.8B runtime：
+token id CLI、官方 tokenizer/chat template 薄包装、state sync regression、CPU/CUDA vector
+runner 与固定 prompt smoke test。这个 stage 只编排已经正确的 engines；不新增 layer math，也不
+开始 HTTP server。
+
+**验收：** 相同 full prefix 只运行 suffix；缩短或改变 prefix 必须安全 reset/replay；CPU/CUDA
+能被同一个 token-id case 调用；全部 0.8B 数值 vector、greedy vector 与文本 smoke test 一条
+命令执行。它是 27B 迁移前最后一道 gate。
+
+## 10. Stage 5 — 切换到 Qwen3.8-27B
 
 **目标时间：2–4 天。**
 
@@ -302,7 +344,7 @@ E 或 F 重新计算 ABCD。到这里，已经是一个真正的 batch=1 LLM inf
 
 可以正确 prefill、decode、正常生成。**这是“27B CUDA 正确跑起来”的 milestone。**
 
-## 10. Stage 6 — Prefix cache
+## 11. Stage 6 — Prefix cache
 
 **目标时间：2–4 天。**
 
@@ -326,7 +368,7 @@ checkpoint 即可；block hashing、LRU、共享 cache 与 eviction 都留到以
 
 **验收：** 命中 prefix 的输出必须与从头 prefill 完全等价，同时能测到省去的 prefill tokens。
 
-## 11. Stage 7 — 日常可用 V1
+## 12. Stage 7 — 日常可用 V1
 
 **目标时间：3–5 天。**
 
@@ -347,7 +389,7 @@ checkpoint 即可；block hashing、LRU、共享 cache 与 eviction 都留到以
 **V1 验收：** 自己的 IDE、agent 或聊天客户端可连接；同一用户连续对话命中 prefix cache；
 错误、取消和 EOS 都不会破坏下一次请求的 state。
 
-## 12. Stage 8 — 用 profiling 学性能
+## 13. Stage 8 — 用 profiling 学性能
 
 优化之前必须先测量。用 Nsight Systems / Nsight Compute 建立固定 benchmark，并记录：
 
@@ -365,7 +407,7 @@ HBM bandwidth / SM utilization / occupancy
 先得到瓶颈，再改一个因素、benchmark、用 Nsight 解释结果。不能因为 kernel “看起来应该更快”
 就合并或改 layout。
 
-### 7a. CUDA 学习重点：GDN
+### Stage 8a. CUDA 学习重点：GDN
 
 从已知数学开始：
 
@@ -381,7 +423,7 @@ out   = q @ S
 memory → 减少 global IO → fuse `decay + old + delta + update + query`。每一步都保留 correctness
 test、benchmark 和 Nsight 记录。
 
-### 7b. 第二重点：decode attention
+### Stage 8b. 第二重点：decode attention
 
 固定 GQA、batch=1、连续 KV 的 decode attention 可以从最清晰的实现开始：
 
@@ -392,7 +434,7 @@ Q → scan K → QK → online softmax → scan V → accumulate
 先写 naive attention，再写 fused decode attention；只有此后才阅读 FlashAttention / FlashInfer，
 用它们解释自己的实现为什么需要分块、online softmax 和更少的内存读写。
 
-### 7c. 第三重点：decode GEMV
+### Stage 8c. 第三重点：decode GEMV
 
 prefill GEMM 可以长期交给 cuBLAS。模型稳定后再把 decode linear 当作 CUDA 学习练习：
 
@@ -402,7 +444,7 @@ naive GEMV → warp reduction → vectorized load → half2 → layout → quant
 
 每版与 cuBLAS 和上一版本同时比较正确性与性能。不要为了“全自研”重写成熟 GEMM。
 
-## 13. Quantization、batching 与以后
+## 14. Quantization、batching 与以后
 
 ### Quantization
 
@@ -423,20 +465,18 @@ fusion 为什么能减少 decode 的带宽压力。不要把项目变成“维�
 
 做到 batching 才从 inference engine 进入 serving engine；这可以是半年后的独立学习路线。
 
-## 14. 里程碑与时间预期
+## 15. 里程碑与时间预期
 
 ~~~text
-Tiny Python reference
+lessons/：公式与 toy state 已读懂
         ↓
-Tiny C++ reference
+official Qwen3.5-0.8B HF vectors
         ↓
-Qwen3.5-0.8B CPU
+0.8B CPU Engine + Session
         ↓
-prefill / decode / state
+0.8B CUDA + cuBLAS
         ↓
-CUDA + cuBLAS
-        ↓
-0.8B CUDA correct
+0.8B runtime / session_sync / end-to-end regression
         ↓
 Qwen3.8-27B CUDA correct
         ↓
@@ -455,10 +495,9 @@ Q8 / Q4 / FP8
 
 | 集中开发的累计时间 | 目标 |
 | --- | --- |
-| 2–3 天 | Tiny Python/C++ reference 跑通 |
-| 约 1 周 | 0.8B CPU 正确生成 |
-| 约 2 周 | 0.8B CUDA 正确 |
-| 2–3 周 | 27B CUDA 正确运行 |
+| 今晚 | 建好并尽力跑通 0.8B Stage 1–4：official vectors、CPU/CUDA engine、session/runtime regression |
+| 1–3 天 | 修完 0.8B 的所有数值/state 差异，固定 weights、vectors 与 CLI contract |
+| 之后 2–4 天 | 27B CUDA 正确运行 |
 | 3–4 周 | 27B + prefix cache + server，开始自己用 |
 | 4–6 周 | CUDA profiling 与第一轮性能优化 |
 | 2–3 个月 | 一个自己能从 token 到 kernel 全部解释的 inference engine |
