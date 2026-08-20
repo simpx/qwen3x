@@ -33,7 +33,7 @@ head好像是模型的一个惯用说法，接在任务输出的“输出头”
 出于惯例，或者是为了逻辑上可以理解为“为每个token准备一个weight”，所以权重形状实际上是[V, H]
 [H] x [V, H].T = logits[V]
 
-tied_lm_head：qwen 3.5-0.5b使用tied lm head，直接用embedding作为lm_head的权重
+tied_lm_head：qwen 3.5-0.8b使用tied lm head，直接用embedding作为lm_head的权重
 实际上就是直接复用embedding，而不是真的训练一个W[V, H]
 反正embedding的shape是[V, H],而lm_head需要的weight shape也是[V, H]
 
@@ -69,7 +69,7 @@ FFN
 下一层 hidden
 
 所以，每一层里，做一些归一、升维的操作，然后就可以做activation，最后再通过一些linear操作，把shape变回hidden
-简单的FFN可以是：FFN(x) = W_down @ activation(W_up @ x)，这里的activation是attn这些，而前后就是先up再down
+简单的FFN可以是：FFN(x) = W_down @ activation(W_up @ x)
 
 通常ffn最后会有一个residual net
 这里MLP和FFN是同一个东西
@@ -102,7 +102,7 @@ Query 与所有 Key 打分
 → 得到当前 token 从前文读取的信息
 
 我的最朴素认知
-以decode为例，整个序列是[T, H]，先只考虑head_size=1
+以decode为例，整个序列是[T, H]，先只考虑head数量1
 1. 先拿最后一个token的hidden states，[H]
 2. [H] @ wq[H, D] -> q[D] ，相当于拿到这个token的一种表示，直觉理解为“待查询的信息”
 3. [T, H] @ wk[H, D] -> k[T, D]，相当于拿到所有token的一种表示，直觉理解为用来计算“哪些值得查询”的一种信息
@@ -113,4 +113,4 @@ Query 与所有 Key 打分
 其中，q是拿着[H]算的，所以不需要历史，而k和v都是[T, H]算的，历史cache可以存下来
 
 prefill的时候，需要用一个causal mask，避免信息泄露
-这里是decode，没信息可泄露，所以也没有attn
+这里是decode，没信息可泄露，所以也没有causal mask
