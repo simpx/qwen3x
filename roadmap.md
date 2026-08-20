@@ -323,17 +323,24 @@ runner 与固定 prompt smoke test。这个 stage 只编排已经正确的 engin
 token-id case 调用；全部 0.8B 数值 vector、greedy vector 与文本 smoke test 一条
 命令执行。它是 27B 迁移前最后一道 gate。
 
-## 10. Stage 5 — 切换到 Qwen3.8-27B
+## 10. Stage 5 — Qwen3.8-27B
 
-**目标时间：2–4 天。**
+**目标时间：2–4 天，在具备足够显存和本地权重之后。**
 
-如果 0.8B 版本没有把 shape 无意写死在算法中，这一步应该主要是替换固定模型描述与权重：
+27B 不是把 0.8B 的 `constexpr` 替换成大数字。0.8B snapshot 刻意为教学固定模型；27B 要另写同样
+直接的 `Model/State/Work/forward`，并先通过 [05-qwen38-27b/](05-qwen38-27b/README.md) 的官方 metadata
+gate。它已经固定以下事实：
 
-- config、layer count、hidden/intermediate/head shapes；
-- 真实 GDN shape 与 attention shape；
-- 27B BF16 权重格式与内存检查。
+- 64 layers = 48 Gated DeltaNet + 16 full attention；
+- `H=5120`、`I=17408`；attention 是 24 query / 4 KV heads、head dim 256；
+- DeltaNet 是 16 key / 48 value heads、各 dim 128，conv kernel 4；
+- lm_head 不再 tied；checkpoint 总计 1199 tensors，其中 text-only runtime 需要 851 个；
+- raw BF16 payload 约 51.75 GiB；这台 16 GiB 4080 无法加载，且绝不能复用 Stage 3 的 FP32
+  linear-weight expansion（约 103.5 GiB）。
 
-仍然不追 TPS、不引入量化、不做多卡。先在 DGX Spark 上证明：
+因此真正的 Stage 5 implementation 要在 DGX Spark 或同等容量机器上以 BF16 weights / BF16 GEMM
+路径开始，先建立 27B HF vectors，再实现 text-only loader、prefill、decode 和 state。仍然不追 TPS、
+不引入量化、不做多卡。先证明：
 
 ~~~sh
 ./qwen --model qwen38-27b.bin --cuda

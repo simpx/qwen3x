@@ -17,5 +17,6 @@
 /02-cpu-0.8b/qwen35
 /03-cuda-0.8b/build/
 /03-cuda-0.8b/qwen35_cuda
+/05-qwen38-27b/build/
 __pycache__/
 *.pyc

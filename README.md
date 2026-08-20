@@ -67,6 +67,7 @@ make test
 | [02-cpu-0.8b/](02-cpu-0.8b/README.md) | plain C++ `Model + State + Work` CPU forward | `make -C 02-cpu-0.8b test` |
 | [03-cuda-0.8b/](03-cuda-0.8b/README.md) | 直接 CUDA kernels + cuBLAS，state 留在 GPU | `make -C 03-cuda-0.8b test` |
 | [04-0.8b-e2e/](04-0.8b-e2e/README.md) | 官方 tokenizer/chat template 薄壳与真实文本 smoke test | `make -C 04-0.8b-e2e test` |
+| [05-qwen38-27b/](05-qwen38-27b/README.md) | 官方 27B config/tensor schema/显存 preflight（不下载权重） | `make -C 05-qwen38-27b test` |
 
 每一层都用前一层无法伪造的证据验证：HF full logits → C++ CPU full logits → CUDA full logits →
 真实 prompt 的 tokenizer ids 与 greedy text。Python 只用于 reference、转换和这个暂时的 tokenizer
