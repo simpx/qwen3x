@@ -114,3 +114,32 @@ Query 与所有 Key 打分
 
 prefill的时候，需要用一个causal mask，避免信息泄露
 这里是decode，没信息可泄露，所以也没有causal mask
+
+## 05
+
+KV cache只保存K和V，不保存Q：旧的Q用完就没用了，但旧K/V还要给未来token读取。
+
+decode位置t的严格时间线：
+
+1. 进入这一步时，历史cache保存位置0到t-1的K/V。
+2. 当前hidden h_t分别投影出q_t、k_t、v_t。
+3. 把当前k_t、v_t append进cache。
+4. 此时可见KV = 历史KV cache + 当前token的k_t/v_t，也就是位置0到t。
+5. q_t和全部可见K计算score，softmax后再从全部可见V中加权读取。
+
+公式：
+
+cache_after_t = append(cache_before_t, k_t, v_t)
+scores[T] = q_t[D] @ K_cache[T,D].T / sqrt(D)
+p[T] = softmax(scores[T])
+head_output[D] = p[T] @ V_cache[T,D]
+
+05课的toy中一共有两个输入token。当前query可以理解为第二个token的q_1，cache已经
+包含[k_0,k_1]和[v_0,v_1]；得到的是token 1的attention output。完整模型还要继续经过
+output projection、后续layer和lm_head，最后才预测token 2。
+
+GQA：本例QH=2、KVH=1，两个Q head共享同一个KV head。共享K/V不代表输出相同，因为
+两个Q不同，算出的attention score和读取结果仍然可以不同。
+
+`gqa_decode(query, cache, output)`只负责“当前Q读取已经append好的可见cache”，不是完整
+decode step；append发生在调用它之前。因此这里的cache是包含当前token K/V的完整可见前缀。

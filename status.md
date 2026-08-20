@@ -15,10 +15,12 @@
   `H=2、I=3`，避免三个 shape 都相同。
 - lesson 03 有意跳过细节：目前只保留“RoPE 对 attention 的 Q/K 加位置信息，属于
   attention 路径而非 FFN”这一层认识。
-- lesson 04 正在学习：已建立单 head decode 的 Q/K/V、scaled score、softmax、value
-  weighted sum、output projection 与 causal 的整体心智模型；尚未逐行读完
-  `causal_attention()`。
-- lesson 05--09 尚未正式学习。
+- lesson 04 已完成概念层学习并跳过逐行实现：已建立单 head decode 的 Q/K/V、scaled
+  score、softmax、value weighted sum、output projection 与 causal 的整体心智模型。
+- lesson 05 已完成概念层学习并跳过逐行实现：理解 decode step 中
+  `past cache + current k/v -> visible cache` 的时间线；知道 Q 不缓存、当前 K/V 要先 append，
+  以及 GQA 是多个 Q head 共享较少的 KV head。
+- lesson 06--09 尚未正式学习。
 
 已经澄清、后续仍需留意的边界：
 
@@ -32,9 +34,9 @@
 - 带 KV cache 的 decode 只投影当前 token 的 `q/k/v` 并 append 当前 `k/v`；不会每步重新
   用 `[T,H]` 计算全部历史 K/V。无 cache 的朴素实现才会重算历史。
 
-下一次继续：先打开 `00-lessons/04_attention.cpp`，把 `causal_attention()` 的三段循环
-逐一对应到 `score = qK^T/sqrt(D)`、stable softmax、`output = pV`；确认后再进入 lesson 05
-的 GQA 与 KV cache。
+下一次继续：打开 `00-lessons/06_deltanet_recurrence.cpp`，先建立 DeltaNet 为什么用固定
+矩阵 state 代替随 context 增长的 KV cache，再按“目的/直觉 -> 数学与 shape -> 实现”理解
+一次 `delta_step()`。
 
 ## 项目边界
 
