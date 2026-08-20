@@ -14,6 +14,9 @@
   时运行 `cd 00-lessons && make test`。改动真实 0.8B 数值路径时，如本地 checkpoint 存在，
   还要运行 `make model-test MODEL=../models/Qwen3.5-0.8B`。
 - 只有用户明确要求时才创建 commit。
+- 用户明确要求“直接 push main”时，先在已验证的 feature branch 上准备并检查提交，再将
+  该提交 fast-forward 到本地 `main` 并推送 `origin/main`；不要只停在 feature branch，
+  也不要自动创建 PR。若远端 main 已出现无法 fast-forward 的新提交，停止并向用户说明。
 
 ## 教学方式
 
