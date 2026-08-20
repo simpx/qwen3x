@@ -12,8 +12,8 @@
 Transformers 负责加载官方 Qwen3.5 checkpoint 和 tokenizer；PyTorch 执行官方 forward。两者
 只属于开发/测试环境：C++ runtime 不链接 Python、PyTorch 或 Transformers。
 
-这里不会用 `model.generate()` 作为黑盒。`reference.py` 显式逐 token 调用官方 model，保留
-`past_key_values`，因此它的执行语义正好对应 C++ 的：
+这里不会用 `model.generate()` 作为黑盒。`dump_vectors.py` 直接逐 token 调用官方 model，保留
+`past_key_values`；没有额外的 HF wrapper，因此它的执行语义一眼就对应 C++ 的：
 
 ```text
 prefill(A, B, C, D) → decode(E) → decode(F)

@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Validate a Stage 1 vector bundle and rerun one official case as a reproducibility check."""
+"""Validate a vector bundle and visibly rerun one direct official model call."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
 import numpy as np
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from reference import VOCAB_SIZE, fingerprint, load_reference, run_tokens
+
+VOCAB_SIZE = 248320
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,18 +24,41 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def main() -> None:
     args = parse_args()
     metadata = json.loads((args.vectors / "vectors.json").read_text())
     if metadata.get("format") != "qwen3x-hf-vectors" or metadata.get("version") != 1:
         raise SystemExit("unsupported or malformed vector metadata")
-    reference = load_reference(args.model, args.device)
-    if metadata.get("device") != str(reference.device):
+    if args.device == "cuda" and not torch.cuda.is_available():
+        raise SystemExit("--device cuda requested, but torch.cuda.is_available() is false")
+    device = torch.device("cuda:0" if args.device == "cuda" or
+                          (args.device == "auto" and torch.cuda.is_available()) else "cpu")
+
+    # Again, no reference object: this is the official model call being verified.
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, dtype=torch.float32, attn_implementation="eager"
+    ).eval().to(device)
+    fingerprint = {
+        "config_sha256": sha256(args.model / "config.json"),
+        "safetensors_index_sha256": sha256(args.model / "model.safetensors.index.json"),
+        "tokenizer_sha256": sha256(args.model / "tokenizer.json"),
+        "tokenizer_vocab_size": int(getattr(tokenizer, "vocab_size", -1)),
+        "torch_version": torch.__version__,
+    }
+    if metadata.get("device") != str(device):
         raise SystemExit(
-            f"vector device {metadata.get('device')!r} differs from requested official device "
-            f"{str(reference.device)!r}; use separate CPU and CUDA vector bundles"
+            f"vector device {metadata.get('device')!r} differs from requested official device {str(device)!r}"
         )
-    if metadata.get("fingerprint") != fingerprint(args.model, reference.tokenizer):
+    if metadata.get("fingerprint") != fingerprint:
         raise SystemExit("checkpoint/tokenizer fingerprint differs from the vector bundle")
     if metadata.get("vocab_size") != VOCAB_SIZE:
         raise SystemExit("vector vocabulary does not match this fixed Qwen3.5 engine")
@@ -51,13 +78,22 @@ def main() -> None:
                 raise SystemExit(f"{name}: malformed greedy ids or non-finite logits")
             print(f"schema {name}: {inputs.size} token steps, {greedy.size} greedy tokens")
 
-        # Rerun the smallest case.  Exact equality is expected in eager FP32 for the same local
-        # checkpoint/device; a nonzero mismatch is useful evidence, not a threshold to hide.
-        name = cases[0]["name"]
-        actual = run_tokens(reference, vectors[f"{name}.input_ids"].tolist())
-        expected = vectors[f"{name}.step_logits"]
+        # Rerun the smallest case directly, keeping the official cache after every token.
+        cache = None
+        rows: list[np.ndarray] = []
+        with torch.inference_mode():
+            for token in vectors[f"{cases[0]['name']}.input_ids"].tolist():
+                output = model(
+                    input_ids=torch.tensor([[int(token)]], device=device, dtype=torch.long),
+                    past_key_values=cache,
+                    use_cache=True,
+                )
+                cache = output.past_key_values
+                rows.append(output.logits[0, -1].float().cpu().numpy().copy())
+        actual = np.asarray(rows, dtype=np.float32)
+        expected = vectors[f"{cases[0]['name']}.step_logits"]
         maximum = float(np.abs(actual.astype(np.float64) - expected.astype(np.float64)).max())
-        print(f"rerun {name}: max_abs_error={maximum:.9g}")
+        print(f"rerun {cases[0]['name']}: max_abs_error={maximum:.9g}")
         if maximum != 0.0:
             raise SystemExit("official FP32 vector is not reproducible on this checkpoint/device")
     print("Stage 1 official reference: passed")

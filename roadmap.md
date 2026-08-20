@@ -151,7 +151,7 @@ FP32 的 vectors 分别保存到 `build/cpu/` 与 `build/cuda/`；测试会拒�
 01-hf-reference/
   README.md
   Makefile
-  reference.py       # 加载官方 model；固定 FP32 / token ids；输出 logits 与 greedy ids
+  dump_vectors.py    # 直接调用官方 model；固定 FP32 / token ids；输出 logits 与 greedy ids
   dump_vectors.py    # 生成 versioned binary test vectors；可选 module hooks dump layer tensors
   test_reference.py  # 验证 tokenizer、config fingerprint、vector 可重现性
 ~~~
