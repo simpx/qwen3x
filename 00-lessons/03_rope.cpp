@@ -27,9 +27,16 @@ constexpr int kHeadDim = 4;
 constexpr int kRotaryDim = 4;
 constexpr float kRopeTheta = 10000000.0f;
 
+// 目的/直觉：比较 sin/cos 产生的浮点近似时，容许极小的舍入误差。
+// 数学：      close(a,b) = |a-b| < 1e-5。
+// 实现：      对差值取绝对值，再与固定阈值比较。
 bool close(float left, float right) { return std::fabs(left - right) < 1e-5f; }
 
-// 为一个 token position 计算每个旋转平面的 cos/sin。
+// 目的/直觉：把离散位置 position 变成每个二维旋转平面各自的 cos/sin；低频平面
+//             变化慢、高频平面变化快，使不同位置得到不同的 Q/K 方向。
+// 数学：      inv_freq_i = theta^(-2i/R)，angle_i = position*inv_freq_i，
+//             cos_i=cos(angle_i)，sin_i=sin(angle_i)，i=0..R/2-1。
+// 实现：      遍历 R/2 个旋转平面，并把同一 cos/sin 写到 half-rotation 的前后半区。
 void make_rope_frequencies(int position, float* cosine, float* sine) {
     constexpr int half = kRotaryDim / 2;
     for (int i = 0; i < half; ++i) {
@@ -42,6 +49,13 @@ void make_rope_frequencies(int position, float* cosine, float* sine) {
     }
 }
 
+// 目的/直觉：让同一份 Q/K 内容随 token position 旋转；之后第 00 课的 dot(q,k)
+//             就会同时反映内容匹配和相对位置，而不需要给 hidden 追加位置数字。
+// 数学：      对每对 (x_i,x_{i+R/2})：
+//             y_i       = x_i*c_i - x_{i+R/2}*s_i
+//             y_{i+R/2} = x_{i+R/2}*c_i + x_i*s_i。
+// 实现：      先复制 rotary 部分，避免原地写 y_i 时覆盖计算 y_{i+R/2} 所需的 x_i；
+//             再遍历 R/2 个二维平面。head 中 R 之后的通道保持不变。
 void apply_rope(float* vector, const float* cosine, const float* sine) {
     constexpr int half = kRotaryDim / 2;
     // 原地旋转会覆盖同一对的另一个输入，因此先备份 rotary 部分。
@@ -54,6 +68,9 @@ void apply_rope(float* vector, const float* cosine, const float* sine) {
     }
 }
 
+// 目的/直觉：分别锁定“不旋转”和“旋转 90 度”两个可手算边界，验证配对与符号。
+// 数学：      position=0 时 cos=1,sin=0，所以 y=x；cos=0,sin=1 时 (a,b)->(-b,a)。
+// 实现：      先调用真实频率生成验证恒等变换，再手工提供 90 度 cos/sin 验证旋转公式。
 void self_test() {
     float position_zero_cos[kRotaryDim] = {};
     float position_zero_sin[kRotaryDim] = {};
@@ -76,8 +93,10 @@ void self_test() {
 
 }  // namespace lesson03
 
+// 目的/直觉：展示 position=1 时真实频率对一个 Q/K head 的旋转结果。
+// 数学：      frequencies=RoPE(position=1)，output=rotate([1,2,3,4],frequencies)。
+// 实现：      先跑 self_test，再生成 cos/sin、原地 apply_rope 并打印四个通道。
 int main() {
-    // position=1 的结果会是浮点近似；position=0 在 self_test 中已经验证为恒等变换。
     lesson03::self_test();
 
     float vector[lesson03::kHeadDim] = {1.0f, 2.0f, 3.0f, 4.0f};

@@ -36,6 +36,9 @@ namespace lesson06 {
 constexpr int kKeyDim = 2;
 constexpr int kValueDim = 2;
 
+// 目的/直觉：比较 recurrent state 的浮点结果时容许微小误差。
+// 数学：      close(a,b)=|a-b|<1e-5。
+// 实现：      对差值取绝对值，再与固定阈值比较。
 bool close(float left, float right) { return std::fabs(left - right) < 1e-5f; }
 
 struct RecurrentState {
@@ -43,6 +46,16 @@ struct RecurrentState {
     float matrix[kKeyDim][kValueDim] = {};
 };
 
+// 目的/直觉：用固定大小矩阵 S 压缩历史。每个 token 先遗忘旧信息，再比较“当前 key
+//             已能读回什么”，只写入 value 的误差，最后用 query 读取更新后的记忆。
+// 数学：      d=exp(log_decay)
+//             S=d*S
+//             memory=k^T@S                         [K]@[K,V] -> [V]
+//             delta=beta*(v-memory)                [V]
+//             S=S+k outer delta                    [K,V]
+//             out=q^T@S                            [K]@[K,V] -> [V]。
+// 实现：      严格按上述顺序执行四组循环；S 原地更新并跨 token 保留，临时 memory
+//             每一步重新创建。先写后读使当前 token 能影响自己的 output。
 void delta_step(const float* query, const float* key, const float* value,
                 float log_decay, float beta, RecurrentState* state, float* output) {
     // 顺序不能交换：先 decay，再根据衰减后的 memory 计算 delta，最后从更新后的
@@ -82,6 +95,9 @@ void delta_step(const float* query, const float* key, const float* value,
     }
 }
 
+// 目的/直觉：用相同 token 连续更新同一份 S，观察 state 大小不变但记忆逐步接近 value。
+// 数学：      初始 S=0、decay=0.5、beta=0.5；第一次 out=0.5*v，第二次 out=0.625*v。
+// 实现：      对同一 RecurrentState 调用 delta_step 两次，并断言两次可手算输出。
 void self_test() {
     RecurrentState state;
     const float query[kKeyDim] = {1.0f, 0.0f};
@@ -103,8 +119,10 @@ void self_test() {
 
 }  // namespace lesson06
 
+// 目的/直觉：展示一次 Delta rule 后的输出和实际保存下来的固定矩阵 S。
+// 数学：      q=k=[1,0]，所以本例只写入并读取 S 的第 0 行。
+// 实现：      运行 self_test，再做一步 delta_step 并打印 output 与 state row 0。
 int main() {
-    // 打印 matrix 的第一行；因为 key=[1,0]，本例只会写入这一行。
     lesson06::self_test();
 
     lesson06::RecurrentState state;

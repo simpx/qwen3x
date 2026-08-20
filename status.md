@@ -2,6 +2,40 @@
 
 快照日期：2026-08-20。这是一份项目事实检查点；它不代表 Qwen3.8-27B 已经能够运行。
 
+## 当前学习进度（后续 session 从这里继续）
+
+学习笔记位于 `00-lessons/note.md`。当前进度是：
+
+- lesson 00 已完成：能区分 scalar/vector/matrix/tensor、rank 与 shape；理解 dot、
+  matrix-vector multiplication/GEMV、embedding、tied lm_head、logit、softmax 与 argmax。
+- lesson 01 已完成：理解 linear 是“遍历输出行 + dot”，并能按公式手算 Qwen ordinary
+  RMSNorm；知道 checkpoint weight 在这里使用 `1 + weight`。
+- lesson 02 已完成：理解 Transformer/Qwen layer 的两个主要分支是 mixer 与 FFN/MLP；
+  理解 SwiGLU 的 gate/up/down、`H -> I -> H`、SiLU 和 residual。当前 toy 已明确使用
+  `H=2、I=3`，避免三个 shape 都相同。
+- lesson 03 有意跳过细节：目前只保留“RoPE 对 attention 的 Q/K 加位置信息，属于
+  attention 路径而非 FFN”这一层认识。
+- lesson 04 正在学习：已建立单 head decode 的 Q/K/V、scaled score、softmax、value
+  weighted sum、output projection 与 causal 的整体心智模型；尚未逐行读完
+  `causal_attention()`。
+- lesson 05--09 尚未正式学习。
+
+已经澄清、后续仍需留意的边界：
+
+- FFN/MLP 是完整的逐 token 非线性模块；activation（如 SiLU）是模块内部的函数，
+  attention 不是 activation。
+- “逐 token 计算”不代表属于 FFN：RMSNorm、Q/K/V projection、RoPE 也逐 token 计算，
+  但属于 layer 边界或 attention 路径。
+- 单 head readout `[D]` 仍需 output projection 回 `[H]`，才能与 hidden 做 residual。
+- prefill 对完整 `[T,T]` score matrix 使用 causal mask；decode 仍然执行 attention，只是
+  未来 K/V 尚不存在，所以 causal 由 cache 的可见范围保证，不需要显式 mask。
+- 带 KV cache 的 decode 只投影当前 token 的 `q/k/v` 并 append 当前 `k/v`；不会每步重新
+  用 `[T,H]` 计算全部历史 K/V。无 cache 的朴素实现才会重算历史。
+
+下一次继续：先打开 `00-lessons/04_attention.cpp`，把 `causal_attention()` 的三段循环
+逐一对应到 `score = qK^T/sqrt(D)`、stable softmax、`output = pV`；确认后再进入 lesson 05
+的 GQA 与 KV cache。
+
 ## 项目边界
 
 `qwen3x` 是一个可阅读、模型专用的 Qwen hybrid inference 项目。它不是通用 Tensor

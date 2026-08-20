@@ -56,34 +56,51 @@ constexpr int MAX_TOKENS = 4096;
 constexpr float EPS = 1e-6f, THETA = 10000000.0f;
 using B = uint16_t;  // 一个 BF16 权重元素的原始 bit；运算时立即转为 FP32。
 
+// 目的/直觉：遇到模型文件、token 或参数错误时立即停止，避免带着坏状态继续计算。
+// 数学：      无；这是所有前置条件失败时的统一终止路径。
+// 实现：      向 stderr 打印带 qwen35 前缀的错误，再以非零状态退出进程。
 [[noreturn]] void die(const char* text) {
     std::fprintf(stderr, "qwen35: %s\n", text);
     std::exit(1);
 }
 
+// 目的/直觉：把 checkpoint 中节省空间的 BF16 权重转换成可直接计算的 FP32。
+// 数学：      BF16 保留 FP32 的 sign、exponent 和最高 7 个 fraction bit，即 FP32 高 16 bit。
+// 实现：      将 16 bit 左移到 FP32 高半区，再用 memcpy 按位解释为 float。
 float f32(B value) {
-    // BF16 与 FP32 共用最高 16 bit；左移后按位复制即可得到精确的 FP32 表示。
     uint32_t bits = static_cast<uint32_t>(value) << 16;
     float out;
     std::memcpy(&out, &bits, sizeof(out));
     return out;
 }
 
+// 目的/直觉：只为无模型 self-test 构造少量 BF16 测试值，不参与真实权重加载。
+// 数学：      FP32 舍入到 BF16，使用 round-to-nearest-even 而不是简单截断。
+// 实现：      给被截掉的低 16 bit 加舍入 bias，再取结果的高 16 bit。
 B bf16(float value) {
-    // 只用于 self-test。真实模型权重由 09_pack_weights.py 原样复制，不会走这里。
     uint32_t bits;
     std::memcpy(&bits, &value, sizeof(bits));
     const uint32_t bias = 0x7fffu + ((bits >> 16) & 1u);  // round-to-nearest-even
     return static_cast<B>((bits + bias) >> 16);
 }
 
+// 目的/直觉：为 SwiGLU、Delta beta 和 attention gate 提供 0..1 的平滑软开关。
+// 数学：      sigmoid(x)=1/(1+exp(-x))。
+// 实现：      按 x 符号选择等价公式，避免 exp 对大数溢出。
 float sigmoid(float x) {
     if (x >= 0.0f) return 1.0f / (1.0f + std::exp(-x));
     const float e = std::exp(x);
     return e / (1.0f + e);
 }
 
-float silu(float x) { return x * sigmoid(x); }  // SwiGLU 与 DeltaNet gate 共用的 SiLU。
+// 目的/直觉：复用第 02 课，为 SwiGLU 与 DeltaNet 输出 gate 提供平滑非线性。
+// 数学：      SiLU(x)=x*sigmoid(x)。
+// 实现：      调用 sigmoid 后乘回原输入。
+float silu(float x) { return x * sigmoid(x); }
+
+// 目的/直觉：把 DeltaNet 的时间参数平滑变成正数，再用负号构造衰减率。
+// 数学：      softplus(x)=log(1+exp(x)) > 0。
+// 实现：      x>20 时近似返回 x 避免 exp 溢出，其余使用 log1p 保留精度。
 float softplus(float x) { return x > 20.0f ? x : std::log1p(std::exp(x)); }
 
 // 09_pack_weights.py 的文件开头是 [8-byte magic, u32 version, u32 reserved]，随后每个
@@ -95,6 +112,9 @@ struct File {
     size_t size = 0;
     const uint8_t* data = nullptr;
 
+    // 目的/直觉：只读映射整个 packed checkpoint，让所有权重结构直接持有文件内指针。
+    // 数学：      文件至少有 16-byte header，magic 必须等于 Q35COUR\0。
+    // 实现：      open -> fstat -> mmap -> magic 校验；失败统一调用 die。
     explicit File(const char* path) {
         fd = open(path, O_RDONLY);
         if (fd < 0) die("cannot open model.bin");
@@ -105,6 +125,10 @@ struct File {
         if (data == MAP_FAILED) die("mmap model.bin failed");
         if (std::memcmp(data, "Q35COUR\0", 8) != 0) die("wrong model.bin magic; run 09_pack_weights.py");
     }
+
+    // 目的/直觉：File 离开作用域时归还 mmap 和文件描述符，避免资源泄漏。
+    // 数学：      无；只释放构造函数取得的两个系统资源。
+    // 实现：      指针/描述符有效时依次 munmap 和 close。
     ~File() {
         if (data && data != MAP_FAILED) munmap(const_cast<uint8_t*>(data), size);
         if (fd >= 0) close(fd);
@@ -116,13 +140,22 @@ struct Reader {
     const uint8_t* begin;
     const uint8_t* cursor;
     const uint8_t* end;
+    // 目的/直觉：在 mmap 文件上维护一个只向前移动的读取游标，按 packer schema 取 tensor。
+    // 数学：      初始 cursor=begin+16，跳过固定 header；end=begin+file.size。
+    // 实现：      只保存三个指针，不复制任何 checkpoint payload。
     explicit Reader(const File& file) : begin(file.data), cursor(file.data + 16), end(file.data + file.size) {}
 
+    // 目的/直觉：让每个 tensor 起点与 packer 一样落在 64-byte 边界，避免后续全部错位。
+    // 数学：      padding=(64-(offset mod 64)) mod 64。
+    // 实现：      计算 cursor-begin 的 offset，并把 cursor 前移 padding bytes。
     void align() {
-        // 必须在每个 tensor 之前与转换器做相同的向上取整，否则后续所有指针都会错位。
         const size_t offset = static_cast<size_t>(cursor - begin);
         cursor += (64 - offset % 64) % 64;
     }
+
+    // 目的/直觉：从当前 cursor 取得 count 个连续 T 元素，并推进到下一个 tensor 后方。
+    // 数学：      bytes=count*sizeof(T)，要求 cursor+bytes<=end。
+    // 实现：      先 align，检查截断，再 reinterpret_cast 返回 mmap 内指针并推进 cursor。
     template <typename T> const T* take(size_t count) {
         align();
         const size_t bytes = count * sizeof(T);
@@ -170,6 +203,10 @@ struct Model {
     const B* final_norm = nullptr;
     std::array<Layer, N> layer {};
 
+    // 目的/直觉：把 packed 文件中无名字的连续 tensor，绑定成 forward 可读的 Model 结构。
+    // 数学：      每个 Linear 保存 W[rows,cols]；layer index%4!=3 对应 3:1 Delta/Attention。
+    // 实现：      严格按 09_pack_weights.py::expected_tensors() 的顺序调用 reader.take；
+    //             只建立指针和 shape，不复制巨大的 BF16 权重。
     explicit Model(const char* path) : file(path), reader(file) {
         // 以下读取顺序必须逐项匹配 09_pack_weights.py::expected_tensors()。先读所有层共享的
         // embedding/final norm，再顺序读第 0..23 层，故不需要 map<string,tensor>。
@@ -207,17 +244,37 @@ struct Model {
     }
 };
 
-// 线性层是 row-major W[rows, cols] 与向量 x[cols] 的最直白 GEMV。
-// 这是 CPU correctness reference，不是快速 GEMM：batch=1 时每次只算一个向量。
+// 目的/直觉：原样复用第 00 课的 FP32 dot，为 attention 的 Q/K 匹配计算一个 score。
+// 数学：      dot_f32(a,b)=sum_{i=0}^{N-1}(a_i*b_i)。
+// 实现：      遍历 count 个通道，逐项相乘并累加。
+float dot_f32(const float* left, const float* right, int count) {
+    float sum = 0.0f;
+    for (int i = 0; i < count; ++i) sum += left[i] * right[i];
+    return sum;
+}
+
+// 目的/直觉：把第 00 课的 dot 扩展到 BF16 weight + FP32 activation，为 mv 算一行输出。
+// 数学：      dot_bf16(w,x)=sum_{i=0}^{N-1}(FP32(w_i)*x_i)。
+// 实现：      权重逐项调用 f32 转换，再与 activation 相乘并累加到 FP32 sum。
+float dot_bf16(const B* weight, const float* input, int count) {
+    float sum = 0.0f;
+    for (int i = 0; i < count; ++i) sum += f32(weight[i]) * input[i];
+    return sum;
+}
+
+// 目的/直觉：复用 00/01 课的“遍历输出行 + dot”，执行所有无 bias linear projection。
+// 数学：      W[rows,cols]@x[cols]->y[rows]；y_r=dot_bf16(W[r],x)。
+// 实现：      row-major 权重每行连续；定位行首后调用 dot_bf16。batch=1，因此是 GEMV。
 void mv(const Linear& w, const float* x, float* y) {
     for (int row = 0; row < w.rows; ++row) {
-        float sum = 0.0f;
         const B* weight = w.w + static_cast<size_t>(row) * w.cols;
-        for (int col = 0; col < w.cols; ++col) sum += f32(weight[col]) * x[col];
-        y[row] = sum;
+        y[row] = dot_bf16(weight, x, w.cols);
     }
 }
 
+// 目的/直觉：复用第 00 课，根据 token id 从 embedding table 直接取出 hidden 向量。
+// 数学：      table[V,H]，out=table[token,:]，所以 out shape=[H]。
+// 实现：      校验 token 范围，计算 row=table+token*H，再逐项 BF16->FP32 复制。
 void embed(const B* table, int token, float* out) {
     if (token < 0 || token >= V) die("token outside vocabulary");
     // embedding table 的 shape 是 [V,H]；token id 唯一决定应复制的那一行。
@@ -225,7 +282,10 @@ void embed(const B* table, int token, float* out) {
     for (int i = 0; i < H; ++i) out[i] = f32(row[i]);
 }
 
-// Qwen ordinary RMSNorm 使用 (1 + weight)，而不是常见的直接 weight。
+// 目的/直觉：复用第 01 课，在每个 pre-norm 边界稳定一个 token 的 hidden 整体大小。
+// 数学：      m=(1/n)sum_i(x_i^2)，r=1/sqrt(m+eps)，out_i=x_i*r*(1+w_i)。
+// 实现：      第一遍求平方和；计算一次 scale；第二遍逐维读取 BF16 weight 并输出。
+//             Qwen ordinary RMSNorm 使用 (1+weight)，不是常见的直接 weight。
 void rms(const float* x, const B* weight, int n, float* out) {
     // RMSNorm(x)_i = x_i / RMS(x) * (1 + weight_i)。它逐 token、逐向量工作，
     // 不跨 position，也不减均值。
@@ -235,6 +295,10 @@ void rms(const float* x, const B* weight, int n, float* out) {
     for (int i = 0; i < n; ++i) out[i] = x[i] * scale * (1.0f + f32(weight[i]));
 }
 
+// 目的/直觉：在每个 Delta value head 内稳定 readout，并用 z 决定各通道输出多少。
+// 数学：      out_i=x_i/sqrt(mean(x^2)+eps)*weight_i*SiLU(z_i)，i=0..VD-1。
+// 实现：      先求 head 内共享 scale，再逐维乘 FP32 norm weight 和 SiLU gate；
+//             此 weight 直接相乘，不使用 ordinary RMSNorm 的 1+w 约定。
 void gated_rms(const float* x, const float* weight, const float* z, float* out) {
     // DeltaNet head 内部专用：readout [VD] 先 RMSNorm，再乘 learned norm.weight 和
     // SiLU(z)。这里的 weight 是 checkpoint 中的 F32，和 ordinary RMSNorm 的 1+w
@@ -245,6 +309,9 @@ void gated_rms(const float* x, const float* weight, const float* z, float* out) 
     for (int i = 0; i < VD; ++i) out[i] = x[i] * scale * weight[i] * silu(z[i]);
 }
 
+// 目的/直觉：让 DeltaNet Q/K 只携带方向，避免向量长度任意改变记忆读写强度。
+// 数学：      out=x/sqrt(sum_i(x_i^2)+eps)，因此 ||out||_2 约等于 1。
+// 实现：      求平方和与一个共享 scale，再原地缩放 n 个元素。
 void l2(float* x, int n) {
     // L2Norm 令 q/k 的 Euclidean norm 接近 1；与 RMSNorm 的分母定义不同。
     float square = 0.0f;
@@ -253,13 +320,18 @@ void l2(float* x, int n) {
     for (int i = 0; i < n; ++i) x[i] *= scale;
 }
 
+// 目的/直觉：复用第 02 课的 residual，不覆盖主干 hidden，只加上 mixer/MLP 修正。
+// 数学：      x'_i=x_i+branch_i，两个向量 shape 都是 [H]。
+// 实现：      遍历 H 个元素原地相加。
 void add(float* x, const float* branch) {
     // 两个 residual 都是 [H]+[H] 的原地逐元素加法。
     for (int i = 0; i < H; ++i) x[i] += branch[i];
 }
 
-// 对一个 head 的前 RD=64 通道执行 Qwen half-rotation RoPE。head 的其余 AD-RD
-// 通道保持原样；Q/K 都做相同 position 的旋转，V 永远不旋转。
+// 目的/直觉：复用第 03 课，让每个 attention head 的 Q/K 携带当前 token position。
+// 数学：      angle_i=position/theta^(2i/RD)，对 (x_i,x_{i+RD/2}) 做二维旋转。
+// 实现：      先复制前 RD 个通道，再遍历 RD/2 对做 half-rotation；其余 AD-RD
+//             通道保持原样。Q/K 调用，V 不调用。
 void rope(float* x, int position) {
     float old[RD];
     std::memcpy(old, x, sizeof(old));
@@ -277,6 +349,10 @@ struct State {
     // 对 attention layer：keys/values 每 token append 一次，逻辑 shape 是
     // [tokens,KVH,AD]，故随 context 线性增长。非对应的 layer vector 保持为空。
     std::array<std::vector<float>, N> conv, recurrent, keys, values;
+    // 目的/直觉：为每个 Delta layer 预先分配固定 conv/recurrent state；attention cache
+    //             从空 vector 开始，之后才随 token append。
+    // 数学：      conv[DQKV,CK-1]，recurrent[VH,KD,VD]；attention 初始 T=0。
+    // 实现：      遍历 24 层，只对 index%4!=3 的 Delta layer assign 零值数组。
     State() {
         for (int layer = 0; layer < N; ++layer) {
             if (layer % 4 != 3) {
@@ -299,8 +375,11 @@ struct Work {
     std::vector<float> ak = std::vector<float>(KVS), av = std::vector<float>(KVS), ao = std::vector<float>(AS);
 };
 
-// DeltaNet 卷积是逐通道的 causal depthwise convolution；state 只保存 CK-1 个过去输入。
-// weight 的布局是 [channel, CK]，当前输入乘最后一个权重；history 从最旧到最新。
+// 目的/直觉：让每个 Delta qkv channel 在进入 recurrence 前读取自己最近 CK-1 个输入；
+//             depthwise 表示不同 channel 不在卷积中混合。
+// 数学：      y_c=SiLU(sum_{lag=0}^{CK-1}(weight[c,lag]*x_{t-CK+1+lag,c}))。
+// 实现：      history 保存每通道 CK-1 个旧值；与当前值做卷积后左移 history、append
+//             当前输入，并用 SiLU 原地替换 x[channel]。
 void conv_step(float* x, const B* weight, std::vector<float>& history) {
     for (int channel = 0; channel < DQKV; ++channel) {
         float* past = history.data() + static_cast<size_t>(channel) * (CK - 1);
@@ -312,8 +391,10 @@ void conv_step(float* x, const B* weight, std::vector<float>& history) {
     }
 }
 
-// 一个 value head 的四步 Delta rule。调用者已经切到某个 head 的 S=[KD,VD]。
-// 这份 state 是 DeltaNet 不需要 KV cache 的原因：context 再长，S 的元素数不变。
+// 目的/直觉：复用第 06 课，让一个 value head 用固定 S[KD,VD] 遗忘、纠错写入并读取历史。
+// 数学：      S=exp(log_decay)S；memory=k^T@S；
+//             S+=k outer beta(v-memory)；out=q^T@S。
+// 实现：      按公式顺序执行四组循环；state 原地跨 token 保留，memory/out 是本步临时量。
 void delta_rule(const float* q, const float* k, const float* v, float log_decay, float beta,
                 float* state, float* out) {
     // (1) S <- exp(log_decay) S：遗忘旧记忆。log_decay 在模型中被构造成负数。
@@ -337,6 +418,11 @@ void delta_rule(const float* q, const float* k, const float* v, float log_decay,
     }
 }
 
+// 目的/直觉：把第 07 课的全部 DeltaNet 零件按真实 0.8B shape 连接成一个 mixer 分支。
+// 数学：      input[H] -> qkv[DQKV],z[DO],a[VH],b[VH]；对每个 value head：
+//             conv -> L2(q/k) -> DeltaRule -> GatedRMS；拼接 [DO] 后 Wout[H,DO] -> out[H]。
+// 实现：      四次 mv 后只卷积 qkv；按固定 offset 拆 Q/K/V；逐 head 复用对应 Q/K、
+//             更新独立 S 并 gated_rms；最后 mv(d.out) 投回 hidden。
 void deltanet(const Delta& d, std::vector<float>& conv, std::vector<float>& recurrent,
               const float* input, Work& w, float* out) {
     // 输入已经过 layer input RMSNorm。四个投影都从同一个 normalized hidden 得到。
@@ -374,6 +460,11 @@ void deltanet(const Delta& d, std::vector<float>& conv, std::vector<float>& recu
     mv(d.out, w.dout.data(), out);
 }
 
+// 目的/直觉：把第 03～05 课的 RoPE、GQA、KV cache 和 causal softmax 接成真实 attention mixer。
+// 数学：      input[H] -> Q/gate[2AS],K[KVS],V[KVS]；Q/K norm+RoPE；cache append；
+//             每个 Q head 计算 softmax(QK^T/sqrt(AD))V，再乘 sigmoid(gate)，Wout -> [H]。
+// 实现：      三次 mv；逐 Q/K head norm+rope；append K/V；逐 Q head 映射共享 KV head，
+//             三遍完成 score/max、stable softmax、value 加权；最后 gate 并 out projection。
 void attention(const Attention& a, std::vector<float>& keys, std::vector<float>& values,
                int position, const float* input, Work& w, float* out) {
     // q_proj 输出 [Q, gate] 两个 [AS] 向量；k/v 分别是 GQA 的 [KVS] 向量。
@@ -405,10 +496,8 @@ void attention(const Attention& a, std::vector<float>& keys, std::vector<float>&
         const int kv_head = head / (AH / KVH);
         float maximum = -std::numeric_limits<float>::infinity();
         for (int token = 0; token < tokens; ++token) {
-            float dot = 0.0f;
             const float* key = keys.data() + (static_cast<size_t>(token) * KVH + kv_head) * AD;
-            for (int i = 0; i < AD; ++i) dot += w.aq[head * AD + i] * key[i];
-            score[token] = dot * scale;
+            score[token] = dot_f32(w.aq.data() + head * AD, key, AD) * scale;
             maximum = std::max(maximum, score[token]);
         }
         // stable softmax：同时复用 score 数组存 exp(score-maximum)。
@@ -427,6 +516,9 @@ void attention(const Attention& a, std::vector<float>& keys, std::vector<float>&
     mv(a.out, w.ao.data(), out);
 }
 
+// 目的/直觉：复用第 02 课，让每个 mixer 后的 token hidden 独立通过真实 SwiGLU FFN。
+// 数学：      gate=Wg@x [I]，up=Wu@x [I]，mixed_i=SiLU(gate_i)*up_i，out=Wd@mixed [H]。
+// 实现：      两次上投影 mv、一次 I 长度逐元素 gate、一次 down projection mv。
 void mlp(const Layer& l, const float* input, Work& w, float* out) {
     // SwiGLU：gate/up 各投影到 [I]，逐元素 SiLU(gate)*up，再 down_proj 回 [H]。
     mv(l.gate, input, w.gate.data());
@@ -435,8 +527,12 @@ void mlp(const Layer& l, const float* input, Work& w, float* out) {
     mv(l.down, w.gate.data(), out);
 }
 
-// 这就是课程最终应从上读到下的完整 token forward。调用一次只处理一个 token；
-// prompt 的 prefill 只是对 prompt ids 连续调用它，decode 则在每次 argmax 后再调用。
+// 目的/直觉：完成一个 token 的真实 Qwen3.5-0.8B forward，并把所有跨 token state 留给下一步。
+// 数学：      h=embedding[token]；对 24 层重复
+//             h+=Mixer(RMSNorm(h))，h+=MLP(RMSNorm(h))；
+//             logits=embedding@FinalRMSNorm(h)，shape [V]。
+// 实现：      按 3:1 layer flag 选择 deltanet/attention；每层两次 residual；最后把 tied
+//             embedding 当 W[V,H] 做 mv。prefill/decode 都逐 token 调用同一个函数。
 void forward(const Model& m, State& s, int token, Work& w) {
     if (s.position >= MAX_TOKENS) die("teaching capstone supports at most 4096 tokens");
     embed(m.embedding, token, w.h.data());  // hidden[H]，本 token 的 layer-0 输入。
@@ -458,17 +554,25 @@ void forward(const Model& m, State& s, int token, Work& w) {
     ++s.position;
 }
 
+// 目的/直觉：复用第 00 课，从 logits 中确定性选择分数最高的下一个 token。
+// 数学：      argmax(z)=使 z_i 最大的 index；无需 softmax，因为它不改变大小顺序。
+// 实现：      std::max_element 找最大元素，再用迭代器差得到 token id。
 int argmax(const std::vector<float>& values) {
-    // deterministic greedy sampling；课程以它避免 temperature/random seed 的额外变量。
     return static_cast<int>(std::max_element(values.begin(), values.end()) - values.begin());
 }
 
+// 目的/直觉：把完整词表 logits 暴露给官方 oracle 做逐元素数值回归，而不只比较 argmax。
+// 数学：      依次输出 values[0..V-1]，每个值保持足够 FP32 有效数字。
+// 实现：      遍历 vector，一行打印一个 %.9g；正常生成路径不会调用。
 void dump_logits(const std::vector<float>& values) {
     // 只给开发期 official-oracle.py 使用：一行一个 FP32 logit，便于它比较完整词表，
     // 而不是只看 argmax 后“文字看起来正常”。正常的 --forward / --generate 不会走这里。
     for (float value : values) std::printf("%.9g\n", value);
 }
 
+// 目的/直觉：保持 C++ core 只接收 token ids，把 tokenizer/chat template 留在课程外层。
+// 数学：      "a,b,c" -> [a,b,c]，并要求每个 id 满足 0<=id<V。
+// 实现：      用 strtol 从左到右解析；检查空字段、范围和逗号，失败调用 die。
 std::vector<int> parse_ids(const char* text) {
     // C++ core 刻意只接受 token ids。tokenizer 是可独立替换的文字外围工具，不应
     // 遮住本文件的模型计算；格式如 "248044,198,198"。
@@ -487,6 +591,11 @@ std::vector<int> parse_ids(const char* text) {
     return ids;
 }
 
+// 目的/直觉：把单 token forward 组合成完整 greedy generation：先 prefill prompt，
+//             再反复选择 logit 最大的 id，并把它作为下一次 decode 输入。
+// 数学：      logits_t=Forward(token_t,state_{t-1})；token_{t+1}=argmax(logits_t)。
+// 实现：      创建一次 Model/State/Work；遍历 prompt 做 prefill；decode loop 检查 EOS、
+//             append token，并在还需继续时调用下一次 forward。
 void generate(const char* path, const std::vector<int>& prompt, int count, std::vector<int>* result) {
     Model model(path);
     State state;
@@ -502,6 +611,9 @@ void generate(const char* path, const std::vector<int>& prompt, int count, std::
     }
 }
 
+// 目的/直觉：不下载 checkpoint 也能快速验证 BF16 转换、argmax 和 RMSNorm 基础算子。
+// 数学：      BF16(1.25)->1.25；argmax([1,3,2])=1；RMSNorm([3,4]) 使用 m=12.5。
+// 实现：      构造微型数组并用 assert 检查三个结果，成功后打印 passed。
 void self_test() {
     // 这是无需下载模型的微型单元测试；真实权重的端到端回归见 make oracle-test。
     assert(std::fabs(f32(bf16(1.25f)) - 1.25f) < 1e-6f);
@@ -515,6 +627,9 @@ void self_test() {
     std::puts("self-test: passed (BF16, argmax, RMSNorm)");
 }
 
+// 目的/直觉：当命令行参数不合法时，列出 capstone 支持的四种运行模式。
+// 数学：      无；这是 CLI 帮助文本。
+// 实现：      用传入的 program name 打印 --self-test/forward/logits/generate 格式。
 void usage(const char* program) {
     std::printf("usage: %s --self-test\n", program);
     std::printf("       %s --forward <qwen35-0.8b.bin> <id,id,...>\n", program);
@@ -524,6 +639,9 @@ void usage(const char* program) {
 
 }  // namespace qwen35
 
+// 目的/直觉：把命令行模式路由到自测、单次 next-token、oracle logits 或 greedy generation。
+// 数学：      --forward/--logits 对 ids 顺序 prefill；--generate 额外重复 argmax+decode。
+// 实现：      检查 argv 模式和 argc，按需创建 Model/State/Work；无法匹配时打印 usage。
 int main(int argc, char** argv) {
     using namespace qwen35;
     if (argc == 1 || std::strcmp(argv[1], "--self-test") == 0) { self_test(); return 0; }

@@ -27,16 +27,28 @@ namespace lesson04 {
 
 constexpr int kHeadDim = 2;
 
+// 目的/直觉：比较 softmax 等浮点计算结果时容许微小误差。
+// 数学：      close(a,b) = |a-b| < 1e-5。
+// 实现：      对差值取绝对值，再与固定阈值比较。
 bool close(float left, float right) { return std::fabs(left - right) < 1e-5f; }
 
+// 目的/直觉：复用第 00 课的 dot，让当前 query 给某个历史 key 计算一个匹配分数。
+// 数学：      dot(q,k) = sum_{i=0}^{D-1}(q_i*k_i) -> scalar。
+// 实现：      遍历 head_dim 个通道，逐项相乘并累加；多 head 时每个 head 独立重复。
 float dot(const float* left, const float* right) {
-    // 这是单 head 的 q·k；多 head 的版本只是在每个 head 上独立重复它。
     float sum = 0.0f;
     for (int i = 0; i < kHeadDim; ++i) sum += left[i] * right[i];
     return sum;
 }
 
-// keys/values 的行数是已有 token 数，每一行是一个 head_dim 向量。
+// 目的/直觉：当前 query 先用 key 决定“关注历史各位置多少”，再按这些权重从 value
+//             读取内容；传入的列表只有过去和当前位置，因此不会看到未来 token。
+// 数学：      score_t = dot(q,k_t)/sqrt(D)
+//             p_t = exp(score_t-max)/sum_j(exp(score_j-max))
+//             out = sum_t(p_t*v_t)。
+//             q[D]、keys[T,D]、values[T,D] -> out[D]。
+// 实现：      第一遍算 T 个 score/max；第二遍做 stable softmax 的分子/分母；
+//             第三遍用每个概率逐维累加对应 value。教学数组最多容纳 8 个 token。
 void causal_attention(const float* query, const float (*keys)[kHeadDim],
                       const float (*values)[kHeadDim], int token_count, float* output) {
     assert(token_count > 0);
@@ -68,6 +80,9 @@ void causal_attention(const float* query, const float (*keys)[kHeadDim],
     }
 }
 
+// 目的/直觉：用两个历史位置验证 Q 更匹配哪个 K，以及输出确实来自 V 的加权平均。
+// 数学：      scores=[1/sqrt(2),0]，p=softmax(scores)，out=p0*[10,0]+p1*[0,20]。
+// 实现：      调用 causal_attention，再用手算 p0 对两个输出维度做 assert。
 void self_test() {
     const float query[kHeadDim] = {1.0f, 0.0f};
     const float keys[2][kHeadDim] = {{1.0f, 0.0f}, {0.0f, 1.0f}};
@@ -85,8 +100,10 @@ void self_test() {
 
 }  // namespace lesson04
 
+// 目的/直觉：打印一次单 head causal attention 的最终 value readout。
+// 数学：      out=Attention(q, keys[0..1], values[0..1])。
+// 实现：      重复 self_test 的玩具输入并打印 output[D]。
 int main() {
-    // 输出是对 value 的加权平均，而不是对 key 或 score 的输出。
     lesson04::self_test();
 
     const float query[lesson04::kHeadDim] = {1.0f, 0.0f};
