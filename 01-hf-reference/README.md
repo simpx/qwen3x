@@ -3,7 +3,7 @@
 这一目录的任务只有一个：调用官方 Hugging Face checkpoint，产出带来源、可重复的
 **test vectors**。它不是另一套 C++ engine，也不是 production runtime。
 
-`lessons/` 已经用小尺寸解释了 RMSNorm、DeltaNet、attention、state 和完整 CPU forward；
+`00-lessons/` 已经用小尺寸解释了 RMSNorm、DeltaNet、attention、state 和完整 CPU forward；
 这里直接在真实 0.8B 上把“官方模型此时应输出什么”固定下来。随后 `02-cpu-0.8b/` 和
 `03-cuda-0.8b/` 都只需读取同一份 vectors 比较。
 

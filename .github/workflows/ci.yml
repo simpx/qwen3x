@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build and run every lesson
-        working-directory: lessons
+        working-directory: 00-lessons
         run: make test
       - name: Build the real-model program and run its self-test
         working-directory: qwen35-0.8b

@@ -23,7 +23,7 @@ import struct
 from pathlib import Path
 
 ALIGNMENT = 64  # 每个 tensor 起点向上对齐，和 C++ Reader.align() 一一对应。
-MAGIC = b"Q35COUR\0"  # v1 格式与 lessons/09 共享，便于两个 CPU reference 交叉验证。
+MAGIC = b"Q35COUR\0"  # v1 格式与第 0 章的 00-lessons/09 共享，便于两个 CPU reference 交叉验证。
 HEADER = struct.Struct("<8sII")  # magic、格式版本、保留字段，共固定 16 字节。
 
 # 以下常数与同目录 qwen35.cpp 完全重复，是刻意的“显式固定模型”，不是遗漏。

@@ -41,12 +41,12 @@ correct → simple → readable → usable → fast
 
 ## 2. 目录就是阶段快照
 
-`lessons/` 保留为**前置课程**，不再承担新 engine 的演进。它解释模型数学；之后的代码
+`00-lessons/` 是**第 0 章：基础数学与模型结构**，不再承担新 engine 的演进。之后的代码
 按编号目录前进，像 buildyourownllm 的每个版本快照一样。打开一个目录应能知道：此时模型
 能做什么、仍然不能做什么、怎样一条命令验证它。
 
 ~~~text
-lessons/                 前置课程：toy math + 已有的 0.8B CPU capstone；尽量冻结
+00-lessons/              第 0 章：toy math + 已有的 0.8B CPU capstone；尽量冻结
 
 01-hf-reference/         Stage 1：官方 Qwen3.5-0.8B 的 PyTorch / Transformers oracle
 02-cpu-0.8b/             Stage 2：真实 0.8B 的可读 C++ CPU forward + state
@@ -94,7 +94,7 @@ Python 工具调用官方 tokenizer 以保证 reference 一致；日常可用的
 每一层实现只向下游交付已经证明正确的行为：
 
 ~~~text
-lessons/ 的手算 toy tests
+00-lessons/ 的手算 toy tests
              ↓  已理解的公式
 official Python / HF reference（Qwen3.5-0.8B）
              ↓  test vectors + logits
@@ -118,7 +118,7 @@ profiling、fusion 或 quantization。
 
 ## 今晚的自动执行计划：完成 0.8B 基础，停在 27B 之前
 
-`lessons/00--08` 已经承担 tiny/手算练习，`lessons/09` 已证明真实 0.8B CPU forward。因此
+第 0 章的 lesson 00--08 已经承担 tiny/手算练习，`00-lessons/09` 已证明真实 0.8B CPU forward。因此
 今晚不再复制一套 toy Python/C++ 模型；直接把这两个已有资产变成 **真实 0.8B 的 oracle、CPU
 engine、CUDA engine 和集成测试链**。目标是完成 Stage 1--4，明天切 27B 时不再修改基础语义。
 
@@ -151,8 +151,7 @@ FP32 的 vectors 分别保存到 `build/cpu/` 与 `build/cuda/`；测试会拒�
 01-hf-reference/
   README.md
   Makefile
-  dump_vectors.py    # 直接调用官方 model；固定 FP32 / token ids；输出 logits 与 greedy ids
-  dump_vectors.py    # 生成 versioned binary test vectors；可选 module hooks dump layer tensors
+  dump_vectors.py    # 直接调用官方 model；固定 FP32 / token ids；输出 versioned logits 与 greedy ids
   test_reference.py  # 验证 tokenizer、config fingerprint、vector 可重现性
 ~~~
 
@@ -166,7 +165,7 @@ ids、chat messages 与允许误差；不能把“目前本机跑出来的数”
 
 ### Stage 2 — `02-cpu-0.8b/`：真实 C++ CPU baseline
 
-以 `lessons/09_qwen35_0_8b.cpp` 为已验证数学来源，复制为一个可演进的、仍然模型专用的 CPU
+以 `00-lessons/09_qwen35_0_8b.cpp` 为已验证数学来源，复制为一个可演进的、仍然模型专用的 CPU
 snapshot。保留朴素的 `Model/State/Work` 三个 struct；只将隐含在 `generate()` 的 prefill/decode
 循环写成两个小函数。不要在这一步“重构成框架”。
 
@@ -227,7 +226,7 @@ bundle，但门槛必须写在 metadata/README 中，不能临时放宽。
 
 | 顺序 | 自动任务 | 绿灯命令 | 禁止提前做的事 |
 | --- | --- | --- | --- |
-| 1 | Stage 1：生成官方 CPU/CUDA test vectors | `make -C 01-hf-reference cpu` / `make -C 01-hf-reference cuda` | 不改 lessons 数学 |
+| 1 | Stage 1：生成官方 CPU/CUDA test vectors | `make -C 01-hf-reference cpu` / `make -C 01-hf-reference cuda` | 不改第 0 章数学 |
 | 2 | Stage 2：从 lesson 09 建真实 CPU `Model/State/Work` API | `make -C 02-cpu-0.8b test MODEL=...` | 不优化 linear、不加 tokenizer |
 | 3 | Stage 3：CUDA + cuBLAS correctness path | `make -C 03-cuda-0.8b cuda-test` + `make test` | 不写新 fused kernel |
 | 4 | Stage 4：固定 CLI/e2e test contract | `make -C 04-0.8b-e2e test` | 不做 HTTP/prefix snapshot |
@@ -266,7 +265,7 @@ tokens → embedding → 24 layers
 greedy sampling。linear 可以很慢；本阶段唯一优先级是正确。
 
 **验收：** 官方 HF logits 与 CPU logits 在约定误差内一致；`Hello` 能正常续写；固定 prompt
-的 greedy token 序列稳定。当前 `lessons/09_qwen35_0_8b.cpp` 就是这一阶段的课程 capstone。
+的 greedy token 序列稳定。当前 `00-lessons/09_qwen35_0_8b.cpp` 就是这一阶段的课程 capstone。
 
 ## 7. Stage 2 的完成条件 — 明确 prefill、decode 与 state
 
@@ -472,7 +471,7 @@ fusion 为什么能减少 decode 的带宽压力。不要把项目变成“维�
 ## 15. 里程碑与时间预期
 
 ~~~text
-lessons/：公式与 toy state 已读懂
+00-lessons/：第 0 章的公式与 toy state 已读懂
         ↓
 official Qwen3.5-0.8B HF vectors
         ↓

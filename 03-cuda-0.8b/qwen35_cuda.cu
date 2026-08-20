@@ -9,7 +9,7 @@
 #include <iostream>
 
 // 同目录 CPU snapshot 已经有 Model/State/Work、loader、parser 和 scalar self-test。把
-// 它的 main 改名即可让 CUDA 直接复用这些 plain structs，而不依赖 lessons 或其他 stage。
+// 它的 main 改名即可让 CUDA 直接复用这些 plain structs，而不依赖第 0 章或其他 stage。
 #define main qwen35_cpu_reference_main
 #include "qwen35_cpu.cpp"
 #undef main

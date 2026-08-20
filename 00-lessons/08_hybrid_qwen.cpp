@@ -6,7 +6,7 @@
 //   运行后看：同样输入的第二 token 会因复用两类旧 state 而得到不同输出。
 //   下一课：拿掉玩具数字，按同样的控制流运行真实 Qwen3.5-0.8B 权重。
 //
-// lessons 04-07 已分别给出 attention 与 DeltaNet 的数学。本课只把焦点放在
+// 第 0 章的 04-07 课已分别给出 attention 与 DeltaNet 的数学。本课只把焦点放在
 // “一次 token 如何穿过四层”：三个 DeltaNet layer 的 state 不断更新，第四层
 // 的 attention 则追加 KV cache。真正权重和完整张量维度在 capstone 中出现。
 // 这里的 mixer/ffn 都是故意简化的标量函数；本课的唯一新知识是“每层选择哪类

@@ -1,6 +1,6 @@
 # Stage 2：plain C++ 0.8B CPU reference
 
-这里是 `lessons/09` 的可演进版本，而不是第二套模型设计。它固定为官方
+这里是 `00-lessons/09` 的可演进版本，而不是第二套模型设计。它固定为官方
 Qwen3.5-0.8B text backbone、batch=1、CPU、BF16 weights + FP32 activations。
 
 代码刻意只有三种数据：
@@ -23,7 +23,7 @@ decode(F)            -> 同一个 State
 ## 权重格式
 
 `pack_weights.py` 只接受一个 checkpoint：Qwen3.5-0.8B。它读取官方 safetensors，按
-`qwen35.cpp::Model` 的读取顺序写入对齐的 mmap 文件。格式与 `lessons/09` 暂时相同，方便两个
+`qwen35.cpp::Model` 的读取顺序写入对齐的 mmap 文件。格式与 `00-lessons/09` 暂时相同，方便两个
 CPU reference 对照；它不是 GGUF，也不是通用模型转换器。
 
 ## 编译与验证

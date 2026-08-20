@@ -11,7 +11,7 @@ qwen35_cuda.cu   # GPU weights/state、cuBLAS GEMV、直接 CUDA kernels、CUDA 
 ```
 
 `qwen35_cuda.cu` 在编译时包含同目录的 CPU source，以重用**模型专用**的 mmap loader、weight
-struct 和 parser；它不包含 `lessons/` 或别的 stage。没有 virtual backend、Tensor 或 dispatcher。
+struct 和 parser；它不包含 `00-lessons/` 或别的 stage。没有 virtual backend、Tensor 或 dispatcher。
 
 ## 计算和 dtype
 

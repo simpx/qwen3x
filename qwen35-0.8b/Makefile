@@ -1,8 +1,8 @@
-# 这里不是教学课；真实模型的 CPU reference 在 ../lessons/09_qwen35_0_8b.cpp。
+# 这里不是教学课；真实模型的 CPU reference 在 ../00-lessons/09_qwen35_0_8b.cpp。
 # 这里的唯一 binary 是高性能 CUDA 路径。保持命令直接，避免引入 CMake 或 framework。
 
 CUDA_ARCH ?= 89
-CPU_REFERENCE = ../lessons/09_qwen35_0_8b
+CPU_REFERENCE = ../00-lessons/09_qwen35_0_8b
 # WSL 可同时有陈旧的 distro libcuda；在启动进程前优先放 Windows driver 的目录。普通
 # Linux 上该目录不存在，后面的原 LD_LIBRARY_PATH / 默认搜索路径仍照常工作。
 CUDA_RUN ?= LD_LIBRARY_PATH=/usr/lib/wsl/lib:$$LD_LIBRARY_PATH
@@ -11,11 +11,11 @@ CUDA_RUN ?= LD_LIBRARY_PATH=/usr/lib/wsl/lib:$$LD_LIBRARY_PATH
 
 all: qwen35_cuda
 
-qwen35_cuda: qwen35_cuda.cu ../lessons/09_qwen35_0_8b.cpp
+qwen35_cuda: qwen35_cuda.cu ../00-lessons/09_qwen35_0_8b.cpp
 	nvcc -O3 -std=c++17 -arch=sm_$(CUDA_ARCH) qwen35_cuda.cu -lcublas -o qwen35_cuda
 
-$(CPU_REFERENCE): ../lessons/09_qwen35_0_8b.cpp
-	$(MAKE) -C ../lessons 09_qwen35_0_8b
+$(CPU_REFERENCE): ../00-lessons/09_qwen35_0_8b.cpp
+	$(MAKE) -C ../00-lessons 09_qwen35_0_8b
 
 cuda-test: qwen35_cuda
 	$(CUDA_RUN) ./qwen35_cuda --self-test

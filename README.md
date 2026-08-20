@@ -22,11 +22,11 @@ stack。Qwen3.5-0.8B 是目前足够小、又真正保留目标架构的官方 c
 
 ## 从这里开始
 
-不要先打开两千行的 prototype。先阅读 [lessons/README.md](lessons/README.md)，
+不要先打开两千行的 prototype。先阅读 [00-lessons/README.md](00-lessons/README.md)，
 进入课程目录编译全部手写 lesson：
 
 ~~~
-cd lessons
+cd 00-lessons
 make
 ~~~
 
@@ -51,13 +51,13 @@ make test
 | 08 | 3 DeltaNet : 1 attention hybrid stack |
 | 09 | 真实 Qwen3.5-0.8B：权重加载、完整 forward、prefill 和 decode |
 
-`lessons/` 是完整的 CPU 教学路径：第 00--08 课使用可手算 toy dimensions，第 09 课把同一
+`00-lessons/` 是第 0 章：完整的 CPU 教学路径。第 00--08 课使用可手算 toy dimensions，第 09 课把同一
 顺序直接扩大为真实 0.8B 权重。CUDA 不放进 lesson，避免读到模型数学时被 GPU runtime、库句柄
 和性能细节打断。
 
 ## 课程之后：真实 0.8B 的验证阶梯
 
-`lessons/` 解释数学并保持冻结；从真实权重、CPU、CUDA 到文本入口则按下面四个独立 stage 前进。
+`00-lessons/` 解释数学并保持冻结；从真实权重、CPU、CUDA 到文本入口则按下面四个独立 stage 前进。
 它们刻意少量复制代码，避免为了共享而引入 `Tensor`、`Backend` 或 engine/session 框架。完整方向见
 [roadmap.md](roadmap.md)。
 
@@ -75,24 +75,24 @@ wrapper；C++ inference core 不依赖 Python。
 
 ## 真实 0.8B
 
-[lessons/09_qwen35_0_8b.cpp](lessons/09_qwen35_0_8b.cpp) 是约 520 行的整合版。它严格固定为
+[00-lessons/09_qwen35_0_8b.cpp](00-lessons/09_qwen35_0_8b.cpp) 是约 520 行的整合版。它严格固定为
 Qwen3.5-0.8B text backbone，采用 BF16 权重、FP32 计算，支持真实 prefill、
 decode、DeltaNet state、KV cache 和 greedy generation。
 
 ~~~
-cd lessons
+cd 00-lessons
 make
 python3 09_pack_weights.py ../models/Qwen3.5-0.8B ../models/qwen35-0.8b.bin
 ./09_qwen35_0_8b --generate ../models/qwen35-0.8b.bin 248044,198,198 16
 ~~~
 
 详细模型格式和 regression 请看
-[lessons/README.md](lessons/README.md)。
+[00-lessons/README.md](00-lessons/README.md)。
 
 有本地官方 checkpoint 时：
 
 ~~~
-cd lessons
+cd 00-lessons
 make model-test MODEL=../models/Qwen3.5-0.8B
 ~~~
 

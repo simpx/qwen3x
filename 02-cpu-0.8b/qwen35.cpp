@@ -1,6 +1,6 @@
 // qwen35.cpp -- Qwen3.5-0.8B 的 plain C++ CPU reference。
 //
-// 此文件从 lessons/09 毕业而来：保留同样直接的模型数学，但把 token 生命周期明写为
+// 此文件从第 0 章的 00-lessons/09 毕业而来：保留同样直接的模型数学，但把 token 生命周期明写为
 // Model（mmap 权重）、State（跨 token 的 KV/GDN/conv）和 Work（本次 forward scratch）。
 // 没有 Tensor、Backend、Operator 或 class hierarchy。真正的执行路径仍是一眼可见的：
 //

@@ -46,7 +46,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("checkpoint", type=Path, help="official Qwen3.5-0.8B checkpoint directory")
     parser.add_argument("--weights", type=Path,
                         help="optional qwen35 packed weights; omit to create a temporary one")
-    parser.add_argument("--cpu-engine", default="../lessons/09_qwen35_0_8b")
+    parser.add_argument("--cpu-engine", default="../00-lessons/09_qwen35_0_8b")
     parser.add_argument("--cuda-engine", default="./qwen35_cuda")
     parser.add_argument("--max-new-tokens", type=int, default=8)
     # CPU 的阈值极紧，覆盖全部 248,320 logits；性能 CUDA 的 BF16 inputs 允许更大误差，
@@ -131,7 +131,7 @@ def compare_logits(name: str, official: np.ndarray, actual: np.ndarray, limit: f
 def make_temporary_weights(checkpoint: Path, directory: Path) -> Path:
     """Use the normal tiny packer so the oracle tests the same model-loading path users run."""
     weights = directory / "qwen35-0.8b.bin"
-    packer = Path(__file__).parent.parent / "lessons" / "09_pack_weights.py"
+    packer = Path(__file__).parent.parent / "00-lessons" / "09_pack_weights.py"
     subprocess.run([sys.executable, str(packer), str(checkpoint), str(weights)], check=True)
     return weights
 

@@ -1,7 +1,7 @@
 # Qwen3.5-0.8B CUDA performance path
 
 这里不是第二套教学实现。模型结构、权重格式和可逐行阅读的 CPU forward 都在
-[`../lessons/09_qwen35_0_8b.cpp`](../lessons/09_qwen35_0_8b.cpp)。本目录只回答另一个问题：
+[`../00-lessons/09_qwen35_0_8b.cpp`](../00-lessons/09_qwen35_0_8b.cpp)。本目录只回答另一个问题：
 同一个固定 Qwen3.5-0.8B，在 NVIDIA GPU 上怎样避免明显的工程浪费。
 
 它仍然不是通用 runtime：只支持这个模型、text、batch=1、单 GPU 和 greedy decoding；没有
@@ -28,10 +28,10 @@ make cuda-test
 LD_LIBRARY_PATH=/usr/lib/wsl/lib:$LD_LIBRARY_PATH ./qwen35_cuda --self-test
 ~~~
 
-CPU 教学版与权重 packer 在 `../lessons/`：
+CPU 教学版与权重 packer 在 `../00-lessons/`：
 
 ~~~
-cd ../lessons
+cd ../00-lessons
 make
 python3 09_pack_weights.py ../models/Qwen3.5-0.8B ../models/qwen35-0.8b.bin
 ~~~

@@ -15,8 +15,8 @@ model_dir=$1
 model_bin=$(mktemp /tmp/qwen35-cuda-oracle.XXXXXX.bin)
 trap 'rm -f "$model_bin" "$model_bin.tmp"' EXIT
 
-python3 ../lessons/09_pack_weights.py "$model_dir" "$model_bin" >/dev/null
-cpu_forward=$(../lessons/09_qwen35_0_8b --forward "$model_bin" 248044,198,198)
+python3 ../00-lessons/09_pack_weights.py "$model_dir" "$model_bin" >/dev/null
+cpu_forward=$(../00-lessons/09_qwen35_0_8b --forward "$model_bin" 248044,198,198)
 cuda_forward=$(./qwen35_cuda --forward "$model_bin" 248044,198,198)
 
 python3 - "$cpu_forward" "$cuda_forward" <<'PY'
@@ -37,7 +37,7 @@ if abs(float(cpu.group(2)) - float(cuda.group(2))) > 0.1:
     raise SystemExit(f"logit mismatch: CPU {cpu.group(2)} != CUDA {cuda.group(2)}")
 PY
 
-cpu_generate=$(../lessons/09_qwen35_0_8b --generate "$model_bin" 248044,198,198 8)
+cpu_generate=$(../00-lessons/09_qwen35_0_8b --generate "$model_bin" 248044,198,198 8)
 cuda_generate=$(./qwen35_cuda --generate "$model_bin" 248044,198,198 8)
 if [[ "$cpu_generate" != "$cuda_generate" ]]; then
     echo "CPU:  $cpu_generate" >&2

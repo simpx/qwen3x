@@ -1,4 +1,4 @@
-# qwen3x：从零实现 Qwen 风格 inference 的课程
+# 第 0 章：Qwen 的基础数学与模型结构
 
 这里的目标不是一次读懂根目录中完整的 prototype，而是每次只增加一个
 概念，并得到一个可以独立编译、独立验证的 C++ 程序。
@@ -64,7 +64,7 @@ cache，DeltaNet 读取固定大小的 recurrent state。00--08 课把这条线�
 本目录有自己的 Makefile；进入本目录后，`make` 只编译，`make test` 才会运行：
 
 ~~~
-cd lessons
+cd 00-lessons
 make
 make test
 ~~~
@@ -81,7 +81,7 @@ c++ -O2 -std=c++17 00_toy_logits.cpp -o 00_toy_logits
 真实权重的格式转换、CPU regression 和最小 chat wrapper 也属于第 09 课：
 
 ~~~
-cd lessons
+cd 00-lessons
 make
 python3 09_pack_weights.py ../models/Qwen3.5-0.8B ../models/qwen35-0.8b.bin
 ./09_qwen35_0_8b --generate ../models/qwen35-0.8b.bin 248044,198,198 16

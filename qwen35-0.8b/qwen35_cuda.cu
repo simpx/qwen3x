@@ -1,6 +1,6 @@
 // qwen35_cuda.cu -- Qwen3.5-0.8B 的 CUDA performance backend。
 //
-// CPU 数学 reference 已是课程的 ../lessons/09_qwen35_0_8b.cpp。本文件直接复用它的
+// CPU 数学 reference 已是第 0 章的 ../00-lessons/09_qwen35_0_8b.cpp。本文件直接复用它的
 // 固定 loader/weight structs，却把权重和 state 留在 GPU。没有 Backend class：性能路径
 // 也只服务这一种模型、这一种 batch=1 token forward。
 
@@ -11,7 +11,7 @@
 // 复用 CPU 的文件格式、权重 structs、parse_ids/argmax 和数学 self-test。把原 main
 // 改名即可避免两个入口；CUDA 的真正 forward 在本文件下半部分。
 #define main qwen35_cpu_reference_main
-#include "../lessons/09_qwen35_0_8b.cpp"
+#include "../00-lessons/09_qwen35_0_8b.cpp"
 #undef main
 
 namespace qwen35 {
