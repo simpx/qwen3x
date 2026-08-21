@@ -1,51 +1,99 @@
-# Stage 2：plain C++ 0.8B CPU reference
+# Qwen3.5-0.8B：独立 plain C++ CPU 版本
 
-这里是 `00-lessons/09` 的可演进版本，而不是第二套模型设计。它固定为官方
-Qwen3.5-0.8B text backbone、batch=1、CPU、BF16 weights + FP32 activations。
-
-代码刻意只有三种数据：
-
-```cpp
-struct Model;  // mmap 的固定权重
-struct State;  // 跨 token：position、KV cache、GDN recurrent state、conv history
-struct Work;   // 当前 forward 的临时 FP32 vectors 与 logits
-```
-
-`forward()` 是完整模型的一步；`prefill()` 和 `decode()` 只是两个清楚的调用方式，内部仍然
-直接调用它。没有 Tensor、Backend、Session、operator dispatch 或通用 config。
+这个目录是 `00-lessons/09` 的正式版本，也是一个完整的文字 e2e 闭环：
 
 ```text
-prefill(A, B, C, D)  -> State
-decode(E)            -> 同一个 State
-decode(F)            -> 同一个 State
+官方 checkpoint
+  -> pack_weights.py                          -> build/qwen35-0.8b.bin
+
+用户文字
+  -> chat.py：官方 tokenizer + chat template  -> token ids
+  -> qwen35：完整 CPU prefill/decode           -> generated token ids
+  -> chat.py：官方 tokenizer.decode            -> 输出文字
 ```
 
-## 权重格式
+C++ 模型核心不依赖 PyTorch、Transformers 或其他仓库目录。它固定为 Qwen3.5-0.8B
+text backbone、batch=1、BF16 weights + FP32 activations，只使用 C++17 和 POSIX `mmap`。
+Python 只用于一次性权重转换、文字 tokenizer 外壳和测试。
 
-`pack_weights.py` 只接受一个 checkpoint：Qwen3.5-0.8B。它读取官方 safetensors，按
-`qwen35.cpp::Model` 的读取顺序写入对齐的 mmap 文件。格式与 `00-lessons/09` 暂时相同，方便两个
-CPU reference 对照；它不是 GGUF，也不是通用模型转换器。
+## 目录内容
 
-## 编译与验证
+```text
+qwen35.cpp       完整 Model + State + Work、prefill、decode、greedy generation
+pack_weights.py  官方 safetensors -> 固定顺序 mmap bin，只用 Python 标准库
+chat.py          文字/chat e2e 薄层
+reference.json   本目录自带的小型官方 CPU 回归契约
+test_cpu.py      不依赖其他 stage 的 forward/greedy/state 测试
+test_e2e.py      文字 -> token -> CPU -> token -> 文字测试
+test_oracle.py   可选的 Stage 1 full-vocabulary logits 重型验证
+```
+
+代码仍然只有三类模型数据：
+
+```cpp
+struct Model;  // mmap 中的固定权重
+struct State;  // 跨 token：position、KV cache、DeltaNet memory、conv history
+struct Work;   // 当前 forward 可覆盖的 FP32 临时向量与 logits
+```
+
+没有 Tensor、Backend、Session、operator dispatch、通用 config 或 class hierarchy。
+
+## 1. 编译和打包
 
 ```sh
+cd 02-cpu-0.8b
 make
-make test MODEL=../models/Qwen3.5-0.8B
+make weights MODEL=../models/Qwen3.5-0.8B
 ```
 
-`make test` 会在缺少 Stage 1 vectors 时先生成它们，随后：
+`weights` 每次都会重新检查 checkpoint config、320 个 tensor 的 dtype/shape/byte size，
+再原子写入 packed bin，因此切换 `MODEL` 时不会静默复用旧权重。
 
-1. 从官方 checkpoint 打包本 stage 的 model bin；
-2. 对每个官方 case 运行 `--trace-logits`，比较每一个 token 之后的完整 vocabulary logits；
-3. 比较 greedy continuation；
-4. 检查 `prefill()+decode()` 与手写连续 `forward()` 得到 bitwise 相同的 state/logits。
-
-运行单条命令：
+## 2. 直接运行 token ids
 
 ```sh
 ./qwen35 --forward build/qwen35-0.8b.bin 248044,198,198
 ./qwen35 --generate build/qwen35-0.8b.bin 248044,198,198 8
 ```
 
-tokenizer 仍然不属于本目录；Stage 4 才会用官方 tokenizer/chat template 给这个 token-id CLI
-套一层极薄 wrapper。
+`forward()` 每次处理一个 token；`prefill()` 只是连续调用它，`decode()` 使用同一个
+`State` 继续调用。C++ 输出 token ids，不在模型数学中混入 tokenizer。
+
+## 3. 真实文字/chat e2e
+
+文字入口需要支持 Qwen3.5 的 Transformers：
+
+```sh
+python3 -m pip install -r requirements.txt
+python3 chat.py \
+  --model ../models/Qwen3.5-0.8B \
+  --prompt '用一句话介绍 DeltaNet。' \
+  --max-new-tokens 32
+```
+
+`chat.py` 默认调用本目录的 `./qwen35` 和 `build/qwen35-0.8b.bin`。它从 checkpoint
+读取官方 tokenizer 和 chat template，C++ engine 本身仍然只处理 token ids。
+
+## 4. 独立验证
+
+```sh
+make quick-test MODEL=../models/Qwen3.5-0.8B
+make test MODEL=../models/Qwen3.5-0.8B
+```
+
+`make test` 不进入其他 stage，验证：
+
+1. BF16、argmax、RMSNorm 微型 self-test；
+2. 三组固定官方 contract 的 next-token/logit、greedy continuation；
+3. `prefill()+decode()` 与连续 `forward()` 留下完全相同的 state/logits；
+4. 官方 chat template 的 input ids、CPU generated ids 和最终非空文字。
+
+`reference.json` 是小型、可提交的 smoke contract。需要重新用官方模型验证每一步完整
+248,320 词表 logits 时，再运行：
+
+```sh
+make oracle-test MODEL=../models/Qwen3.5-0.8B
+```
+
+这个重型 target 会显式调用 `../01-hf-reference`；它是额外数值裁判，不是本目录正常运行
+或日常测试的依赖。

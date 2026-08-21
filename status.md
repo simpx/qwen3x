@@ -1,6 +1,6 @@
 # 当前状态
 
-快照日期：2026-08-20。这是一份项目事实检查点；它不代表 Qwen3.8-27B 已经能够运行。
+快照日期：2026-08-22。这是一份项目事实检查点；它不代表 Qwen3.8-27B 已经能够运行。
 
 ## 当前学习进度（后续 session 从这里继续）
 
@@ -20,7 +20,13 @@
 - lesson 05 已完成概念层学习并跳过逐行实现：理解 decode step 中
   `past cache + current k/v -> visible cache` 的时间线；知道 Q 不缓存、当前 K/V 要先 append，
   以及 GQA 是多个 Q head 共享较少的 KV head。
-- lesson 06--09 尚未正式学习。
+- lesson 06 已完成概念层学习：理解 DeltaNet 用固定 `S[Dk,Dv]` 压缩历史，当前 k/v 通过
+  delta rule 写入，当前 q 读取；理解 beta、decay、outer product 和“软索引”直觉。
+- lesson 07 已完成：理解 causal depthwise conv 保存 `CK-1` 个历史 QKV、用固定 kernel
+  逐 channel 乘加，再进入多 head DeltaNet state。
+- lesson 08 已读完主线：理解 3 DeltaNet : 1 attention 的 hybrid stack 是两种 mixer 的拼装。
+- lesson 09 已完成主线：理解 BF16/FP32、safetensors 与 packed bin、mmap/Reader、
+  `Model + State + Work`，并能复述完整 forward；真实 branch 内部循环按需继续查阅。
 
 已经澄清、后续仍需留意的边界：
 
@@ -34,9 +40,9 @@
 - 带 KV cache 的 decode 只投影当前 token 的 `q/k/v` 并 append 当前 `k/v`；不会每步重新
   用 `[T,H]` 计算全部历史 K/V。无 cache 的朴素实现才会重算历史。
 
-下一次继续：打开 `00-lessons/06_deltanet_recurrence.cpp`，先建立 DeltaNet 为什么用固定
-矩阵 state 代替随 context 增长的 KV cache，再按“目的/直觉 -> 数学与 shape -> 实现”理解
-一次 `delta_step()`。
+下一次继续：进入 `02-cpu-0.8b/qwen35.cpp`。不要重讲 00--09；从正式版与 lesson 09 的差异开始，
+依次理解 packed model validation、独立 prefill/decode API、本地 regression 和文字 e2e。需要检查
+某个真实 branch 时，继续坚持“输入 shape -> 公式 -> 循环”的顺序。
 
 ## 项目边界
 
@@ -54,11 +60,10 @@ single GPU。顺序始终是：
 | --- | --- |
 | `00-lessons/` | 第 0 章：lesson 00--08 解释各个小数学部件；lesson 09 能运行固定 Qwen3.5-0.8B 的完整 CPU forward。 |
 | `01-hf-reference/` | 本地官方 Hugging Face checkpoint 以 eager FP32、逐 token 方式运行；CPU 与 CUDA oracle vectors 分开生成。 |
-| `02-cpu-0.8b/` | plain C++ `Model + State + Work`；BF16 checkpoint、FP32 activations/state；具备 prefill、decode、DeltaNet state、attention KV cache 与 greedy decode。 |
+| `02-cpu-0.8b/` | 独立 plain C++ `Model + State + Work`；具备权重打包、prefill、decode、DeltaNet/KV state、greedy decode、固定本地回归与官方 tokenizer 文字 e2e。正常运行和 `make test` 不依赖其他 stage。 |
 | CPU regression | 每一步都将完整 248,320 词表 logits 与官方 CPU oracle 对比。版本化最大绝对误差为 `5e-4`，另检查 argmax、greedy ids 与 API state。 |
 | `03-cuda-0.8b/` | non-linear/state 操作由直接 CUDA kernel 实现；所有 linear projection 由 cuBLAS GEMV 实现；模型 state 常驻 GPU。 |
 | CUDA regression | 每一步都与独立生成的官方 CUDA FP32 oracle 对比完整 logits，使用相同 `5e-4` 阈值；另检查 greedy ids 与 state API。 |
-| `04-0.8b-e2e/` | 官方 Python tokenizer/chat template 仅是一层很薄的外壳；C++ 仍然只接收 token ids。已测一个真实中文 chat prompt 的端到端路径。 |
 | `05-qwen38-27b/` | 不下载 weight shard 的情况下，已检查官方 Qwen3.8-27B config 和 safetensors index；错误 config/schema/byte-count fixture 均会被拒绝。 |
 
 当前 0.8B vector suite 有三组：3-token prompt + 2 decode token、4-token prompt +
@@ -112,8 +117,8 @@ state 约 0.141 GiB，DeltaNet conv history 约 0.005 GiB，full-attention KV ca
 
 ## 小的维护项
 
-- 0.8B CPU/CUDA stage 的 `make weights` 只依赖 packer script，不依赖 source checkpoint
-  file；替换 `MODEL` 而不删除已有 bin 时，可能复用 stale packed weights。
+- CUDA stage 的 `make weights` 只依赖 packer script，不依赖 source checkpoint file；替换
+  `MODEL` 而不删除已有 bin 时，仍可能复用 stale packed weights。CPU stage 已改为每次显式重打包。
 - CUDA self-test 暴露为 `make cuda-test`；当前 `make test` 并不会执行它。
 - lesson、CPU、CUDA snapshot 有意分开，换取可读性；但未来 27B snapshot 必须明确唯一的
   source of truth，不能出现第四份悄悄漂移的实现。

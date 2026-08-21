@@ -49,9 +49,8 @@ correct → simple → readable → usable → fast
 00-lessons/              第 0 章：toy math + 已有的 0.8B CPU capstone；尽量冻结
 
 01-hf-reference/         Stage 1：官方 Qwen3.5-0.8B 的 PyTorch / Transformers oracle
-02-cpu-0.8b/             Stage 2：真实 0.8B 的可读 C++ CPU forward + state
+02-cpu-0.8b/             Stage 2：真实 0.8B 的可读 C++ CPU forward + state + 文字 e2e
 03-cuda-0.8b/            Stage 3：同一 0.8B 的 CUDA first-correct version
-04-0.8b-e2e/             Stage 4：0.8B 的 CLI wrapper、test vectors、端到端集成测试
 05-qwen38-27b/           Stage 5：固定 Qwen3.8-27B CUDA correctness
 06-prefix-cache/         Stage 6：longest-prefix state snapshot / restore
 07-server/               Stage 7：tokenizer wrapper、CLI、streaming OpenAI-compatible API
@@ -205,32 +204,14 @@ decode 不得下载全 vocabulary logits。
 vectors，再比较全 logits、greedy ids、prefill/decode/state。GPU 有自己的 reduction order 与 vector
 bundle，但门槛必须写在 metadata/README 中，不能临时放宽。
 
-### Stage 4 — `04-0.8b-e2e/`：将 0.8B 测试封口
-
-这个目录不重新实现 layer math。它以 Stage 2/3 的 binary 作为黑盒，完成以后迁 27B 必须具备的
-测试契约：
-
-~~~text
-04-0.8b-e2e/
- README.md
- Makefile
-  qwen35_chat.py      # 官方 tokenizer / chat template 的薄包装，不进入 C++ forward
-  test_e2e.py         # prompt → tokens → generate → decode 的固定 contract test
-~~~
-
-此时仍不做 HTTP server 或跨 request prefix cache；但必须将 token-id CLI 与 state 测试固定下来，保证
-接下来只替换 model dimensions/weights 而不是重做基础循环。可保留 MMLU-Pro short coverage 作为慢速
-质量回归，但它不能代替数值 vectors。
-
 ### 今晚的严格顺序与停机条件
 
 | 顺序 | 自动任务 | 绿灯命令 | 禁止提前做的事 |
 | --- | --- | --- | --- |
 | 1 | Stage 1：生成官方 CPU/CUDA test vectors | `make -C 01-hf-reference cpu` / `make -C 01-hf-reference cuda` | 不改第 0 章数学 |
-| 2 | Stage 2：从 lesson 09 建真实 CPU `Model/State/Work` API | `make -C 02-cpu-0.8b test MODEL=...` | 不优化 linear、不加 tokenizer |
+| 2 | Stage 2：从 lesson 09 建真实 CPU `Model/State/Work` API 与文字 e2e | `make -C 02-cpu-0.8b test MODEL=...` | 不优化 linear、不把 tokenizer 混进 C++ forward |
 | 3 | Stage 3：CUDA + cuBLAS correctness path | `make -C 03-cuda-0.8b cuda-test` + `make test` | 不写新 fused kernel |
-| 4 | Stage 4：固定 CLI/e2e test contract | `make -C 04-0.8b-e2e test` | 不做 HTTP/prefix snapshot |
-| 5 | 总回归与提交 | 四个目录的 Makefile 都绿 | 不开始 27B |
+| 4 | 总回归与提交 | 01、02、03 三个实现目录的 Makefile 都绿 | 不开始 27B |
 
 **今晚结束定义：** 真实官方 0.8B 权重能经过 HF → CPU → CUDA → tokenizer wrapper 的完整验证，
 并且 `Model + State + Work + prefill/decode` 的行为有固定测试。到这一步才能开始 `05-qwen38-27b/`。
@@ -311,12 +292,12 @@ E 或 F 重新计算 ABCD。到这里，已经是一个真正的 batch=1 LLM inf
 
 能持续聊天，且 CUDA 与 CPU 的逐层/端到端 regression 均通过。
 
-## 9. Stage 4 — 0.8B runtime integration
+## 9. 0.8B runtime integration（由 Stage 2 完成）
 
-在切换 27B 前，将 Stage 2/3 的 `Model + State + Work` 数据流固定为一个真实可调用的 0.8B runtime：
+在切换 27B 前，Stage 2 将 `Model + State + Work` 数据流固定为一个真实可调用的 0.8B runtime：
 token id CLI、官方 tokenizer/chat template 薄包装、prefill/decode state regression、CPU/CUDA vector
-runner 与固定 prompt smoke test。这个 stage 只编排已经正确的 engines；不新增 layer math，也不
-开始 HTTP server。
+runner 与固定 prompt smoke test。tokenizer 薄包装和文字 e2e 直接放在 `02-cpu-0.8b/`，不再额外建立
+一个只做编排的目录；它们不进入 C++ forward，也不新增 layer math。
 
 **验收：** `prefill` 与逐 token `decode` 必须等价；reset 后状态不得泄漏；CPU/CUDA 能被同一个
 token-id case 调用；全部 0.8B 数值 vector、greedy vector 与文本 smoke test 一条
