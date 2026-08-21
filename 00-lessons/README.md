@@ -51,7 +51,7 @@ cache，DeltaNet 读取固定大小的 recurrent state。00--08 课把这条线�
 | 04 | Q/K/V 都是向量 | causal attention | Q 怎样找 K、从 V 取回内容 |
 | 05 | attention 能读取已有 token | GQA、prefill、decode、KV cache | 两个 Q head 共用一组 K/V |
 | 06 | 前文可以储存起来 | DeltaNet 固定 recurrent state | state 不随 context 变大 |
-| 07 | DeltaNet 的写入/读取公式 | 投影、causal conv、门控、完整 DeltaNet layer | 一个 token 怎样更新一个 DeltaNet layer |
+| 07 | DeltaNet 的写入/读取公式 | 用前两个 QKV 手算 causal conv，再组装完整 layer | `[QKV]+history[QKV,2]` 怎样仍得到 `[QKV]` |
 | 08 | 两种 mixer 都有各自 state | 3 DeltaNet : 1 attention 的 hybrid stack | 第二个 token 为何和第一个不同 |
 | 09 | 前面所有数学零件 | 固定 Qwen3.5-0.8B 的真实 forward / prefill / decode | token id 如何走完整模型并产生下一个 logit |
 

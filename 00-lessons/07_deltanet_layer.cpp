@@ -2,8 +2,9 @@
 //
 // 阅读路线：
 //   已经会：DeltaNet 的 S 如何按 Q/K/V、decay 和 beta 逐 token 更新。
-//   本课只加：同一个 hidden 怎样先投影成 q/k/v/z/a/b，再走完整 DeltaNet 分支并投影回来。
-//   运行后看：同一个 State 连续处理两个 token 时，第二次输出会依赖第一次写入的记忆。
+//   本课分两段：先手算 current_qkv[6]+history[6,2]->mixed_qkv[6]；
+//                 再看同一 hidden 如何投影成 q/k/v/z/a/b，走完 DeltaNet 分支。
+//   运行后看：同一个 State 连续处理三个 token，第三次的 conv 同时使用前两个 token。
 //   下一课：把 DeltaNet layer 和 attention layer 按 Qwen 的固定顺序放进同一个模型。
 //
 // 执行顺序与 Qwen 相同：
@@ -11,8 +12,9 @@
 //   -> gated delta recurrence -> gated RMSNorm -> out_proj。
 // 所有维度都缩到 2；因此本课能运行，但每一行仍对应真实模型中的同一位置。
 //
-// 这不是一个可泛化的 DeltaNet 实现：权重固定在函数中，conv kernel 也特意取成
-// [0, 1]。它的任务是把上一课的 recurrence 放回真实 layer 的前后投影、门控和
+// 这不是一个可泛化的 DeltaNet 实现：权重固定在函数中，conv 也特意统一使用
+// current + 0.5*previous + 0.25*older。它的任务是把上一课的 recurrence
+// 放回真实 layer 的前后投影、门控和
 // normalization 之间，回答“一个 token 进入 DeltaNet layer 时具体经过什么”。
 //
 // 白话记忆：本课的 input 是“已经经过前面 layer 的当前 token hidden”。四个投影不是四份
@@ -26,8 +28,25 @@
 
 namespace lesson07 {
 
-constexpr int H = 2, QKV = 6, D = 2;
+constexpr int H = 2, QKV = 6, D = 2, CONV_HISTORY = 2;
 // H 是输入/输出 hidden size；QKV=Q(2)+K(2)+V(2)，D 是本例单 head 的宽度。
+// CONV_HISTORY=2 表示每个 qkv 位置保存前两个 token 的值。
+
+// 本课 conv 的全部计算（先看计算，再记术语）：
+//
+//   token t 当前投影：current_qkv[6] = [q0,q1,k0,k1,v0,v1]
+//   前两个 token：      history[6,2]，每个位置都有 [older,previous]
+//
+//   对 position=0..5 分别做：
+//   mixed_qkv[position]
+//     = current_qkv[position]
+//     + 0.5 * previous_qkv[position]
+//     + 0.25 * older_qkv[position]
+//
+//   current_qkv[6] + history[6,2] -> mixed_qkv[6]
+//
+// 名字只是这个计算的简写：一组乘法权重叫 kernel；整个局部乘加叫 conv；
+// 只用当前和过去、不用未来叫 causal。conv 不改变 qkv 的 shape。
 
 // 目的/直觉：把门控参数压到 0..1，供 DeltaNet 的 beta 使用。
 // 数学：      sigmoid(x)=1/(1+exp(-x))。
@@ -74,23 +93,64 @@ void l2(float* x) {
 }
 
 struct State {
-    // 每个 qkv channel 只保留一个卷积历史；S 是本 layer 唯一的 recurrent state。
+    // conv_history[QKV=6][2]：每个 qkv 位置保留前两个 token。
+    //   [position][0] = older，也就是 t-2
+    //   [position][1] = previous，也就是 t-1
+    // recurrent[D=2][D=2]：就是第 06 课的 S[Dk,Dv]。
     // 即使生成无限长文本，这两个数组也不会随 token 数增长。
-    float conv_history[QKV] = {};
+    float conv_history[QKV][CONV_HISTORY] = {};
     float recurrent[D][D] = {};
 };
 
-// 目的/直觉：让每个 qkv channel 在进入 recurrence 前读取自己最近的 token 历史；
-//             本 toy 取 kernel=[0,1]，数值上只使用当前值，但仍展示 history 生命周期。
-// 数学：      y_c=SiLU(sum_{lag=0}^{CK-1}(kernel[c,lag]*x_{t-lag,c}))；本例 y_c=SiLU(x_c)。
-// 实现：      每个 channel 备份 current、做 SiLU、再把 current 写入固定大小 conv_history。
+// 目的/直觉：让当前 qkv[6] 在进入 recurrence 前，混入前两个 token
+//             在同一位置上的数值。
+// 数学与 shape：
+//   current[6] + history[6,2] -> mixed[6] -> SiLU -> x[6]
+//   mixed_t[i] = current_t[i] + 0.5*previous[i] + 0.25*older[i]。
+// 实现：对 6 个位置分别计算；算完后丢掉 t-2，把 [t-1,t]
+//             作为下一步的两个历史。
 void conv(float* x, State* state) {
-    // 真实 kernel 是每通道 4 个参数，对当前和前三个 qkv input 做卷积后再 SiLU。
-    for (int channel = 0; channel < QKV; ++channel) {
-        const float current = x[channel];
-        x[channel] = silu(current);
-        state->conv_history[channel] = current;
+    // 真实 Qwen3.5-0.8B 使用当前+前三个；本课先展示当前+前两个。
+    for (int position = 0; position < QKV; ++position) {
+        const float current = x[position];
+        const float older = state->conv_history[position][0];
+        const float previous = state->conv_history[position][1];
+        const float mixed = current + 0.5f * previous + 0.25f * older;
+        x[position] = silu(mixed);
+
+        // [older, previous] = [t-2, t-1] 向前移动成 [t-1, t]。
+        state->conv_history[position][0] = previous;
+        state->conv_history[position][1] = current;
     }
+}
+
+// 目的/直觉：单独验证并打印第三个 token 如何同时使用前两个 token，
+//             不让这件事被后面的 Delta rule 和门控掩盖。
+// 数学与 shape：对每个位置，token2_mixed=token2+0.5*token1+0.25*token0。
+// 实现：用同一个 State 连续调用 conv 三次，对第三次结果逐位断言。
+void conv_self_test() {
+    State state;
+    float token0[QKV] = {1, 2, 3, 4, 5, 6};
+    float token1[QKV] = {10, 20, 30, 40, 50, 60};
+    float token2[QKV] = {100, 200, 300, 400, 500, 600};
+    conv(token0, &state);
+    conv(token1, &state);
+    conv(token2, &state);
+
+    for (int position = 0; position < QKV; ++position) {
+        const float raw0 = static_cast<float>(position + 1);
+        const float raw1 = 10.0f * raw0;
+        const float raw2 = 100.0f * raw0;
+        const float expected = silu(raw2 + 0.5f * raw1 + 0.25f * raw0);
+        assert(std::fabs(token2[position] - expected) < 1e-5f);
+        assert(std::fabs(state.conv_history[position][0] - raw1) < 1e-6f);
+        assert(std::fabs(state.conv_history[position][1] - raw2) < 1e-6f);
+    }
+
+    const float position0_mixed = 100.0f + 0.5f * 10.0f + 0.25f * 1.0f;
+    std::printf("conv shape: current[6] + history[6,2] -> mixed[6]\n");
+    std::printf("token 2 position 0: 100 + 0.5*10 + 0.25*1 = %.2f; SiLU -> %.2f\n",
+                position0_mixed, token2[0]);
 }
 
 // 目的/直觉：复用第 06 课，用一个 head 的固定矩阵 S 完成遗忘、误差写入和读取。
@@ -171,6 +231,7 @@ void delta_layer(const float* input, State* state, float* output) {
 // 数学：      DeltaLayer(x1, DeltaLayer(x0,S=0).state) 应不同于 DeltaLayer(x1,S=0)。
 // 实现：      一条路径连续跑 x0,x1，另一条路径只用全新 state 跑 x1；比较第二步输出。
 void self_test() {
+    conv_self_test();
     State with_history, fresh;
     const float first_input[H] = {1.0f, 0.0f};
     const float second_input[H] = {1.0f, 1.0f};
@@ -187,17 +248,22 @@ void self_test() {
 
 }  // namespace lesson07
 
-// 目的/直觉：打印两个连续 token 的输出，让第二步可见地携带第一步写入的记忆。
-// 数学：      out0=DeltaLayer(x0,S0)，out1=DeltaLayer(x1,S1)，其中 S1 是第一步更新结果。
-// 实现：      运行 self_test，再复用同一 State 依次处理 [1,0] 和 [1,1] 并打印。
+// 目的/直觉：打印三个连续 token 的输出；第三步的 conv 同时混入前两步。
+// 数学：      第三步 conv 使用 current + 0.5*previous + 0.25*older。
+// 实现：      运行 self_test，再复用同一 State 依次处理三个 hidden 并打印。
 int main() {
     lesson07::self_test();
     lesson07::State state;
     const float first_input[lesson07::H] = {1.0f, 0.0f};
     const float second_input[lesson07::H] = {1.0f, 1.0f};
-    float first_output[lesson07::H] = {}, second_output[lesson07::H] = {};
+    const float third_input[lesson07::H] = {0.0f, 1.0f};
+    float first_output[lesson07::H] = {};
+    float second_output[lesson07::H] = {};
+    float third_output[lesson07::H] = {};
     lesson07::delta_layer(first_input, &state, first_output);
     lesson07::delta_layer(second_input, &state, second_output);
+    lesson07::delta_layer(third_input, &state, third_output);
     std::printf("token 0 DeltaNet output: [%.6f, %.6f]\n", first_output[0], first_output[1]);
     std::printf("token 1 DeltaNet output: [%.6f, %.6f]\n", second_output[0], second_output[1]);
+    std::printf("token 2 DeltaNet output: [%.6f, %.6f]\n", third_output[0], third_output[1]);
 }

@@ -192,3 +192,26 @@ v：当前token要写进去的内容
 beta相当于当前token对S的写入强度
 每个token都有自己的beta
 hidden[H] @ wb[H] = beta标量
+
+## 07 deltanet layer
+首先增加了conv，也就是，保存前几个token的qkv
+当前token qkv要加权前几个token qkv的值，得到新的“qkv”，用这个新的来做后续工作
+
+conv就是先加权获得新的qkv，然后把历史qkv保存一下
+
+整个layer基本上就是
+1. conv，拿到新的qkv（也更新了历史qkv）
+2. 更新S，拿到output
+
+| 术语 | 脑中的画面 |
+|---|---|
+| conv | 小尺子沿 token 序列滚动并做乘加 |
+| kernel | 小尺子上的那组权重 |
+| kernel size | 小尺子一次盖住几个 token |
+| 1D | 只沿 token 这一个方向移动 |
+| causal | 不偷看未来 |
+| channel | QKV 向量里的一根数据管道 |
+| depthwise | 每根管道各算各的 |
+| recurrent | 状态返回给下一个 token 继续用 |
+
+## 08 合起来了
