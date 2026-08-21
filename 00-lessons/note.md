@@ -242,3 +242,26 @@ FP32：
 [符号 1][指数 8][小数 7][剩余小数 16]
 
 计算时转换成fp32，可以方便后面的计算
+
+#### forward
+embed，把token id变成hidden
+每一层做
+- rms归一：[H] -> [H]
+- 如果是deltanet：[H] -> [H]
+  - 用conv里的历史qkv算上
+  - 更新S
+  - 获得[Dv]
+  - 转换回[H]
+- 如果是attention：[H] -> [H]
+  - 计算qkv
+  - 和历史kvcache合并出kv[T, d]
+  - 用qk计算score，和v计算数值
+  - 转换回[H]
+- 残差计算，原地加上输出的[H]
+- 再rms
+- 再ffn，各种变换
+- 再残差计算
+最终还要rms一下
+然后lm_head，把[H] -> [V]得出logits
+
+forward完成后，外面generate的时候argmax取最大值
