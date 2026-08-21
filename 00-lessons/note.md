@@ -80,8 +80,7 @@ FFN
 skip
 给Q/K加位置编码
 
-## 04
-attention
+## 04 attention
 先说直觉，attention就是要“拿着最新的一个token/hidden，去历史中找到值得注意的信息”
 
 Query：当前 token 发出的“检索请求” —— 想找什么？
@@ -143,3 +142,53 @@ GQA：本例QH=2、KVH=1，两个Q head共享同一个KV head。共享K/V不代�
 
 `gqa_decode(query, cache, output)`只负责“当前Q读取已经append好的可见cache”，不是完整
 decode step；append发生在调用它之前。因此这里的cache是包含当前token K/V的完整可见前缀。
+
+## 06 deltanet
+attention和deltanet一样，都是mixer，都有跨token的能力
+attention拿着当前token的q，和历史所有k计算score，然后根据score从历史v中获取信息 [D]，再通过linear变换回[H]。历史k[T, Dk]、v[T, Dv]随着长度变长
+
+deltanet，最终一样会获得[H]，但它固定了一个state，可以理解为一个持续更新出来的历史状态，可以直觉理解为一个数据库。s[Dk, Dv]，最终q从这里提取信息
+deltanet一样有qkv，只不过不保留kv历史，通过每次当前的kv信息来“更新”这个s
+q = [H] @ wq[H, dq]
+k = [H] @ wk[H, dk]
+v = [H] @ wv[H, dv]
+注意，这里不需要历史所有的k、v了
+然后是“更新”过程
+首先，k可以理解为当前token准备往S里写数据时候写入地址
+所以我们先用k把数据读出来看看，有什么差别
+k[dk] @ S[dk, dv] = memory[dv] 尝试用k，获取memory
+memory和v对比，拿到差别
+delta[dv] = v[dv] - memory[dv]
+写入！newS[dk, dv] = S[dk, dv] + outer(k[Dk], beta*delta)；
+  beta有点像学习率
+  k[dk]有点像一个“索引”，表示delta要写到什么位置
+  outer是外积
+此时，newS已经有了新的k、v的信息
+最终结果output = q @ newS = [dq] @ S[dk, dv]
+注意，为了这个公式成立，意味着dq 一定等于 dk
+[dq] @ S[dk, dv] = [dv] 拿到结果
+最后通过linear，变成[H]
+
+直觉如下：
+在attention里
+q：当前token想从历史中查询什么
+k：每个token的索引信息
+v：每个token准备被读取的内容
+因此，attn是，拿着当前q，通过每个token的索引k，从历史v中获得信息
+
+在deltanet里
+q：当前token想从历史中查询什么
+S：历史token持续更新出来的压缩历史
+k：当前token往S写的时候的写入地址
+v：当前token要写进去的内容
+
+如果S是一个数据库，为什么不直接S[k] = v这样覆盖写入？
+这就是这种矩阵的特性，k不是真的索引下标
+
+为什么不能覆盖写，而是要用delta？
+因为我们的写入其实是一个加法，我们没法覆盖写，只能用delta的方式来实现类似“先读后写”的操作，有点像存储领域，会写放大。k不是整数下标，而是一个软索引向量，实现的是一种“软覆盖”。
+
+为什么beta不能是1？
+beta相当于当前token对S的写入强度
+每个token都有自己的beta
+hidden[H] @ wb[H] = beta标量
