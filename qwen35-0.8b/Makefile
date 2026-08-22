@@ -11,7 +11,7 @@ CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic
 
 all: $(LIBRARY)
 
-$(LIBRARY): engine.cpp engine.h
+$(LIBRARY): engine.cpp qwen35.h
 	mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -fPIC -shared engine.cpp -o $@
 

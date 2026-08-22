@@ -37,7 +37,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "engine.h"
+#include "qwen35.h"
 
 namespace qwen35 {
 
@@ -581,8 +581,66 @@ void decode(const Model& model, State& state, int token, Work& work) {
 }
 
 int argmax(const std::vector<FP32>& values) {
-    // deterministic greedy sampling；更复杂的 sampler 以后可以放在 Runtime。
+    // Greedy sampling：直接选择 logit 最大的 token。
     return static_cast<int>(std::max_element(values.begin(), values.end()) - values.begin());
+}
+
+uint64_t random_u64(uint64_t& state) {
+    // xorshift64*：调用方持有 state，因此每个请求可以有独立、可复现的随机序列。
+    if (state == 0) state = 0x9e3779b97f4a7c15ULL;
+    state ^= state >> 12;
+    state ^= state << 25;
+    state ^= state >> 27;
+    return state * 0x2545f4914f6cdd1dULL;
+}
+
+double random_unit(uint64_t& state) {
+    // 取最高 53 bit，得到 [0,1) 的均匀随机数。
+    return (random_u64(state) >> 11) * 0x1.0p-53;
+}
+
+int sample(const std::vector<FP32>& logits, FP32 temperature, int top_k, FP32 top_p,
+           uint64_t& rng, std::vector<int>& order) {
+    if (temperature == 0.0f) return argmax(logits);
+    if (!std::isfinite(temperature) || temperature < 0.0f ||
+        !std::isfinite(top_p) || top_p <= 0.0f || top_p > 1.0f) {
+        return -1;
+    }
+
+    const int limit = top_k <= 0 ? V : std::min(top_k, V);
+    order.resize(V);
+    for (int token = 0; token < V; ++token) order[token] = token;
+    if (limit < V || top_p < 1.0f) {
+        std::partial_sort(order.begin(), order.begin() + limit, order.end(),
+                          [&](int left, int right) { return logits[left] > logits[right]; });
+    }
+
+    FP32 maximum = -std::numeric_limits<FP32>::infinity();
+    for (int index = 0; index < limit; ++index) {
+        maximum = std::max(maximum, logits[order[index]]);
+    }
+
+    double total = 0.0;
+    for (int index = 0; index < limit; ++index) {
+        total += std::exp((logits[order[index]] - maximum) / temperature);
+    }
+    if (!(total > 0.0) || !std::isfinite(total)) return -1;
+
+    const double nucleus = total * top_p;
+    double kept = 0.0;
+    int count = 0;
+    do {
+        kept += std::exp((logits[order[count]] - maximum) / temperature);
+        ++count;
+    } while (count < limit && kept < nucleus);
+
+    const double target = random_unit(rng) * kept;
+    double cumulative = 0.0;
+    for (int index = 0; index < count; ++index) {
+        cumulative += std::exp((logits[order[index]] - maximum) / temperature);
+        if (target < cumulative) return order[index];
+    }
+    return order[count - 1];
 }
 
 }  // namespace qwen35
@@ -596,11 +654,13 @@ struct q35_session {
     qwen35::State state;
     qwen35::Work work;
     std::vector<int> tokens;
+    std::vector<int> sample_order;
     bool logits_valid = false;
 
     q35_session(q35_engine* owner, int context_size)
         : engine(owner), state(context_size), work(context_size) {
         tokens.reserve(static_cast<size_t>(context_size));
+        sample_order.reserve(qwen35::V);
     }
 
     void reset() {
@@ -624,16 +684,16 @@ void write_error(char* output, size_t capacity, const char* message) {
 }
 
 template <typename Function>
-int guard(char* error, size_t error_capacity, Function&& function) {
+int guard(char* err, size_t errlen, Function&& function) {
     try {
         function();
-        write_error(error, error_capacity, "");
+        write_error(err, errlen, "");
         return Q35_OK;
     } catch (const std::exception& exception) {
-        write_error(error, error_capacity, exception.what());
+        write_error(err, errlen, exception.what());
         return Q35_ERROR;
     } catch (...) {
-        write_error(error, error_capacity, "unknown C++ exception");
+        write_error(err, errlen, "unknown C++ exception");
         return Q35_ERROR;
     }
 }
@@ -644,14 +704,15 @@ void require(bool condition, const char* message) {
 
 }  // namespace
 
-extern "C" int q35_engine_create(const char* weights_path, q35_engine** out,
-                                  char* error, size_t error_capacity) {
-    return guard(error, error_capacity, [&] {
-        require(weights_path && weights_path[0], "weights_path is empty");
+extern "C" int q35_engine_create(const q35_engine_options* options, q35_engine** out,
+                                  char* err, size_t errlen) {
+    return guard(err, errlen, [&] {
+        require(options, "engine options are null");
+        require(options->weights_path && options->weights_path[0], "weights_path is empty");
         require(out, "engine output pointer is null");
         *out = nullptr;
         auto engine = std::make_unique<q35_engine>();
-        engine->model = std::make_unique<qwen35::LoadedModel>(weights_path);
+        engine->model = std::make_unique<qwen35::LoadedModel>(options->weights_path);
         *out = engine.release();
     });
 }
@@ -661,8 +722,8 @@ extern "C" void q35_engine_destroy(q35_engine* engine) {
 }
 
 extern "C" int q35_session_create(q35_engine* engine, int context_size, q35_session** out,
-                                   char* error, size_t error_capacity) {
-    return guard(error, error_capacity, [&] {
+                                   char* err, size_t errlen) {
+    return guard(err, errlen, [&] {
         require(engine, "engine is null");
         require(out, "session output pointer is null");
         *out = nullptr;
@@ -677,16 +738,16 @@ extern "C" void q35_session_destroy(q35_session* session) {
 }
 
 extern "C" int q35_session_reset(q35_session* session,
-                                  char* error, size_t error_capacity) {
-    return guard(error, error_capacity, [&] {
+                                  char* err, size_t errlen) {
+    return guard(err, errlen, [&] {
         require(session, "session is null");
         session->reset();
     });
 }
 
 extern "C" int q35_session_sync(q35_session* session, const int* tokens, int count,
-                                 char* error, size_t error_capacity) {
-    return guard(error, error_capacity, [&] {
+                                 char* err, size_t errlen) {
+    return guard(err, errlen, [&] {
         require(session, "session is null");
         require(tokens, "tokens pointer is null");
         require(count > 0, "token sequence is empty");
@@ -711,8 +772,8 @@ extern "C" int q35_session_sync(q35_session* session, const int* tokens, int cou
 }
 
 extern "C" int q35_session_eval(q35_session* session, int token,
-                                 char* error, size_t error_capacity) {
-    return guard(error, error_capacity, [&] {
+                                 char* err, size_t errlen) {
+    return guard(err, errlen, [&] {
         require(session, "session is null");
         require(token >= 0 && token < qwen35::V, "token is outside vocabulary");
         require(session->state.position < session->state.capacity, "session context is full");
@@ -729,7 +790,14 @@ extern "C" int q35_session_argmax(const q35_session* session) {
     return qwen35::argmax(session->work.logits);
 }
 
-extern "C" int q35_session_is_stop_token(int token) {
+extern "C" int q35_session_sample(q35_session* session, float temperature, int top_k,
+                                   float top_p, uint64_t* rng) {
+    if (!session || !session->logits_valid || !rng) return -1;
+    return qwen35::sample(session->work.logits, temperature, top_k, top_p,
+                          *rng, session->sample_order);
+}
+
+extern "C" bool q35_token_is_stop(int token) {
     return token == qwen35::END_OF_TEXT_TOKEN || token == qwen35::IM_END_TOKEN;
 }
 
@@ -738,8 +806,8 @@ extern "C" int q35_vocab_size(void) {
 }
 
 extern "C" int q35_session_copy_logits(const q35_session* session, float* output, int capacity,
-                                        char* error, size_t error_capacity) {
-    return guard(error, error_capacity, [&] {
+                                        char* err, size_t errlen) {
+    return guard(err, errlen, [&] {
         require(session, "session is null");
         require(session->logits_valid, "session has no logits; sync or eval tokens first");
         require(output, "logits output pointer is null");

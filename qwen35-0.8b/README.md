@@ -33,7 +33,7 @@ Slot
 ## 文件
 
 ```text
-engine.h                 稳定的 opaque-handle C ABI
+qwen35.h                 Engine、Session、SessionManager 的公共 C ABI
 engine.cpp               CPU Model/State/Work/forward + Engine/Session
 pack_weights.py          官方 safetensors -> mmap-friendly 固定 tensor stream
 qwen_runtime/binding.py  ctypes Engine/Session 包装
@@ -95,11 +95,11 @@ curl -X DELETE http://127.0.0.1:8000/v1/sessions/my-agent \
 
 ## 当前边界
 
-- CPU BF16-weight / FP32-compute，greedy only，text-only。
+- CPU BF16-weight / FP32-compute，支持 greedy、temperature 和 top-p sampling，text-only。
 - 固定 Session 数量；全部 BUSY 时返回 429，IDLE Slot 按 LRU 重新绑定。
 - 中断只能在 token 边界发现；一次 CPU forward 尚不能抢占。
 - 没有跨 Session common-prefix sharing、snapshot/disk cache、batching、vision、tools 或 MTP。
 - `session_id` 是本项目扩展，不是 Chat Completions 标准字段。
 
-下一步可以在不改变 C ABI 基本关系的前提下加入 sampler、snapshot 和 CUDA Engine。公共前缀以后可
+下一步可以在不改变 C ABI 基本关系的前提下加入 snapshot 和 CUDA Engine。公共前缀以后可
 作为 pinned prefix 优化：Attention block 可共享，DeltaNet 起点 State 仍需复制给各 Session。

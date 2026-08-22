@@ -127,7 +127,7 @@ state 约 0.141 GiB，DeltaNet conv history 约 0.005 GiB，full-attention KV ca
 
 ## 精确的下一步
 
-先按 `qwen35-0.8b/engine.h -> engine.cpp -> qwen_runtime/binding.py -> slots.py -> server.py`
+先按 `qwen35-0.8b/qwen35.h -> engine.cpp -> qwen_runtime/binding.py -> slots.py -> server.py`
 阅读和 review 新的 Session runtime，固定 ABI 和生命周期。确认这套概念后，再让
 `03-cuda-0.8b` 实现同一 C ABI；不要让 CUDA、sampling、snapshot 或 prefix cache 同时改变
 Session 基础契约。更远的 27B 工作仍需先在目标机器构建官方 reference/probe bundle。

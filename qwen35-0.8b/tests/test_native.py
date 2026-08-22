@@ -25,6 +25,12 @@ def main():
         first.sync(case["prefill_ids"])
         assert first.position == len(case["prefill_ids"])
         assert first.argmax() == case["next_token"]
+        sampled, _rng = first.sample(0.0, 1.0, 123)
+        assert sampled == case["next_token"]
+        sampled_a, rng_a = first.sample(1.0, 0.9, 123)
+        sampled_b, rng_b = first.sample(1.0, 0.9, 123)
+        assert 0 <= sampled_a < engine.vocab_size
+        assert (sampled_a, rng_a) == (sampled_b, rng_b)
         logits = first.copy_logits()
         assert abs(logits[case["next_token"]] - case["next_logit"]) <= reference["max_abs_error"]
 

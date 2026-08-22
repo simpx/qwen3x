@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -103,10 +104,17 @@ def parse_request(body, request: Request, config: Config, tokenizer):
             raise APIError(400, f"{key} is not supported", param=key)
     if body.get("n", 1) != 1:
         raise APIError(400, "only n=1 is supported", param="n")
-    if body.get("temperature") not in (None, 0, 0.0):
-        raise APIError(400, "only greedy temperature=0 is supported", param="temperature")
-    if body.get("top_p") not in (None, 1, 1.0):
-        raise APIError(400, "top_p sampling is not implemented", param="top_p")
+    temperature = body.get("temperature", 1.0)
+    if (isinstance(temperature, bool) or not isinstance(temperature, (int, float))
+            or not 0 <= temperature <= 2):
+        raise APIError(400, "temperature must be between 0 and 2", param="temperature")
+    top_p = body.get("top_p", 1.0)
+    if (isinstance(top_p, bool) or not isinstance(top_p, (int, float))
+            or not 0 < top_p <= 1):
+        raise APIError(400, "top_p must be in (0, 1]", param="top_p")
+    seed = body.get("seed")
+    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+        raise APIError(400, "seed must be an integer", param="seed")
     if body.get("logprobs") not in (None, False):
         raise APIError(400, "logprobs are not implemented", param="logprobs")
 
@@ -159,6 +167,9 @@ def parse_request(body, request: Request, config: Config, tokenizer):
         "include_usage": bool(stream_options.get("include_usage", False)),
         "session_id": session_id,
         "persistent": persistent,
+        "temperature": float(temperature),
+        "top_p": float(top_p),
+        "rng": seed if seed is not None else secrets.randbits(64),
     }
 
 
@@ -193,10 +204,12 @@ def stream_chunk(completion_id, created, model, session_id, delta,
     return result
 
 
-async def next_token(session, input_token=None):
+async def next_token(session, temperature, top_p, rng, input_token=None):
     if input_token is not None:
         await asyncio.to_thread(session.eval, input_token)
-    return await asyncio.to_thread(session.argmax)
+    if temperature == 0:
+        return await asyncio.to_thread(session.argmax), rng
+    return await asyncio.to_thread(session.sample, temperature, top_p, rng)
 
 
 def create_app(config: Config, *, tokenizer=None, pool=None):
@@ -300,13 +313,15 @@ def create_app(config: Config, *, tokenizer=None, pool=None):
             await asyncio.to_thread(slot.session.sync, parsed["prompt_ids"])
             output_ids = []
             finish_reason = "length"
-            token = await next_token(slot.session)
+            token, rng = await next_token(
+                slot.session, parsed["temperature"], parsed["top_p"], parsed["rng"]
+            )
             while len(output_ids) < parsed["max_tokens"]:
                 if await request.is_disconnected():
                     raise EngineError("client disconnected")
                 if time.monotonic() - started > config.request_timeout:
                     raise EngineError("generation request timed out")
-                if slot.session.is_stop_token(token):
+                if app.state.pool.engine.token_is_stop(token):
                     finish_reason = "stop"
                     break
                 output_ids.append(token)
@@ -317,7 +332,9 @@ def create_app(config: Config, *, tokenizer=None, pool=None):
                     break
                 if len(output_ids) == parsed["max_tokens"]:
                     break
-                token = await next_token(slot.session, token)
+                token, rng = await next_token(
+                    slot.session, parsed["temperature"], parsed["top_p"], rng, token
+                )
             return output_ids, finish_reason
 
         async def non_streaming():
@@ -356,13 +373,15 @@ def create_app(config: Config, *, tokenizer=None, pool=None):
                 yield sse(stream_chunk(completion_id, created, config.served_model_name,
                                        parsed["session_id"], {"role": "assistant", "content": ""}))
                 await asyncio.to_thread(slot.session.sync, parsed["prompt_ids"])
-                token = await next_token(slot.session)
+                token, rng = await next_token(
+                    slot.session, parsed["temperature"], parsed["top_p"], parsed["rng"]
+                )
                 while len(output_ids) < parsed["max_tokens"]:
                     if await request.is_disconnected():
                         raise EngineError("client disconnected")
                     if time.monotonic() - started > config.request_timeout:
                         raise EngineError("generation request timed out")
-                    if slot.session.is_stop_token(token):
+                    if app.state.pool.engine.token_is_stop(token):
                         finish_reason = "stop"
                         break
                     output_ids.append(token)
@@ -380,7 +399,9 @@ def create_app(config: Config, *, tokenizer=None, pool=None):
                         break
                     if len(output_ids) == parsed["max_tokens"]:
                         break
-                    token = await next_token(slot.session, token)
+                    token, rng = await next_token(
+                        slot.session, parsed["temperature"], parsed["top_p"], rng, token
+                    )
 
                 decoded = app.state.tokenizer.decode(output_ids, skip_special_tokens=True)
                 visible, stopped = stop_view(decoded, parsed["stops"], final=True)

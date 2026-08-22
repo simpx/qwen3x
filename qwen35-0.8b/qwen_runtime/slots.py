@@ -35,6 +35,7 @@ class SlotPool:
     def __init__(self, engine: Engine, slot_count: int, context_size: int):
         if slot_count <= 0:
             raise ValueError("slot_count must be positive")
+        self.engine = engine
         self._slots = [
             Slot(index, engine.create_session(context_size))
             for index in range(slot_count)

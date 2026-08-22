@@ -1,4 +1,4 @@
-"""Small ctypes binding for the stable C ABI in engine.h."""
+"""Small ctypes binding for the stable C ABI in qwen35.h."""
 
 from __future__ import annotations
 
@@ -15,13 +15,21 @@ class EngineError(RuntimeError):
     pass
 
 
+class _EngineOptions(ctypes.Structure):
+    _fields_ = [
+        ("weights_path", ctypes.c_char_p),
+    ]
+
+
 def _configure(library: ctypes.CDLL) -> None:
     void_p = ctypes.c_void_p
     char_p = ctypes.c_char_p
     size_t = ctypes.c_size_t
     int_p = ctypes.POINTER(ctypes.c_int)
 
-    library.q35_engine_create.argtypes = [char_p, ctypes.POINTER(void_p), char_p, size_t]
+    library.q35_engine_create.argtypes = [
+        ctypes.POINTER(_EngineOptions), ctypes.POINTER(void_p), char_p, size_t
+    ]
     library.q35_engine_create.restype = ctypes.c_int
     library.q35_engine_destroy.argtypes = [void_p]
     library.q35_engine_destroy.restype = None
@@ -40,8 +48,16 @@ def _configure(library: ctypes.CDLL) -> None:
     library.q35_session_position.restype = ctypes.c_int
     library.q35_session_argmax.argtypes = [void_p]
     library.q35_session_argmax.restype = ctypes.c_int
-    library.q35_session_is_stop_token.argtypes = [ctypes.c_int]
-    library.q35_session_is_stop_token.restype = ctypes.c_int
+    library.q35_session_sample.argtypes = [
+        void_p,
+        ctypes.c_float,
+        ctypes.c_int,
+        ctypes.c_float,
+        ctypes.POINTER(ctypes.c_uint64),
+    ]
+    library.q35_session_sample.restype = ctypes.c_int
+    library.q35_token_is_stop.argtypes = [ctypes.c_int]
+    library.q35_token_is_stop.restype = ctypes.c_bool
     library.q35_vocab_size.argtypes = []
     library.q35_vocab_size.restype = ctypes.c_int
     library.q35_session_copy_logits.argtypes = [
@@ -76,9 +92,12 @@ class Engine:
         self._library = ctypes.CDLL(str(library_path))
         _configure(self._library)
         self._handle = ctypes.c_void_p()
+        options = _EngineOptions(
+            weights_path=str(weights_path).encode(),
+        )
         _call(
             self._library.q35_engine_create,
-            str(weights_path).encode(),
+            ctypes.byref(options),
             ctypes.byref(self._handle),
         )
         self._sessions: set[Session] = set()
@@ -87,6 +106,9 @@ class Engine:
     @property
     def vocab_size(self) -> int:
         return int(self._library.q35_vocab_size())
+
+    def token_is_stop(self, token: int) -> bool:
+        return bool(self._library.q35_token_is_stop(int(token)))
 
     def create_session(self, context_size: int) -> "Session":
         with self._lock:
@@ -172,8 +194,25 @@ class Session:
                 raise EngineError("session has no logits; sync or eval tokens first")
             return token
 
-    def is_stop_token(self, token: int) -> bool:
-        return bool(self._engine._library.q35_session_is_stop_token(int(token)))
+    def sample(self, temperature: float, top_p: float, rng: int,
+               *, top_k: int = 0) -> tuple[int, int]:
+        if temperature < 0:
+            raise EngineError("temperature must be non-negative")
+        if not 0 < top_p <= 1:
+            raise EngineError("top_p must be in (0, 1]")
+        native_rng = ctypes.c_uint64(rng)
+        with self._lock:
+            self._require_open()
+            token = int(self._engine._library.q35_session_sample(
+                self._handle,
+                float(temperature),
+                int(top_k),
+                float(top_p),
+                ctypes.byref(native_rng),
+            ))
+            if token < 0:
+                raise EngineError("session has no logits or sampling options are invalid")
+            return token, int(native_rng.value)
 
     def copy_logits(self) -> list[float]:
         with self._lock:

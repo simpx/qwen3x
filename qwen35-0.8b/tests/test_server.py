@@ -32,12 +32,12 @@ class FakeSession:
     def argmax(self):
         return [20, 21, 22][self.step]
 
+    def sample(self, _temperature, _top_p, rng):
+        return self.argmax(), rng + 1
+
     def eval(self, token):
         assert token == [20, 21, 22][self.step]
         self.step += 1
-
-    def is_stop_token(self, _token):
-        return False
 
     def reset(self):
         self.step = 0
@@ -54,6 +54,9 @@ class FakeEngine:
         session = FakeSession(len(self.sessions))
         self.sessions.append(session)
         return session
+
+    def token_is_stop(self, _token):
+        return False
 
 
 class ServerTest(unittest.TestCase):
@@ -108,6 +111,12 @@ class ServerTest(unittest.TestCase):
         self.assertIn('"content":"！"', response.text)
         self.assertIn('"session_id":"agent-stream"', response.text)
         self.assertTrue(response.text.endswith("data: [DONE]\n\n"))
+
+    def test_sampling_options(self):
+        response = self.request(temperature=0.8, top_p=0.9, seed=123,
+                                max_completion_tokens=1)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["choices"][0]["message"]["content"], "你")
 
     def test_ephemeral_request_does_not_keep_slot_owner(self):
         response = self.request(max_completion_tokens=1)
