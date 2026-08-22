@@ -458,16 +458,14 @@ def parse_args():
     parser.add_argument("--max-context-tokens", type=int, default=4096)
     parser.add_argument("--default-max-tokens", type=int, default=128)
     parser.add_argument("--request-timeout", type=float, default=600.0)
-    parser.add_argument("--no-auth", action="store_true")
     parser.add_argument("--log-level", default="info")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    api_key = None if args.no_auth else os.environ.get("QWEN_API_KEY")
-    if not args.no_auth and not api_key:
-        raise SystemExit("set QWEN_API_KEY or use --no-auth for trusted local development")
+    # Authentication is opt-in: setting QWEN_API_KEY enables Bearer auth.
+    api_key = os.environ.get("QWEN_API_KEY")
     logging.basicConfig(level=args.log_level.upper(),
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
     config = Config(

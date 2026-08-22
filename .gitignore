@@ -18,3 +18,4 @@
 /05-qwen38-27b/build/
 __pycache__/
 *.pyc
+.venv/

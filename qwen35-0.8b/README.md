@@ -40,6 +40,7 @@ internal.h               Engine 向 Runtime 提供只读 token timeline 的私�
 qwen35.py                上述 C ABI 的薄 ctypes 包装
 server.py                OpenAI chat completions、SSE、鉴权和 tokenizer
 pack_weights.py          官方 safetensors -> mmap-friendly 固定 tensor stream
+pyproject.toml / uv.lock Python 直接依赖和完整锁定环境
 tests/                   HTTP、真实权重 ABI/SessionManager 和真实 HTTP e2e
 ```
 
@@ -49,10 +50,11 @@ tests/                   HTTP、真实权重 ABI/SessionManager 和真实 HTTP e
 ## 构建与验证
 
 ```sh
-make -C qwen35-0.8b
-make -C qwen35-0.8b weights MODEL=../models/Qwen3.5-0.8B
-make -C qwen35-0.8b test
-make -C qwen35-0.8b e2e
+cd qwen35-0.8b
+make
+make weights
+make test
+make e2e
 ```
 
 `unit-test` 不加载真实模型；`native-test` 验证 mmap 权重、独立 Session、SessionManager、
@@ -62,12 +64,20 @@ SessionManager 和 C++ forward。
 ## 启动
 
 ```sh
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r qwen35-0.8b/requirements.txt
+cd qwen35-0.8b
+make run
+```
 
-export QWEN_API_KEY='换成随机长字符串'
-make -C qwen35-0.8b run
+`pyproject.toml` 声明依赖，`uv.lock` 锁定完整环境；两者都应提交。`uv run` 会自动创建和同步
+项目自己的 `.venv`，不需要手动创建或激活虚拟环境。修改依赖使用 `uv add`/`uv remove`，不要
+直接维护 requirements 文件。CI 或部署使用 `--locked`，确保声明和 lock 不一致时直接失败。
+systemd 启动前先执行一次 `make sync-prod`；service 使用 `--no-sync`，启动时不会修改环境或访问
+包索引。开发和测试使用 `make sync`，它会额外安装 `dev` dependency group。
+
+默认不启用鉴权。需要 Bearer 鉴权时，显式设置 `QWEN_API_KEY` 再启动：
+
+```sh
+QWEN_API_KEY='换成随机长字符串' make run
 ```
 
 默认监听 `127.0.0.1:8000`。标准 OpenAI Chat Completions 请求可以不传 Session ID；manager 会按
@@ -87,8 +97,7 @@ make -C qwen35-0.8b run
 删除常驻状态：
 
 ```sh
-curl -X DELETE http://127.0.0.1:8000/v1/sessions/my-agent \
-  -H "Authorization: Bearer $QWEN_API_KEY"
+curl -X DELETE http://127.0.0.1:8000/v1/sessions/my-agent
 ```
 
 同一 `session_id` 的下一次请求会回到同一个 C++ Session。Runtime 仍发送完整 token 序列，

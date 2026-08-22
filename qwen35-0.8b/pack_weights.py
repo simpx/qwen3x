@@ -7,7 +7,8 @@ safetensors schema 或多模型分发器。
 
 用法：
     cd qwen35-0.8b
-    python3 pack_weights.py ../models/Qwen3.5-0.8B build/qwen35-0.8b.bin
+    uv run --locked --no-dev python pack_weights.py \
+        ../models/Qwen3.5-0.8B build/qwen35-0.8b.bin
 
 输入目录需要官方 config.json、model.safetensors.index.json 和对应 shard。
 脚本只用 Python 标准库；它不会把 1.6 GiB 权重整体读入内存。

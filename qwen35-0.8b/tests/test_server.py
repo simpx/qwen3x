@@ -132,6 +132,12 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.client.get("/v1/models").status_code, 401)
         self.assertEqual(self.client.get("/v1/models", headers=self.headers).status_code, 200)
 
+    def test_auth_is_disabled_by_default(self):
+        manager = FakeManager(FakeEngine(), 1)
+        config = Config(Path("model"), Path("library"), Path("weights"))
+        with TestClient(create_app(config, tokenizer=FakeTokenizer(), manager=manager)) as client:
+            self.assertEqual(client.get("/v1/models").status_code, 200)
+
     def test_non_streaming_uses_named_resident_session(self):
         response = self.request(session_id="agent-a")
         self.assertEqual(response.status_code, 200, response.text)
