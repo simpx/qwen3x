@@ -29,6 +29,7 @@ from starlette.datastructures import MutableHeaders
 from qwen35 import (
     Engine,
     EngineError,
+    Q35_LOG_DEBUG,
     Q35_LOG_ERROR,
     Q35_LOG_INFO,
     Q35_LOG_WARN,
@@ -50,12 +51,13 @@ PYTHON_LOG_LEVELS = {
     "error": logging.ERROR,
 }
 NATIVE_LOG_LEVELS = {
-    "debug": Q35_LOG_INFO,
+    "debug": Q35_LOG_DEBUG,
     "info": Q35_LOG_INFO,
     "warning": Q35_LOG_WARN,
     "error": Q35_LOG_ERROR,
 }
 NATIVE_TO_PYTHON_LEVEL = {
+    Q35_LOG_DEBUG: logging.DEBUG,
     Q35_LOG_INFO: logging.INFO,
     Q35_LOG_WARN: logging.WARNING,
     Q35_LOG_ERROR: logging.ERROR,
@@ -168,9 +170,9 @@ class APIError(Exception):
 
 @dataclass(frozen=True)
 class Config:
-    model_path: Path
+    tokenizer_path: Path
     library_path: Path
-    weights_path: Path
+    bin_path: Path
     served_model_name: str = "qwen3.5-0.8b"
     api_key: Optional[str] = None
     slot_count: int = 2
@@ -346,14 +348,16 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
         engine = None
         if tokenizer is None:
             from transformers import AutoTokenizer
-            tokenizer = await asyncio.to_thread(AutoTokenizer.from_pretrained, config.model_path)
+            tokenizer = await asyncio.to_thread(
+                AutoTokenizer.from_pretrained, config.tokenizer_path
+            )
         if manager is None:
             await asyncio.to_thread(
                 set_log_callback, config.library_path, native_log, config.native_log_level
             )
             try:
                 engine = await asyncio.to_thread(
-                    Engine, config.library_path, config.weights_path
+                    Engine, config.library_path, config.bin_path
                 )
                 manager = await asyncio.to_thread(
                     engine.create_session_manager, config.slot_count, config.max_context_tokens
@@ -609,9 +613,10 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", type=Path, default=HERE.parent / "models/Qwen3.5-0.8B")
+    parser.add_argument("--tokenizer", type=Path,
+                        default=HERE.parent / "models/Qwen3.5-0.8B")
     parser.add_argument("--library", type=Path, default=HERE / "build/libqwen35.so")
-    parser.add_argument("--weights", type=Path, default=HERE / "build/qwen35-0.8b.bin")
+    parser.add_argument("--bin", type=Path, default=HERE / "build/qwen35-0.8b.bin")
     parser.add_argument("--served-model-name", default="qwen3.5-0.8b")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -619,7 +624,7 @@ def parse_args():
     parser.add_argument("--max-context-tokens", type=int, default=4096)
     parser.add_argument("--default-max-tokens", type=int, default=128)
     parser.add_argument("--request-timeout", type=float, default=600.0)
-    parser.add_argument("--log-level", choices=PYTHON_LOG_LEVELS, default="info")
+    parser.add_argument("--log-level", choices=PYTHON_LOG_LEVELS, default="debug")
     parser.add_argument("--log-file", type=Path, default=HERE / "logs/qwen35.log")
     parser.add_argument("--log-max-mb", type=int, default=20)
     parser.add_argument("--log-backups", type=int, default=5)
@@ -636,9 +641,9 @@ def main():
     # Authentication is opt-in: setting QWEN_API_KEY enables Bearer auth.
     api_key = os.environ.get("QWEN_API_KEY")
     config = Config(
-        model_path=args.model,
+        tokenizer_path=args.tokenizer,
         library_path=args.library,
-        weights_path=args.weights,
+        bin_path=args.bin,
         served_model_name=args.served_model_name,
         api_key=api_key,
         slot_count=args.slots,

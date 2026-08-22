@@ -13,15 +13,15 @@ from server import Config, create_app
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--tokenizer", type=Path, required=True)
     parser.add_argument("--library", type=Path, required=True)
-    parser.add_argument("--weights", type=Path, required=True)
+    parser.add_argument("--bin", type=Path, required=True)
     args = parser.parse_args()
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
-    with Engine(args.library, args.weights) as engine:
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    with Engine(args.library, args.bin) as engine:
         manager = engine.create_session_manager(session_count=1, context_size=4096)
-        config = Config(args.model, args.library, args.weights, api_key="test", slot_count=1)
+        config = Config(args.tokenizer, args.library, args.bin, api_key="test", slot_count=1)
         with TestClient(create_app(config, tokenizer=tokenizer, manager=manager)) as client:
             response = client.post(
                 "/v1/chat/completions",

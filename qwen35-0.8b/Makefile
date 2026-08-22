@@ -2,11 +2,12 @@ CXX ?= c++
 UV ?= uv
 PYTHON ?= $(UV) run --locked python
 PYTHON_PROD ?= $(UV) run --locked --no-dev python
-MODEL ?= ../models/Qwen3.5-0.8B
+TOKENIZER ?= ../models/Qwen3.5-0.8B
 BUILD ?= build
 LIBRARY ?= $(BUILD)/libqwen35.so
-WEIGHTS ?= $(BUILD)/qwen35-0.8b.bin
+BIN ?= $(BUILD)/qwen35-0.8b.bin
 SERVER ?= http://127.0.0.1:8000
+LOG_LEVEL ?= debug
 
 CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic
 
@@ -24,25 +25,25 @@ $(LIBRARY): engine.cpp runtime.cpp log.cpp qwen35.h internal.h
 	mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -fPIC -shared engine.cpp runtime.cpp log.cpp -o $@
 
-weights: $(WEIGHTS)
+weights: $(BIN)
 
-$(WEIGHTS): pack_weights.py
+$(BIN): pack_weights.py
 	mkdir -p $(BUILD)
-	$(PYTHON_PROD) pack_weights.py "$(MODEL)" "$@"
+	$(PYTHON_PROD) pack_weights.py "$(TOKENIZER)" "$@"
 
 unit-test:
 	$(PYTHON) -m unittest discover -v -s tests -p 'test_server.py'
 
-native-test: $(LIBRARY) $(WEIGHTS)
-	PYTHONPATH=. $(PYTHON) tests/test_native.py --library "$(LIBRARY)" --weights "$(WEIGHTS)"
+native-test: $(LIBRARY) $(BIN)
+	PYTHONPATH=. $(PYTHON) tests/test_native.py --library "$(LIBRARY)" --bin "$(BIN)"
 
 test: unit-test native-test
 
-e2e: $(LIBRARY) $(WEIGHTS)
-	PYTHONPATH=. $(PYTHON) tests/test_e2e.py --model "$(MODEL)" --library "$(LIBRARY)" --weights "$(WEIGHTS)"
+e2e: $(LIBRARY) $(BIN)
+	PYTHONPATH=. $(PYTHON) tests/test_e2e.py --tokenizer "$(TOKENIZER)" --library "$(LIBRARY)" --bin "$(BIN)"
 
-run: $(LIBRARY) $(WEIGHTS)
-	$(PYTHON_PROD) server.py --model "$(MODEL)" --library "$(LIBRARY)" --weights "$(WEIGHTS)"
+run: $(LIBRARY) $(BIN)
+	$(PYTHON_PROD) server.py --tokenizer "$(TOKENIZER)" --library "$(LIBRARY)" --bin "$(BIN)" --log-level "$(LOG_LEVEL)"
 
 chat:
 	curl --silent --show-error --no-buffer "$(SERVER)/v1/chat/completions" \

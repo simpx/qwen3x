@@ -28,7 +28,7 @@ void q35_log_set_callback(q35_log_callback callback,
                           q35_log_level level) {
     log_callback = callback;
     log_user_data = user_data;
-    log_level = level >= Q35_LOG_INFO && level <= Q35_LOG_ERROR
+    log_level = level >= Q35_LOG_DEBUG && level <= Q35_LOG_ERROR
         ? level : Q35_LOG_INFO;
 }
 

@@ -23,9 +23,10 @@ enum {
 /* Engine: one loaded, read-only Qwen3.5-0.8B model. */
 
 typedef enum {
-    Q35_LOG_INFO = 0,
-    Q35_LOG_WARN = 1,
-    Q35_LOG_ERROR = 2,
+    Q35_LOG_DEBUG = 0,
+    Q35_LOG_INFO = 1,
+    Q35_LOG_WARN = 2,
+    Q35_LOG_ERROR = 3,
 } q35_log_level;
 
 /*
@@ -49,7 +50,7 @@ void q35_log_set_callback(q35_log_callback callback,
                           q35_log_level level);
 
 typedef struct {
-    const char* weights_path;
+    const char* bin_path;
 } q35_engine_options;
 
 int q35_engine_create(const q35_engine_options* options, q35_engine** out,

@@ -724,13 +724,13 @@ int q35_engine_create(const q35_engine_options* options, q35_engine** out,
                                   char* err, size_t errlen) {
     return guard(err, errlen, [&] {
         require(options, "engine options are null");
-        require(options->weights_path && options->weights_path[0], "weights_path is empty");
+        require(options->bin_path && options->bin_path[0], "bin_path is empty");
         require(out, "engine output pointer is null");
         *out = nullptr;
         auto engine = std::make_unique<q35_engine>();
-        LOG_INFO("model load started weights=%s", options->weights_path);
+        LOG_INFO("model load started bin=%s", options->bin_path);
         const auto started = std::chrono::steady_clock::now();
-        engine->model = std::make_unique<qwen35::LoadedModel>(options->weights_path);
+        engine->model = std::make_unique<qwen35::LoadedModel>(options->bin_path);
         const double elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
         LOG_INFO("model load completed elapsed=%.3fs", elapsed);
@@ -752,6 +752,7 @@ int q35_session_create(q35_engine* engine, int context_size, q35_session** out,
         require(context_size > 0 && context_size <= qwen35::MAX_CONTEXT,
                 "context_size is outside 1..262144");
         *out = new q35_session(engine, context_size);
+        LOG_DEBUG("session created context_size=%d", context_size);
     });
 }
 
@@ -763,7 +764,9 @@ int q35_session_reset(q35_session* session,
                                   char* err, size_t errlen) {
     return guard(err, errlen, [&] {
         require(session, "session is null");
+        const int old_position = session->state.position;
         session->reset();
+        LOG_DEBUG("session reset old_position=%d", old_position);
     });
 }
 
@@ -808,7 +811,12 @@ int q35_session_eval(q35_session* session, int token,
         require(session, "session is null");
         require(token >= 0 && token < qwen35::V, "token is outside vocabulary");
         require(session->state.position < session->state.capacity, "session context is full");
+        const auto started = std::chrono::steady_clock::now();
         session->append(token);
+        const double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count();
+        LOG_DEBUG("session evaluated token=%d position=%d elapsed=%.3fs",
+                  token, session->state.position, elapsed);
     });
 }
 

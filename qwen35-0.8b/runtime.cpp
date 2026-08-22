@@ -255,6 +255,7 @@ int q35_session_manager_forget(q35_session_manager* manager,
         }
         write_error(err, errlen, "session not found");
         lock.unlock();
+        LOG_DEBUG("session forget missed");
         return Q35_NOT_FOUND;
     } catch (const std::exception& exception) {
         write_error(err, errlen, exception.what());

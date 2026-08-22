@@ -5,13 +5,13 @@ import argparse
 import json
 from pathlib import Path
 
-from qwen35 import Engine, EngineError, Q35_LOG_INFO, SessionBusy, set_log_callback
+from qwen35 import Engine, EngineError, Q35_LOG_DEBUG, SessionBusy, set_log_callback
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--library", type=Path, required=True)
-    parser.add_argument("--weights", type=Path, required=True)
+    parser.add_argument("--bin", type=Path, required=True)
     parser.add_argument("--reference", type=Path,
                         default=Path(__file__).with_name("reference.json"))
     args = parser.parse_args()
@@ -23,9 +23,9 @@ def main():
         args.library,
         lambda level, file, line, message:
             events.append((level, file, line, message)),
-        Q35_LOG_INFO,
+        Q35_LOG_DEBUG,
     )
-    with Engine(args.library, args.weights) as engine:
+    with Engine(args.library, args.bin) as engine:
         first = engine.create_session(64)
         second = engine.create_session(64)
 
@@ -106,6 +106,7 @@ def main():
     assert any("session acquired" in message for message in messages)
     assert any("session released" in message for message in messages)
     assert any("engine closing" in message for message in messages)
+    assert any("session created" in message for message in messages)
     assert any(file == "engine.cpp" and line > 0 for _, file, line, _ in events)
     assert any(file == "runtime.cpp" and line > 0 for _, file, line, _ in events)
 

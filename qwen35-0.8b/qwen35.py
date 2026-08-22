@@ -23,9 +23,10 @@ Q35_OK = 0
 Q35_BUSY = -2
 Q35_NOT_FOUND = -3
 
-Q35_LOG_INFO = 0
-Q35_LOG_WARN = 1
-Q35_LOG_ERROR = 2
+Q35_LOG_DEBUG = 0
+Q35_LOG_INFO = 1
+Q35_LOG_WARN = 2
+Q35_LOG_ERROR = 3
 
 LogCallback = Callable[[int, str, int, str], None]
 _NativeLogCallback = ctypes.CFUNCTYPE(
@@ -40,7 +41,7 @@ _NativeLogCallback = ctypes.CFUNCTYPE(
 
 class _EngineOptions(ctypes.Structure):
     _fields_ = [
-        ("weights_path", ctypes.c_char_p),
+        ("bin_path", ctypes.c_char_p),
     ]
 
 
@@ -167,13 +168,13 @@ def _check(result: int, error) -> None:
 class Engine:
     """One loaded model. Sessions borrow its mmap'd read-only weights."""
 
-    def __init__(self, library_path: Path | str, weights_path: Path | str):
+    def __init__(self, library_path: Path | str, bin_path: Path | str):
         library_path = Path(library_path).resolve()
-        weights_path = Path(weights_path).resolve()
+        bin_path = Path(bin_path).resolve()
         if not library_path.is_file():
             raise EngineError(f"engine library not found: {library_path}")
-        if not weights_path.is_file():
-            raise EngineError(f"packed weights not found: {weights_path}")
+        if not bin_path.is_file():
+            raise EngineError(f"packed weight bin not found: {bin_path}")
 
         self._library = ctypes.CDLL(str(library_path))
         _configure(self._library)
@@ -183,7 +184,7 @@ class Engine:
         self._lock = threading.Lock()
 
         options = _EngineOptions(
-            weights_path=str(weights_path).encode(),
+            bin_path=str(bin_path).encode(),
         )
         _call(
             self._library.q35_engine_create,
