@@ -83,6 +83,8 @@ int q35_session_manager_create(q35_engine* engine, int session_count,
                                             int context_size, q35_session_manager** out,
                                             char* err, size_t errlen) {
     try {
+        LOG_DEBUG("session manager create started sessions=%d context_size=%d",
+                  session_count, context_size);
         require(engine, "engine is null");
         require(out, "session manager output pointer is null");
         *out = nullptr;
@@ -90,11 +92,13 @@ int q35_session_manager_create(q35_engine* engine, int session_count,
 
         auto manager = std::make_unique<q35_session_manager>();
         manager->entries.resize(static_cast<size_t>(session_count));
-        for (SessionEntry& entry : manager->entries) {
+        for (size_t slot = 0; slot < manager->entries.size(); ++slot) {
+            SessionEntry& entry = manager->entries[slot];
             const int result = q35_session_create(
                 engine, context_size, &entry.session, err, errlen
             );
             if (result != Q35_OK) return result;
+            LOG_DEBUG("session manager slot created slot=%zu", slot);
         }
         LOG_INFO("session manager created sessions=%d context_size=%d",
                  session_count, context_size);
@@ -129,6 +133,8 @@ int q35_session_manager_acquire(q35_session_manager* manager,
         require(tokens, "tokens pointer is null");
         require(count > 0, "token sequence is empty");
         if (session_id) require(session_id[0] != '\0', "session_id is empty");
+        LOG_DEBUG("session acquire started named=%s tokens=%d",
+                  session_id ? "true" : "false", count);
 
         std::unique_lock<std::mutex> lock(manager->mutex);
         SessionEntry* selected = nullptr;
@@ -217,6 +223,7 @@ int q35_session_manager_acquire(q35_session_manager* manager,
 void q35_session_manager_release(q35_session_manager* manager,
                                               q35_session* session, bool keep) {
     if (!manager || !session) return;
+    LOG_DEBUG("session release started keep=%s", keep ? "true" : "false");
     std::unique_lock<std::mutex> lock(manager->mutex);
     SessionEntry* entry = find_entry(*manager, session);
     if (!entry || entry->state != EntryState::BUSY) return;
@@ -237,6 +244,7 @@ int q35_session_manager_forget(q35_session_manager* manager,
     try {
         require(manager, "session manager is null");
         require(session_id && session_id[0], "session_id is empty");
+        LOG_DEBUG("session forget started");
         std::unique_lock<std::mutex> lock(manager->mutex);
         for (SessionEntry& entry : manager->entries) {
             if (entry.session_id != session_id) continue;

@@ -431,6 +431,7 @@ void ffn(const Layer& layer, const FP32* input, Work& work, FP32* out) {
 // prompt 的 prefill 只是对 prompt ids 连续调用它，decode 则在每次 argmax 后再调用。
 void forward(const Model& model, State& state, int token, Work& work) {
     if (state.position >= state.capacity) die("session context is full");
+    LOG_DEBUG("forward started token=%d position=%d", token, state.position);
     embed(model.embedding, token, work.hidden.data());  // token id -> hidden[H]。
     for (int index = 0; index < N; ++index) {
         const Layer& layer = model.layer[index];
@@ -451,11 +452,14 @@ void forward(const Model& model, State& state, int token, Work& work) {
         residual_add(work.hidden.data(), work.branch.data(), work.hidden.data());
     }
     rms(work.hidden.data(), model.final_norm, H, work.normalized.data());
+    LOG_DEBUG("final norm completed");
     // lm_head：为词表的每一个候选 token 各算一个 logit。这里 W 直接重用 model.embedding：
     // logits[v] = dot(final_hidden, embedding[v])。这叫 tied embedding，避免再存一份 [V,H]
     // 输出矩阵；它与开头 embed() 的“按 token id 取同一张表的一行”正好相对。
     mv({model.embedding, V, H}, work.normalized.data(), work.logits.data());
+    LOG_DEBUG("lm head completed logits=%d", V);
     ++state.position;
+    LOG_DEBUG("forward completed token=%d position=%d", token, state.position);
 }
 
 // 到这里模型数学已经结束。以下 File/Reader 只把 packed 文件绑定成上面的 Model 指针。
@@ -734,6 +738,8 @@ int q35_engine_create(const q35_engine_options* options, q35_engine** out,
         const double elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
         LOG_INFO("model load completed elapsed=%.3fs", elapsed);
+        LOG_DEBUG("model ready layers=%d hidden=%d vocab=%d", qwen35::N, qwen35::H,
+                  qwen35::V);
         *out = engine.release();
     });
 }
@@ -757,6 +763,7 @@ int q35_session_create(q35_engine* engine, int context_size, q35_session** out,
 }
 
 void q35_session_destroy(q35_session* session) {
+    if (session) LOG_DEBUG("session closing position=%d", session->state.position);
     delete session;
 }
 
@@ -789,6 +796,8 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
         }
         const bool rebuild = common != live;
         const int append_from = rebuild ? 0 : common;
+        LOG_DEBUG("session prefix compared live=%d request=%d common=%d",
+                  live, count, common);
         LOG_INFO("session sync started mode=%s live=%d request=%d common=%d append=%d",
                  rebuild ? "rebuild" : "append", live, count, common,
                  count - append_from);
@@ -826,18 +835,25 @@ int q35_session_position(const q35_session* session) {
 
 int q35_session_argmax(const q35_session* session) {
     if (!session || !session->logits_valid) return -1;
-    return qwen35::argmax(session->work.logits);
+    const int token = qwen35::argmax(session->work.logits);
+    LOG_DEBUG("argmax selected token=%d position=%d", token, session->state.position);
+    return token;
 }
 
 int q35_session_sample(q35_session* session, float temperature, int top_k,
                                    float top_p, uint64_t* rng) {
     if (!session || !session->logits_valid || !rng) return -1;
-    return qwen35::sample(session->work.logits, temperature, top_k, top_p,
-                          *rng, session->sample_order);
+    const int token = qwen35::sample(session->work.logits, temperature, top_k, top_p,
+                                     *rng, session->sample_order);
+    LOG_DEBUG("sample selected token=%d position=%d temperature=%.3f top_k=%d top_p=%.3f",
+              token, session->state.position, temperature, top_k, top_p);
+    return token;
 }
 
 bool q35_token_is_stop(int token) {
-    return token == qwen35::END_OF_TEXT_TOKEN || token == qwen35::IM_END_TOKEN;
+    const bool stop = token == qwen35::END_OF_TEXT_TOKEN || token == qwen35::IM_END_TOKEN;
+    if (stop) LOG_DEBUG("stop token detected token=%d", token);
+    return stop;
 }
 
 int q35_vocab_size(void) {
@@ -852,5 +868,7 @@ int q35_session_copy_logits(const q35_session* session, float* output, int capac
         require(output, "logits output pointer is null");
         require(capacity >= qwen35::V, "logits output is smaller than vocabulary");
         std::memcpy(output, session->work.logits.data(), sizeof(float) * qwen35::V);
+        LOG_DEBUG("logits copied count=%d position=%d", qwen35::V,
+                  session->state.position);
     });
 }
