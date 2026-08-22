@@ -68,6 +68,7 @@ make test
 | [03-cuda-0.8b/](03-cuda-0.8b/README.md) | 直接 CUDA kernels + cuBLAS，state 留在 GPU | `make -C 03-cuda-0.8b test` |
 | [04-runtime/](04-runtime/README.md) | Python OpenAI-compatible server + 常驻 CPU/CUDA engine | `make -C 04-runtime test` / `e2e` |
 | [05-qwen38-27b/](05-qwen38-27b/README.md) | 官方 27B config/tensor schema/显存 preflight（不下载权重） | `make -C 05-qwen38-27b test` |
+| [qwen35-0.8b/](qwen35-0.8b/README.md) | 正式的同进程 Engine/Session C ABI + Python Session Slots/OpenAI runtime | `make -C qwen35-0.8b test` / `e2e` |
 
 每一层都用前一层无法伪造的证据验证：HF full logits → C++ CPU full logits → CUDA full logits →
 真实 prompt 的 tokenizer ids 与 greedy text。CPU 目录本身已经包含 tokenizer 薄壳和文字 e2e；
@@ -100,16 +101,17 @@ make model-test MODEL=../models/Qwen3.5-0.8B
 next-token 必须为 198，logit 误差必须低于 1e-3，并比较八个 greedy decode
 token。
 
-## 明确不做
+## 教学与 production runtime 的边界
 
 - 通用 Hugging Face 模型、GGUF 或量化格式
 - Metal、通用 Tensor/Operator/Backend 抽象框架
 - vision、MTP、多模态、训练或 LoRA
-- continuous batching、服务、并行与分布式
+- 教学 stage 内的 continuous batching、并行与分布式
 
-这些不是缺失功能，而是为了让 CPU core 可读而做的范围控制。同级
-[qwen35-0.8b](qwen35-0.8b/README.md) 是单独的 CUDA 性能实验：它复用第 09 课已经验证的
-固定模型与权重格式，但可以使用 cuBLAS 和持久 GPU worker；它不属于课程代码行数限制。
+这些范围控制仍适用于 `00-lessons` 和编号 correctness stage。完成课程以后，
+[qwen35-0.8b](qwen35-0.8b/README.md) 才是可演进的正式 runtime：C++ 定义共享 Engine 和
+可变 Session，Python 预创建 Session Slots 并负责 HTTP、tokenizer、streaming 和调度。
+它直接复用已验证的固定模型数学，但不再受课程代码行数限制。
 
 旧 prototype 已保留在远端 git tag prototype-v0；它不在当前教学仓库的
 工作树中。

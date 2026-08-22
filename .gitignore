@@ -9,9 +9,7 @@
 /00-lessons/07_deltanet_layer
 /00-lessons/08_hybrid_qwen
 /00-lessons/09_qwen35_0_8b
-/qwen35-0.8b/qwen35
-/qwen35-0.8b/qwen35_cuda
-/qwen35-0.8b/out/
+/qwen35-0.8b/build/
 /01-hf-reference/build/
 /02-cpu-0.8b/build/
 /02-cpu-0.8b/qwen35

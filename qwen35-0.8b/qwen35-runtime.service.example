@@ -1,0 +1,16 @@
+[Unit]
+Description=Qwen3.5 session runtime
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/qwen3x/qwen35-0.8b
+EnvironmentFile=/etc/qwen35-runtime.env
+ExecStart=/opt/qwen3x/.venv/bin/python -m qwen_runtime.server --host 127.0.0.1 --port 8000 --slots 2
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

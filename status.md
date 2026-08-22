@@ -66,6 +66,7 @@ single GPU。顺序始终是：
 | CUDA regression | 每一步都与独立生成的官方 CUDA FP32 oracle 对比完整 logits，使用相同 `5e-4` 阈值；另检查 greedy ids 与 state API。 |
 | `04-runtime/` | Python OpenAI-compatible runtime；Bearer 鉴权、chat template、SSE、usage、stop、单并发保护；通过统一 `--worker` 协议让 CPU/CUDA engine 常驻。 |
 | `05-qwen38-27b/` | 不下载 weight shard 的情况下，已检查官方 Qwen3.8-27B config 和 safetensors index；错误 config/schema/byte-count fixture 均会被拒绝。 |
+| `qwen35-0.8b/` | 正式 runtime 基础：同进程 C ABI `Engine/Session`；Session 拥有 State、Work、token timeline 和 logits；Python `SlotPool` 预创建 Session，提供 IDLE/BUSY、LRU、OpenAI Chat Completions 与 SSE。 |
 
 当前 0.8B vector suite 有三组：3-token prompt + 2 decode token、4-token prompt +
 2 decode token、18-token official chat prompt + 2 decode token；每组再跑 8-token
@@ -93,10 +94,10 @@ state 约 0.141 GiB，DeltaNet conv history 约 0.005 GiB，full-attention KV ca
 - Stage 3 CUDA 路径为了得到清楚的 0.8B correctness contract，会将每个 linear BF16
   matrix 展开成 FP32。若用于 27B，仅 weights 就约为 103.5 GiB，尚未加 runtime state；
   因而绝不能直接复用。
-- 0.8B CPU/CUDA snapshot 有意将 context 上限设为 4096；checkpoint 本身宣称 262,144
-  positions。
-- C++ 还没有 native tokenizer；Python runtime 已有单用户 HTTP/SSE，但仍没有 greedy 以外的
-  sampling、prefix cache、batching、quantization、vision 或 MTP。
+- 0.8B correctness snapshot 有意将 context 上限设为 4096；正式 C++ Session 接受最高
+  262,144，但 Runtime 默认仍为 4096，并按实际 Session context 预分配 cache/work。
+- C++ 还没有 native tokenizer；正式 Python runtime 已有固定数量的 Session Slots 和 HTTP/SSE，
+  但仍没有 greedy 以外的 sampling、跨 Session prefix cache、batching、quantization、vision 或 MTP。
 - text-only wrapper 仅有一个 user message 的 regression；system/history 以及明确拒绝
   image/video placeholder token 仍需测试。
 
@@ -121,10 +122,12 @@ state 约 0.141 GiB，DeltaNet conv history 约 0.005 GiB，full-attention KV ca
 - CUDA stage 的 `make weights` 只依赖 packer script，不依赖 source checkpoint file；替换
   `MODEL` 而不删除已有 bin 时，仍可能复用 stale packed weights。CPU stage 已改为每次显式重打包。
 - CUDA self-test 暴露为 `make cuda-test`；当前 `make test` 并不会执行它。
-- lesson、CPU、CUDA snapshot 有意分开，换取可读性；但未来 27B snapshot 必须明确唯一的
-  source of truth，不能出现第四份悄悄漂移的实现。
+- lesson、CPU、CUDA correctness snapshot 有意分开，换取可读性；`qwen35-0.8b/engine.cpp` 是
+  production CPU runtime 的明确入口，必须继续用相同 reference vector 防止它与 Stage 2 漂移。
 
 ## 精确的下一步
 
-不要优化，也不要加 framework。先到能够容纳 27B 的目标机器，构建官方 27B
-reference/probe bundle；只有它存在之后，项目才写固定 27B packer 与 BF16 CUDA decode path。
+先按 `qwen35-0.8b/engine.h -> engine.cpp -> qwen_runtime/binding.py -> slots.py -> server.py`
+阅读和 review 新的 Session runtime，固定 ABI 和生命周期。确认这套概念后，再让
+`03-cuda-0.8b` 实现同一 C ABI；不要让 CUDA、sampling、snapshot 或 prefix cache 同时改变
+Session 基础契约。更远的 27B 工作仍需先在目标机器构建官方 reference/probe bundle。

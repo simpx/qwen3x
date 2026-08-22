@@ -56,15 +56,17 @@ correct → simple → readable → usable → fast
 06-prefix-cache/         Stage 6：longest-prefix state snapshot / restore
 07-service-hardening/    Stage 7：native tokenizer、监控、限流和部署加固
 08-performance-lab/      Stage 8：benchmark、Nsight、GDN / attention / GEMV 实验
+
+qwen35-0.8b/             课程之后的正式 runtime：C ABI Engine/Session + Python SlotPool/server
 ~~~
 
 每个 stage 是一个**可独立阅读、可独立编译测试的快照**。少量复制是有意的；不要用
 `common/`、Tensor 类或 backend interface 把读者带出当前目录。后阶段可以读取前阶段生成的
 测试向量、权重格式和已验证公式，但不会在源码层 `#include` 前一阶段。
 
-目前的 `qwen35-0.8b/` 是已有 CUDA 性能实验，保留不动作为证据和对照。等 Stage 2 的 CPU
-`prefill/decode/state` 语义固定、Stage 3 的测试从零跑绿后，再将其有价值的实现迁入 `03-cuda-0.8b/`；不要在
-今晚为了目录漂亮而移动正在工作的 CUDA 代码。
+旧 `qwen35-0.8b/` CUDA prototype 已在历史提交中保留；其 correctness 内容已经进入
+`03-cuda-0.8b/`。当前同名目录从零重建为正式 runtime，依赖的是窄 C ABI，而不是旧的 CLI/worker
+协议或课程源码 include。
 
 未来每个 stage 内的实现文件可以很直接，例如 `model.cpp`、`weights.cpp`、`sampler.cpp`、
 `cpu.cpp`、`cuda.cu`、`cuda_gdn.cu`、`cuda_attention.cu`、`prefix_cache.cpp`、`server.cpp`。
@@ -184,7 +186,7 @@ step 与 max-abs error；CPU 就是以后所有 CUDA kernel 的数学 oracle，�
 
 ### Stage 3 — `03-cuda-0.8b/`：CUDA first-correct
 
-以现有 `qwen35-0.8b/` 的 cuBLAS、GPU-resident weights/state、GPU argmax 和 regression 作为
+以历史 CUDA prototype 的 cuBLAS、GPU-resident weights/state、GPU argmax 和 regression 作为
 材料迁入；不从头发明更快的实现。
 
 ~~~text
@@ -303,6 +305,11 @@ E 或 F 重新计算 ABCD。到这里，已经是一个真正的 batch=1 LLM inf
 **验收：** mock contract 覆盖鉴权、非流式 JSON、SSE、usage、stop 和不支持参数；真实 e2e
 分别调用 CPU/CUDA 常驻 worker。一次只允许一个生成请求，忙时返回 429，请求结束总会 reset
 模型 state。当前只做 greedy text-only，不伪装支持 sampling、tools 或 vision。
+
+这版 `--worker` runtime 已作为可回退的 Stage 4 快照保留。课程完成后的正式实现位于
+`qwen35-0.8b/`：Python 和 C++ 改为同进程 C ABI；C++ `Session = State + Work + tokens + logits`，
+Python `SlotPool` 预创建固定数量的 Session，并用 `session_id` 管理 IDLE/BUSY/LRU。Runtime 将完整
+token 序列交给 `session_sync()`；旧序列是完整前缀时只追加 suffix，否则按 GDN 约束 rebuild。
 
 ## 10. Stage 5 — Qwen3.8-27B
 

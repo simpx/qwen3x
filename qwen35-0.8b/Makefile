@@ -1,48 +1,40 @@
-# 这里不是教学课；真实模型的 CPU reference 在 ../00-lessons/09_qwen35_0_8b.cpp。
-# 这里的唯一 binary 是高性能 CUDA 路径。保持命令直接，避免引入 CMake 或 framework。
+CXX ?= c++
+PYTHON ?= python3
+MODEL ?= ../models/Qwen3.5-0.8B
+BUILD ?= build
+LIBRARY ?= $(BUILD)/libqwen35.so
+WEIGHTS ?= $(BUILD)/qwen35-0.8b.bin
 
-CUDA_ARCH ?= 89
-CPU_REFERENCE = ../00-lessons/09_qwen35_0_8b
-# WSL 可同时有陈旧的 distro libcuda；在启动进程前优先放 Windows driver 的目录。普通
-# Linux 上该目录不存在，后面的原 LD_LIBRARY_PATH / 默认搜索路径仍照常工作。
-CUDA_RUN ?= LD_LIBRARY_PATH=/usr/lib/wsl/lib:$$LD_LIBRARY_PATH
+CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic
 
-.PHONY: all cuda-test cuda-oracle official-oracle mmlu-eval mmlu-pro-eval mmlu-pro-fast-coverage clean
+.PHONY: all weights unit-test native-test test e2e run clean
 
-all: qwen35_cuda
+all: $(LIBRARY)
 
-qwen35_cuda: qwen35_cuda.cu ../00-lessons/09_qwen35_0_8b.cpp
-	nvcc -O3 -std=c++17 -arch=sm_$(CUDA_ARCH) qwen35_cuda.cu -lcublas -o qwen35_cuda
+$(LIBRARY): engine.cpp engine.h
+	mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -fPIC -shared engine.cpp -o $@
 
-$(CPU_REFERENCE): ../00-lessons/09_qwen35_0_8b.cpp
-	$(MAKE) -C ../00-lessons 09_qwen35_0_8b
+weights: $(WEIGHTS)
 
-cuda-test: qwen35_cuda
-	$(CUDA_RUN) ./qwen35_cuda --self-test
+$(WEIGHTS): pack_weights.py
+	mkdir -p $(BUILD)
+	$(PYTHON) pack_weights.py "$(MODEL)" "$@"
 
-# 对照同一权重格式的 CPU 第 09 课；它是 GPU kernel 改动后的最短回归。
-cuda-oracle: qwen35_cuda $(CPU_REFERENCE)
-	@test -n "$(MODEL)" || (echo "usage: make cuda-oracle MODEL=/path/to/Qwen3.5-0.8B" >&2; exit 2)
-	$(CUDA_RUN) ./test_cuda.sh "$(MODEL)"
+unit-test:
+	$(PYTHON) -m unittest discover -v -s tests -p 'test_slots.py'
+	$(PYTHON) -m unittest discover -v -s tests -p 'test_server.py'
 
-# 真正调用官方 Transformers FP32 model，比较完整词表 logits 和 greedy token ids。
-official-oracle: qwen35_cuda $(CPU_REFERENCE)
-	@test -n "$(MODEL)" || (echo "usage: make official-oracle MODEL=/path/to/Qwen3.5-0.8B [WEIGHTS=/path/to/qwen35-0.8b.bin]" >&2; exit 2)
-	$(CUDA_RUN) python3 test_official.py "$(MODEL)" $(if $(WEIGHTS),--weights "$(WEIGHTS)") --cpu-engine "$(CPU_REFERENCE)" --cuda-engine ./qwen35_cuda
+native-test: $(LIBRARY) $(WEIGHTS)
+	PYTHONPATH=. $(PYTHON) tests/test_native.py --library "$(LIBRARY)" --weights "$(WEIGHTS)"
 
-mmlu-eval: qwen35_cuda
-	@test -n "$(MODEL)" -a -n "$(WEIGHTS)" || (echo "usage: make mmlu-eval MODEL=/path/to/Qwen3.5-0.8B WEIGHTS=/path/to/qwen35-0.8b.bin [SUBJECT=abstract_algebra] [LIMIT=20]" >&2; exit 2)
-	$(CUDA_RUN) python3 eval_mmlu.py "$(MODEL)" "$(WEIGHTS)" --subject "$(or $(SUBJECT),abstract_algebra)" $(if $(LIMIT),--limit "$(LIMIT)")
+test: unit-test native-test
 
-mmlu-pro-eval: qwen35_cuda
-	@test -n "$(MODEL)" -a -n "$(WEIGHTS)" || (echo "usage: make mmlu-pro-eval MODEL=/path/to/Qwen3.5-0.8B WEIGHTS=/path/to/qwen35-0.8b.bin [LIMIT=20]" >&2; exit 2)
-	$(CUDA_RUN) python3 eval_mmlu_pro.py "$(MODEL)" "$(WEIGHTS)" $(if $(LIMIT),--limit "$(LIMIT)")
+e2e: $(LIBRARY) $(WEIGHTS)
+	PYTHONPATH=. $(PYTHON) tests/test_e2e.py --model "$(MODEL)" --library "$(LIBRARY)" --weights "$(WEIGHTS)"
 
-# 一小时的端到端 coverage run：3,610 / 12,032 = 30.003%。它刻意选每个 category 中较短的
-# prompt，以让 batch=1 的教学模型能在这台 16 GiB 卡上完成；score 不是官方 MMLU-Pro 分数。
-mmlu-pro-fast-coverage: qwen35_cuda
-	@test -n "$(MODEL)" -a -n "$(WEIGHTS)" || (echo "usage: make mmlu-pro-fast-coverage MODEL=/path/to/Qwen3.5-0.8B WEIGHTS=/path/to/qwen35-0.8b.bin [LIMIT=3610] [WORKERS=5] [SECONDS=3600]" >&2; exit 2)
-	$(CUDA_RUN) python3 -u eval_mmlu_pro.py "$(MODEL)" "$(WEIGHTS)" --fast-answer-only --shortest-per-category --limit "$(or $(LIMIT),3610)" --workers "$(or $(WORKERS),5)" --time-limit-seconds "$(or $(SECONDS),3600)"
+run: $(LIBRARY) $(WEIGHTS)
+	$(PYTHON) -m qwen_runtime.server --model "$(MODEL)" --library "$(LIBRARY)" --weights "$(WEIGHTS)"
 
 clean:
-	rm -f qwen35_cuda
+	rm -rf $(BUILD)
