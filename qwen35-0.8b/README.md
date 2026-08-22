@@ -6,7 +6,7 @@
 ```text
 OpenAI client
   -> Python HTTP / tokenizer / streaming
-  -> SlotPool
+  -> C++ SessionManager
   -> C++ Session
   -> C++ Engine + mmap weights
 ```
@@ -21,25 +21,24 @@ Session
   = 一条可变 token 时间线
   = State + Work + tokens + logits
 
-Slot
-  = Python Runtime 对一个预创建 Session 的调度记录
-  = owner session_id + FREE/IDLE/BUSY + last_used
+SessionManager
+  = 固定数量的预创建 Session
+  = session_id + prefix lookup + FREE/IDLE/BUSY + LRU
 ```
 
-`Engine` 和 `Session` 定义在 C++。`Slot` 和 `SlotPool` 定义在 Python。Runtime 启动时创建固定
-数量的 Session，此后请求不会重新分配模型 State/Work。一个 Session 同时只允许一个 writer；
-不同 Slot 可以由调度器独立推进。
+`Engine`、`Session` 和 `SessionManager` 都定义在 C++。Python 只处理 HTTP、JSON、tokenizer 和
+流式响应。Runtime 启动时创建固定数量的 Session，此后请求不会重新分配模型 State/Work。
+一个 Session 同时只允许一个 writer；不同 Session 可以由调度器独立推进。
 
 ## 文件
 
 ```text
 qwen35.h                 Engine、Session、SessionManager 的公共 C ABI
-engine.cpp               CPU Model/State/Work/forward + Engine/Session
+qwen35.cpp               CPU Model/State/Work/forward + Engine/Session/SessionManager
+qwen35.py                上述 C ABI 的薄 ctypes 包装
+server.py                OpenAI chat completions、SSE、鉴权和 tokenizer
 pack_weights.py          官方 safetensors -> mmap-friendly 固定 tensor stream
-qwen_runtime/binding.py  ctypes Engine/Session 包装
-qwen_runtime/slots.py    预分配 SlotPool、session_id 绑定和 LRU idle 淘汰
-qwen_runtime/server.py   OpenAI chat completions、SSE、鉴权和 tokenizer
-tests/                   Slot、HTTP、真实权重 ABI 和真实 HTTP e2e
+tests/                   HTTP、真实权重 ABI/SessionManager 和真实 HTTP e2e
 ```
 
 模型计算仍然是固定 Qwen3.5-0.8B，不引入 Tensor abstraction、backend hierarchy 或 JSON parser。
@@ -54,8 +53,9 @@ make -C qwen35-0.8b test
 make -C qwen35-0.8b e2e
 ```
 
-`unit-test` 不加载真实模型；`native-test` 验证 mmap 权重、两个独立 Session、append-only sync、
-编辑/缩短后的 rebuild 和完整词表 logit；`e2e` 走真实 tokenizer、HTTP、Slot 和 C++ forward。
+`unit-test` 不加载真实模型；`native-test` 验证 mmap 权重、独立 Session、SessionManager、
+append-only sync、编辑/缩短后的 rebuild 和完整词表 logit；`e2e` 走真实 tokenizer、HTTP、
+SessionManager 和 C++ forward。
 
 ## 启动
 
@@ -68,8 +68,8 @@ export QWEN_API_KEY='换成随机长字符串'
 make -C qwen35-0.8b run
 ```
 
-默认监听 `127.0.0.1:8000`。标准 OpenAI Chat Completions 请求可以不使用 Session，此时 Slot 在请求
-结束后释放。需要持续保留模型 State 时，传扩展字段或请求头：
+默认监听 `127.0.0.1:8000`。标准 OpenAI Chat Completions 请求可以不传 Session ID；manager 会按
+完整 token prefix 尝试复用空闲 Session。需要稳定回到同一条时间线时，传扩展字段或请求头：
 
 ```json
 {
@@ -96,9 +96,10 @@ curl -X DELETE http://127.0.0.1:8000/v1/sessions/my-agent \
 ## 当前边界
 
 - CPU BF16-weight / FP32-compute，支持 greedy、temperature 和 top-p sampling，text-only。
-- 固定 Session 数量；全部 BUSY 时返回 429，IDLE Slot 按 LRU 重新绑定。
+- 固定 Session 数量；全部 BUSY 时返回 429，IDLE Session 按最长 prefix 或 LRU 重新绑定。
 - 中断只能在 token 边界发现；一次 CPU forward 尚不能抢占。
-- 没有跨 Session common-prefix sharing、snapshot/disk cache、batching、vision、tools 或 MTP。
+- 没有共享的 prefix block、snapshot/disk cache、batching、vision、tools 或 MTP；当前 prefix 命中
+  是把一个完整 Session 重新交给请求，而不是让多个 Session 同时共享一份 State。
 - `session_id` 是本项目扩展，不是 Chat Completions 标准字段。
 
 下一步可以在不改变 C ABI 基本关系的前提下加入 snapshot 和 CUDA Engine。公共前缀以后可

@@ -11,9 +11,9 @@ CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic
 
 all: $(LIBRARY)
 
-$(LIBRARY): engine.cpp qwen35.h
+$(LIBRARY): qwen35.cpp qwen35.h
 	mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -fPIC -shared engine.cpp -o $@
+	$(CXX) $(CXXFLAGS) -fPIC -shared qwen35.cpp -o $@
 
 weights: $(WEIGHTS)
 
@@ -22,7 +22,6 @@ $(WEIGHTS): pack_weights.py
 	$(PYTHON) pack_weights.py "$(MODEL)" "$@"
 
 unit-test:
-	$(PYTHON) -m unittest discover -v -s tests -p 'test_slots.py'
 	$(PYTHON) -m unittest discover -v -s tests -p 'test_server.py'
 
 native-test: $(LIBRARY) $(WEIGHTS)
@@ -34,7 +33,7 @@ e2e: $(LIBRARY) $(WEIGHTS)
 	PYTHONPATH=. $(PYTHON) tests/test_e2e.py --model "$(MODEL)" --library "$(LIBRARY)" --weights "$(WEIGHTS)"
 
 run: $(LIBRARY) $(WEIGHTS)
-	$(PYTHON) -m qwen_runtime.server --model "$(MODEL)" --library "$(LIBRARY)" --weights "$(WEIGHTS)"
+	$(PYTHON) server.py --model "$(MODEL)" --library "$(LIBRARY)" --weights "$(WEIGHTS)"
 
 clean:
 	rm -rf $(BUILD)

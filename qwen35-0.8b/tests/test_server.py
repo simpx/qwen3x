@@ -3,8 +3,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from qwen_runtime.server import Config, create_app
-from qwen_runtime.slots import SlotPool
+from qwen35 import SessionBusy
+from server import Config, create_app
 
 
 class FakeTokenizer:
@@ -59,13 +59,57 @@ class FakeEngine:
         return False
 
 
+class FakeManager:
+    def __init__(self, engine, session_count):
+        self.engine = engine
+        self.session_count = session_count
+        self.sessions = [engine.create_session(128) for _ in range(session_count)]
+        self.named = {}
+        self.active = set()
+
+    def acquire(self, session_id, _tokens):
+        if session_id in self.named:
+            session = self.named[session_id]
+            if session in self.active:
+                raise SessionBusy("session is already busy")
+        else:
+            session = next(item for item in self.sessions if item not in self.active)
+            if session_id is not None:
+                for old_id, item in list(self.named.items()):
+                    if item is session:
+                        del self.named[old_id]
+                self.named[session_id] = session
+        self.active.add(session)
+        return session
+
+    def release(self, session, *, keep):
+        self.active.remove(session)
+        if not keep:
+            for session_id, item in list(self.named.items()):
+                if item is session:
+                    del self.named[session_id]
+            session.reset()
+
+    def forget(self, session_id):
+        session = self.named.get(session_id)
+        if session is None:
+            return False
+        if session in self.active:
+            raise SessionBusy("session is busy")
+        del self.named[session_id]
+        session.reset()
+        return True
+
+
 class ServerTest(unittest.TestCase):
     def setUp(self):
         self.engine = FakeEngine()
-        self.pool = SlotPool(self.engine, 2, 128)
+        self.manager = FakeManager(self.engine, 2)
         config = Config(Path("model"), Path("library"), Path("weights"), api_key="secret",
                         max_context_tokens=128)
-        self.context = TestClient(create_app(config, tokenizer=FakeTokenizer(), pool=self.pool))
+        self.context = TestClient(
+            create_app(config, tokenizer=FakeTokenizer(), manager=self.manager)
+        )
         self.client = self.context.__enter__()
         self.headers = {"Authorization": "Bearer secret"}
 
@@ -94,13 +138,13 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(response.json()["choices"][0]["message"]["content"], "你好！")
         self.assertEqual(response.json()["session_id"], "agent-a")
         self.assertEqual(response.headers["x-qwen-session-id"], "agent-a")
-        first = next(slot for slot in self.pool.slots if slot.owner == "agent-a")
+        first = self.manager.named["agent-a"]
 
         response = self.request(session_id="agent-a", max_completion_tokens=1)
         self.assertEqual(response.status_code, 200)
-        second = next(slot for slot in self.pool.slots if slot.owner == "agent-a")
-        self.assertIs(first.session, second.session)
-        self.assertEqual(first.session.sync_count, 2)
+        second = self.manager.named["agent-a"]
+        self.assertIs(first, second)
+        self.assertEqual(first.sync_count, 2)
 
     def test_streaming_contract(self):
         response = self.request(session_id="agent-stream", stream=True,
@@ -118,11 +162,11 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["choices"][0]["message"]["content"], "你")
 
-    def test_ephemeral_request_does_not_keep_slot_owner(self):
+    def test_anonymous_request_creates_no_named_binding(self):
         response = self.request(max_completion_tokens=1)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.headers["x-qwen-session-id"].startswith("ephemeral-"))
-        self.assertFalse(any(slot.owner is not None for slot in self.pool.slots))
+        self.assertFalse(self.manager.named)
 
     def test_delete_session(self):
         self.request(session_id="agent-delete", max_completion_tokens=1)

@@ -5,7 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
-from qwen_runtime.binding import Engine, EngineError
+from qwen35 import Engine, EngineError, SessionBusy
 
 
 def main():
@@ -56,6 +56,31 @@ def main():
         except EngineError as error:
             assert "outside vocabulary" in str(error)
         assert second.position == len(case["prefill_ids"])
+
+        # SessionManager owns fixed Sessions and routes named requests back to
+        # the same live state. Acquiring the same ID concurrently is rejected.
+        manager = engine.create_session_manager(2, 64)
+        managed = manager.acquire("agent-a", case["prefill_ids"])
+        managed.sync(case["prefill_ids"])
+        manager.release(managed, keep=True)
+
+        managed = manager.acquire("agent-a", case["prefill_ids"])
+        assert managed.position == len(case["prefill_ids"])
+        try:
+            manager.acquire("agent-a", case["prefill_ids"])
+            raise AssertionError("busy named session was acquired twice")
+        except SessionBusy:
+            pass
+        manager.release(managed, keep=True)
+
+        # Anonymous lookup can reuse the longest complete token prefix. Once
+        # reused anonymously, the old name is intentionally no longer bound.
+        anonymous = manager.acquire(None, case["prefill_ids"] + case["decode_ids"])
+        assert anonymous.position == len(case["prefill_ids"])
+        anonymous.sync(case["prefill_ids"] + case["decode_ids"])
+        manager.release(anonymous, keep=True)
+        assert not manager.forget("agent-a")
+        manager.close()
 
         tiny = engine.create_session(3)
         tiny.sync(case["prefill_ids"])

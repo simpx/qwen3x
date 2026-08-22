@@ -22,11 +22,10 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from .binding import Engine, EngineError
-from .slots import SlotBusy, SlotPool
+from qwen35 import Engine, EngineError, SessionBusy
 
 
-HERE = Path(__file__).resolve().parent.parent
+HERE = Path(__file__).resolve().parent
 LOG = logging.getLogger("qwen35.runtime")
 SESSION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
@@ -212,27 +211,29 @@ async def next_token(session, temperature, top_p, rng, input_token=None):
     return await asyncio.to_thread(session.sample, temperature, top_p, rng)
 
 
-def create_app(config: Config, *, tokenizer=None, pool=None):
-    owns_runtime = pool is None
+def create_app(config: Config, *, tokenizer=None, manager=None):
+    owns_runtime = manager is None
 
     @asynccontextmanager
     async def lifespan(app):
-        nonlocal tokenizer, pool
+        nonlocal tokenizer, manager
         engine = None
         if tokenizer is None:
             from transformers import AutoTokenizer
             tokenizer = await asyncio.to_thread(AutoTokenizer.from_pretrained, config.model_path)
-        if pool is None:
+        if manager is None:
             engine = await asyncio.to_thread(Engine, config.library_path, config.weights_path)
-            pool = SlotPool(engine, config.slot_count, config.max_context_tokens)
+            manager = await asyncio.to_thread(
+                engine.create_session_manager, config.slot_count, config.max_context_tokens
+            )
         app.state.tokenizer = tokenizer
-        app.state.pool = pool
-        app.state.engine = engine
+        app.state.manager = manager
+        app.state.engine = engine if engine is not None else manager.engine
         try:
             yield
         finally:
             if owns_runtime:
-                await pool.close()
+                await asyncio.to_thread(manager.close)
                 engine.close()
 
     app = FastAPI(title="qwen35 runtime", version="0.1.0", lifespan=lifespan)
@@ -268,7 +269,7 @@ def create_app(config: Config, *, tokenizer=None, pool=None):
 
     @app.get("/readyz")
     async def ready():
-        return {"status": "ready", "slots": len(app.state.pool.slots)}
+        return {"status": "ready", "slots": app.state.manager.session_count}
 
     @app.get("/v1/models")
     async def models(request: Request):
@@ -280,8 +281,8 @@ def create_app(config: Config, *, tokenizer=None, pool=None):
     async def delete_session(session_id: str, request: Request):
         await authenticate(request)
         try:
-            removed = await app.state.pool.forget(session_id)
-        except SlotBusy as error:
+            removed = await asyncio.to_thread(app.state.manager.forget, session_id)
+        except SessionBusy as error:
             raise APIError(409, str(error), code="session_busy") from error
         if not removed:
             raise APIError(404, "session not found", code="session_not_found")
@@ -292,9 +293,11 @@ def create_app(config: Config, *, tokenizer=None, pool=None):
         await authenticate(request)
         parsed = parse_request(await read_json(request), request, config, app.state.tokenizer)
         try:
-            lease = app.state.pool.acquire(parsed["session_id"], persistent=parsed["persistent"])
-            slot = await lease.__aenter__()
-        except SlotBusy as error:
+            native_session_id = parsed["session_id"] if parsed["persistent"] else None
+            session = await asyncio.to_thread(
+                app.state.manager.acquire, native_session_id, parsed["prompt_ids"]
+            )
+        except SessionBusy as error:
             raise APIError(429, str(error), code="engine_busy",
                            error_type="rate_limit_error") from error
 
@@ -304,24 +307,21 @@ def create_app(config: Config, *, tokenizer=None, pool=None):
         headers = {"X-Qwen-Session-Id": parsed["session_id"]}
 
         async def release(error=None):
-            if error is None:
-                await lease.__aexit__(None, None, None)
-            else:
-                await lease.__aexit__(type(error), error, error.__traceback__)
+            await asyncio.to_thread(app.state.manager.release, session, keep=error is None)
 
         async def generate_tokens():
-            await asyncio.to_thread(slot.session.sync, parsed["prompt_ids"])
+            await asyncio.to_thread(session.sync, parsed["prompt_ids"])
             output_ids = []
             finish_reason = "length"
             token, rng = await next_token(
-                slot.session, parsed["temperature"], parsed["top_p"], parsed["rng"]
+                session, parsed["temperature"], parsed["top_p"], parsed["rng"]
             )
             while len(output_ids) < parsed["max_tokens"]:
                 if await request.is_disconnected():
                     raise EngineError("client disconnected")
                 if time.monotonic() - started > config.request_timeout:
                     raise EngineError("generation request timed out")
-                if app.state.pool.engine.token_is_stop(token):
+                if app.state.engine.token_is_stop(token):
                     finish_reason = "stop"
                     break
                 output_ids.append(token)
@@ -333,7 +333,7 @@ def create_app(config: Config, *, tokenizer=None, pool=None):
                 if len(output_ids) == parsed["max_tokens"]:
                     break
                 token, rng = await next_token(
-                    slot.session, parsed["temperature"], parsed["top_p"], rng, token
+                    session, parsed["temperature"], parsed["top_p"], rng, token
                 )
             return output_ids, finish_reason
 
@@ -372,16 +372,16 @@ def create_app(config: Config, *, tokenizer=None, pool=None):
             try:
                 yield sse(stream_chunk(completion_id, created, config.served_model_name,
                                        parsed["session_id"], {"role": "assistant", "content": ""}))
-                await asyncio.to_thread(slot.session.sync, parsed["prompt_ids"])
+                await asyncio.to_thread(session.sync, parsed["prompt_ids"])
                 token, rng = await next_token(
-                    slot.session, parsed["temperature"], parsed["top_p"], parsed["rng"]
+                    session, parsed["temperature"], parsed["top_p"], parsed["rng"]
                 )
                 while len(output_ids) < parsed["max_tokens"]:
                     if await request.is_disconnected():
                         raise EngineError("client disconnected")
                     if time.monotonic() - started > config.request_timeout:
                         raise EngineError("generation request timed out")
-                    if app.state.pool.engine.token_is_stop(token):
+                    if app.state.engine.token_is_stop(token):
                         finish_reason = "stop"
                         break
                     output_ids.append(token)
@@ -400,7 +400,7 @@ def create_app(config: Config, *, tokenizer=None, pool=None):
                     if len(output_ids) == parsed["max_tokens"]:
                         break
                     token, rng = await next_token(
-                        slot.session, parsed["temperature"], parsed["top_p"], rng, token
+                        session, parsed["temperature"], parsed["top_p"], rng, token
                     )
 
                 decoded = app.state.tokenizer.decode(output_ids, skip_special_tokens=True)

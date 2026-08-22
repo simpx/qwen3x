@@ -81,6 +81,7 @@ int q35_session_copy_logits(const q35_session* session, float* output, int capac
 int q35_session_manager_create(q35_engine* engine, int session_count,
                                int context_size, q35_session_manager** out,
                                char* err, size_t errlen);
+/* No Session may remain acquired when the manager is destroyed. */
 void q35_session_manager_destroy(q35_session_manager* manager);
 
 /*
