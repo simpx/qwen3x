@@ -22,6 +22,32 @@ enum {
 
 /* Engine: one loaded, read-only Qwen3.5-0.8B model. */
 
+typedef enum {
+    Q35_LOG_INFO = 0,
+    Q35_LOG_WARN = 1,
+    Q35_LOG_ERROR = 2,
+} q35_log_level;
+
+/*
+ * Called synchronously on the thread that produced the log. All strings are
+ * valid only during the call. The host owns user_data and the callback's
+ * lifetime; callbacks should be fast and must not call back into q35 APIs.
+ */
+typedef void (*q35_log_callback)(void* user_data,
+                                 q35_log_level level,
+                                 const char* file,
+                                 int line,
+                                 const char* message);
+
+/*
+ * Process-wide logger shared by Engine, Session and SessionManager.
+ * Configure it before starting native work. Do not change it until every
+ * concurrent q35 call has stopped.
+ */
+void q35_log_set_callback(q35_log_callback callback,
+                          void* user_data,
+                          q35_log_level level);
+
 typedef struct {
     const char* weights_path;
 } q35_engine_options;

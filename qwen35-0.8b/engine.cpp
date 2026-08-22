@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -727,12 +728,18 @@ int q35_engine_create(const q35_engine_options* options, q35_engine** out,
         require(out, "engine output pointer is null");
         *out = nullptr;
         auto engine = std::make_unique<q35_engine>();
+        LOG_INFO("model load started weights=%s", options->weights_path);
+        const auto started = std::chrono::steady_clock::now();
         engine->model = std::make_unique<qwen35::LoadedModel>(options->weights_path);
+        const double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count();
+        LOG_INFO("model load completed elapsed=%.3fs", elapsed);
         *out = engine.release();
     });
 }
 
 void q35_engine_destroy(q35_engine* engine) {
+    LOG_INFO("engine closing");
     delete engine;
 }
 
@@ -777,12 +784,21 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
         while (common < live && common < count && session->tokens[common] == tokens[common]) {
             ++common;
         }
+        const bool rebuild = common != live;
+        const int append_from = rebuild ? 0 : common;
+        LOG_INFO("session sync started mode=%s live=%d request=%d common=%d append=%d",
+                 rebuild ? "rebuild" : "append", live, count, common,
+                 count - append_from);
+        const auto started = std::chrono::steady_clock::now();
         // Only exact continuation is safely append-only. Shortening or editing rebuilds State.
-        if (common != live) {
+        if (rebuild) {
             session->reset();
             common = 0;
         }
         for (int index = common; index < count; ++index) session->append(tokens[index]);
+        const double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count();
+        LOG_INFO("session sync completed position=%d elapsed=%.3fs", count, elapsed);
     });
 }
 

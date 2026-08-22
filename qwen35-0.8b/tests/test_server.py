@@ -127,7 +127,11 @@ class ServerTest(unittest.TestCase):
         return self.client.post("/v1/chat/completions", headers=self.headers, json=body)
 
     def test_auth_health_and_models(self):
-        self.assertEqual(self.client.get("/healthz").status_code, 200)
+        first = self.client.get("/healthz")
+        second = self.client.get("/healthz")
+        self.assertEqual(first.status_code, 200)
+        self.assertTrue(first.headers["x-request-id"].startswith("req-"))
+        self.assertNotEqual(first.headers["x-request-id"], second.headers["x-request-id"])
         self.assertEqual(self.client.get("/readyz").json()["slots"], 2)
         self.assertEqual(self.client.get("/v1/models").status_code, 401)
         self.assertEqual(self.client.get("/v1/models", headers=self.headers).status_code, 200)

@@ -36,6 +36,7 @@ SessionManager
 qwen35.h                 Engine、Session、SessionManager 的公共 C ABI
 engine.cpp               CPU Model/State/Work/forward + Engine/Session
 runtime.cpp              SessionManager、ID/prefix、BUSY 和 LRU
+log.cpp                  Engine/Runtime 共用的进程级日志回调
 internal.h               Engine 向 Runtime 提供只读 token timeline 的私有接口
 qwen35.py                上述 C ABI 的薄 ctypes 包装
 server.py                OpenAI chat completions、SSE、鉴权和 tokenizer
@@ -68,11 +69,23 @@ cd qwen35-0.8b
 make run
 ```
 
+另开一个终端发送最小流式请求：
+
+```sh
+make chat
+```
+
 `pyproject.toml` 声明依赖，`uv.lock` 锁定完整环境；两者都应提交。`uv run` 会自动创建和同步
 项目自己的 `.venv`，不需要手动创建或激活虚拟环境。修改依赖使用 `uv add`/`uv remove`，不要
 直接维护 requirements 文件。CI 或部署使用 `--locked`，确保声明和 lock 不一致时直接失败。
 systemd 启动前先执行一次 `make sync-prod`；service 使用 `--no-sync`，启动时不会修改环境或访问
 包索引。开发和测试使用 `make sync`，它会额外安装 `dev` dependency group。
+
+Python 和 C++ 使用同一条日志链：C++ 通过全局 callback 上报消息和源码位置，Python
+统一补上时间、native thread ID、`request_id`、`session_id`，同时写终端和
+`logs/qwen35.log`。日志默认保留 5 个 20 MB
+轮转文件；可以用 `--log-level`、`--log-file`、`--log-max-mb` 和 `--log-backups` 调整。每个 HTTP
+响应都会返回服务端生成的 `X-Request-Id`，可直接用它串起一次请求的 Python/C++ 日志。
 
 默认不启用鉴权。需要 Bearer 鉴权时，显式设置 `QWEN_API_KEY` 再启动：
 

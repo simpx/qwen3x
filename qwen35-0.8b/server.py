@@ -11,23 +11,148 @@ import logging
 import os
 import re
 import secrets
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.datastructures import MutableHeaders
 
-from qwen35 import Engine, EngineError, SessionBusy
+from qwen35 import (
+    Engine,
+    EngineError,
+    Q35_LOG_ERROR,
+    Q35_LOG_INFO,
+    Q35_LOG_WARN,
+    SessionBusy,
+    set_log_callback,
+)
 
 
 HERE = Path(__file__).resolve().parent
 LOG = logging.getLogger("qwen35.runtime")
 SESSION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+REQUEST_ID_CONTEXT = ContextVar("request_id", default="-")
+SESSION_ID_CONTEXT = ContextVar("session_id", default="-")
+
+PYTHON_LOG_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+}
+NATIVE_LOG_LEVELS = {
+    "debug": Q35_LOG_INFO,
+    "info": Q35_LOG_INFO,
+    "warning": Q35_LOG_WARN,
+    "error": Q35_LOG_ERROR,
+}
+NATIVE_TO_PYTHON_LEVEL = {
+    Q35_LOG_INFO: logging.INFO,
+    Q35_LOG_WARN: logging.WARNING,
+    Q35_LOG_ERROR: logging.ERROR,
+}
+
+
+class LogContextFilter(logging.Filter):
+    def filter(self, record):
+        request_id = REQUEST_ID_CONTEXT.get()
+        session_id = SESSION_ID_CONTEXT.get()
+        context = []
+        if request_id != "-":
+            context.append(f"request_id={request_id}")
+        if session_id != "-":
+            context.append(f"session_id={session_id}")
+        record.context = (" ".join(context) + " ") if context else ""
+        record.tid = threading.get_native_id()
+        record.level_lower = record.levelname.lower()
+        if not hasattr(record, "source"):
+            record.source = f"{record.filename}:{record.lineno}"
+        return True
+
+
+def configure_logging(level: str, log_file: Path | None,
+                      max_megabytes: int, backups: int) -> None:
+    numeric_level = PYTHON_LOG_LEVELS[level]
+    formatter = logging.Formatter(
+        "[%(asctime)s.%(msecs)03d] [%(tid)d] [%(level_lower)s] [%(source)s] "
+        "%(context)s%(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    context_filter = LogContextFilter()
+
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(RotatingFileHandler(
+            log_file,
+            maxBytes=max_megabytes * 1024 * 1024,
+            backupCount=backups,
+            encoding="utf-8",
+        ))
+    for handler in handlers:
+        handler.setLevel(numeric_level)
+        handler.setFormatter(formatter)
+        handler.addFilter(context_filter)
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(numeric_level)
+    for handler in handlers:
+        root.addHandler(handler)
+
+
+def native_log(level: int, file: str, line: int, message: str) -> None:
+    logging.getLogger("qwen35.native").log(
+        NATIVE_TO_PYTHON_LEVEL.get(level, logging.INFO),
+        message,
+        extra={"source": f"{file}:{line}"},
+    )
+
+
+class RequestContextMiddleware:
+    """Give every HTTP request one server-issued ID, including streaming."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request_id = "req-" + uuid.uuid4().hex
+        context = REQUEST_ID_CONTEXT.set(request_id)
+        started = time.monotonic()
+        status = 500
+
+        async def send_with_request_id(message):
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+                MutableHeaders(scope=message).append("X-Request-Id", request_id)
+            await send(message)
+
+        LOG.info("request started method=%s path=%s", scope["method"], scope["path"])
+        try:
+            await self.app(scope, receive, send_with_request_id)
+        except Exception:
+            LOG.exception("request failed method=%s path=%s",
+                          scope["method"], scope["path"])
+            raise
+        finally:
+            LOG.info("request completed method=%s path=%s status=%d elapsed=%.3fs",
+                     scope["method"], scope["path"], status,
+                     time.monotonic() - started)
+            REQUEST_ID_CONTEXT.reset(context)
 
 
 class APIError(Exception):
@@ -53,6 +178,7 @@ class Config:
     default_max_tokens: int = 128
     max_request_bytes: int = 1024 * 1024
     request_timeout: float = 600.0
+    native_log_level: int = Q35_LOG_INFO
 
 
 def error_body(message, *, param=None, code=None, error_type="invalid_request_error"):
@@ -222,21 +348,35 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
             from transformers import AutoTokenizer
             tokenizer = await asyncio.to_thread(AutoTokenizer.from_pretrained, config.model_path)
         if manager is None:
-            engine = await asyncio.to_thread(Engine, config.library_path, config.weights_path)
-            manager = await asyncio.to_thread(
-                engine.create_session_manager, config.slot_count, config.max_context_tokens
+            await asyncio.to_thread(
+                set_log_callback, config.library_path, native_log, config.native_log_level
             )
+            try:
+                engine = await asyncio.to_thread(
+                    Engine, config.library_path, config.weights_path
+                )
+                manager = await asyncio.to_thread(
+                    engine.create_session_manager, config.slot_count, config.max_context_tokens
+                )
+            except Exception:
+                await asyncio.to_thread(set_log_callback, config.library_path, None)
+                raise
         app.state.tokenizer = tokenizer
         app.state.manager = manager
         app.state.engine = engine if engine is not None else manager.engine
+        LOG.info("server ready model=%s slots=%d context=%d", config.served_model_name,
+                 config.slot_count, config.max_context_tokens)
         try:
             yield
         finally:
+            LOG.info("server shutting down")
             if owns_runtime:
                 await asyncio.to_thread(manager.close)
                 engine.close()
+                set_log_callback(config.library_path, None)
 
     app = FastAPI(title="qwen35 runtime", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(RequestContextMiddleware)
 
     @app.exception_handler(APIError)
     async def api_error_handler(_request, error):
@@ -280,10 +420,13 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
     @app.delete("/v1/sessions/{session_id}")
     async def delete_session(session_id: str, request: Request):
         await authenticate(request)
+        session_context = SESSION_ID_CONTEXT.set(session_id)
         try:
             removed = await asyncio.to_thread(app.state.manager.forget, session_id)
         except SessionBusy as error:
             raise APIError(409, str(error), code="session_busy") from error
+        finally:
+            SESSION_ID_CONTEXT.reset(session_context)
         if not removed:
             raise APIError(404, "session not found", code="session_not_found")
         return {"id": session_id, "deleted": True}
@@ -292,19 +435,27 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
     async def chat_completions(request: Request):
         await authenticate(request)
         parsed = parse_request(await read_json(request), request, config, app.state.tokenizer)
+        session_context = SESSION_ID_CONTEXT.set(parsed["session_id"])
         try:
             native_session_id = parsed["session_id"] if parsed["persistent"] else None
             session = await asyncio.to_thread(
                 app.state.manager.acquire, native_session_id, parsed["prompt_ids"]
             )
         except SessionBusy as error:
+            SESSION_ID_CONTEXT.reset(session_context)
             raise APIError(429, str(error), code="engine_busy",
                            error_type="rate_limit_error") from error
+        except Exception:
+            SESSION_ID_CONTEXT.reset(session_context)
+            raise
 
         completion_id = "chatcmpl-" + uuid.uuid4().hex
         created = int(time.time())
         started = time.monotonic()
         headers = {"X-Qwen-Session-Id": parsed["session_id"]}
+        LOG.info("generation started completion_id=%s prompt_tokens=%d max_tokens=%d stream=%s",
+                 completion_id, len(parsed["prompt_ids"]), parsed["max_tokens"],
+                 parsed["stream"])
 
         async def release(error=None):
             await asyncio.to_thread(app.state.manager.release, session, keep=error is None)
@@ -362,10 +513,11 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                 await release(error)
                 raise
             finally:
-                LOG.info("request=%s session=%s elapsed=%.3fs", completion_id,
-                         parsed["session_id"], time.monotonic() - started)
+                LOG.info("generation completed completion_id=%s elapsed=%.3fs",
+                         completion_id, time.monotonic() - started)
 
         async def streaming():
+            stream_context = SESSION_ID_CONTEXT.set(parsed["session_id"])
             failure = None
             output_ids, published = [], ""
             finish_reason = "length"
@@ -426,22 +578,31 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                 yield "data: [DONE]\n\n"
             except Exception as error:
                 failure = error
-                LOG.exception("streaming request failed: %s", completion_id)
+                LOG.exception("generation failed completion_id=%s", completion_id)
                 yield sse(error_body(str(error), error_type="server_error"))
                 yield "data: [DONE]\n\n"
             finally:
-                await release(failure)
+                try:
+                    await release(failure)
+                    LOG.info("generation completed completion_id=%s elapsed=%.3fs",
+                             completion_id, time.monotonic() - started)
+                finally:
+                    SESSION_ID_CONTEXT.reset(stream_context)
 
         if parsed["stream"]:
-            return StreamingResponse(streaming(), media_type="text/event-stream", headers={
+            response = StreamingResponse(streaming(), media_type="text/event-stream", headers={
                 **headers, "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
             })
+            SESSION_ID_CONTEXT.reset(session_context)
+            return response
         try:
             response = await non_streaming()
             await release()
             return JSONResponse(response, headers=headers)
         except EngineError as error:
             raise APIError(500, str(error), error_type="server_error") from error
+        finally:
+            SESSION_ID_CONTEXT.reset(session_context)
 
     return app
 
@@ -458,16 +619,22 @@ def parse_args():
     parser.add_argument("--max-context-tokens", type=int, default=4096)
     parser.add_argument("--default-max-tokens", type=int, default=128)
     parser.add_argument("--request-timeout", type=float, default=600.0)
-    parser.add_argument("--log-level", default="info")
+    parser.add_argument("--log-level", choices=PYTHON_LOG_LEVELS, default="info")
+    parser.add_argument("--log-file", type=Path, default=HERE / "logs/qwen35.log")
+    parser.add_argument("--log-max-mb", type=int, default=20)
+    parser.add_argument("--log-backups", type=int, default=5)
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    if args.log_max_mb <= 0:
+        raise SystemExit("--log-max-mb must be positive")
+    if args.log_backups < 0:
+        raise SystemExit("--log-backups must not be negative")
+    configure_logging(args.log_level, args.log_file, args.log_max_mb, args.log_backups)
     # Authentication is opt-in: setting QWEN_API_KEY enables Bearer auth.
     api_key = os.environ.get("QWEN_API_KEY")
-    logging.basicConfig(level=args.log_level.upper(),
-                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
     config = Config(
         model_path=args.model,
         library_path=args.library,
@@ -478,9 +645,11 @@ def main():
         max_context_tokens=args.max_context_tokens,
         default_max_tokens=args.default_max_tokens,
         request_timeout=args.request_timeout,
+        native_log_level=NATIVE_LOG_LEVELS[args.log_level],
     )
     uvicorn.run(create_app(config), host=args.host, port=args.port, workers=1,
-                log_level=args.log_level, proxy_headers=False)
+                log_level=args.log_level, proxy_headers=False,
+                log_config=None, access_log=False)
 
 
 if __name__ == "__main__":

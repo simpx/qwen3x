@@ -96,6 +96,8 @@ int q35_session_manager_create(q35_engine* engine, int session_count,
             );
             if (result != Q35_OK) return result;
         }
+        LOG_INFO("session manager created sessions=%d context_size=%d",
+                 session_count, context_size);
         *out = manager.release();
         write_error(err, errlen, "");
         return Q35_OK;
@@ -109,6 +111,9 @@ int q35_session_manager_create(q35_engine* engine, int session_count,
 }
 
 void q35_session_manager_destroy(q35_session_manager* manager) {
+    if (manager) {
+        LOG_INFO("session manager closing sessions=%zu", manager->entries.size());
+    }
     delete manager;
 }
 
@@ -125,8 +130,10 @@ int q35_session_manager_acquire(q35_session_manager* manager,
         require(count > 0, "token sequence is empty");
         if (session_id) require(session_id[0] != '\0', "session_id is empty");
 
-        std::lock_guard<std::mutex> lock(manager->mutex);
+        std::unique_lock<std::mutex> lock(manager->mutex);
         SessionEntry* selected = nullptr;
+        const char* source = nullptr;
+        int prefix = 0;
 
         // session_id is a routing hint and always wins over prefix lookup.
         if (session_id) {
@@ -134,9 +141,13 @@ int q35_session_manager_acquire(q35_session_manager* manager,
                 if (entry.session_id == session_id) {
                     if (entry.state == EntryState::BUSY) {
                         write_error(err, errlen, "session is already busy");
+                        lock.unlock();
+                        LOG_WARN("session acquire failed reason=named_session_busy");
                         return Q35_BUSY;
                     }
                     selected = &entry;
+                    source = "id";
+                    q35_internal::session_tokens(entry.session, &prefix);
                     break;
                 }
             }
@@ -153,6 +164,8 @@ int q35_session_manager_acquire(q35_session_manager* manager,
                 if (live_count > best) {
                     selected = &entry;
                     best = live_count;
+                    source = "prefix";
+                    prefix = live_count;
                 }
             }
         }
@@ -162,6 +175,7 @@ int q35_session_manager_acquire(q35_session_manager* manager,
             for (SessionEntry& entry : manager->entries) {
                 if (entry.state == EntryState::FREE) {
                     selected = &entry;
+                    source = "free";
                     break;
                 }
             }
@@ -169,18 +183,27 @@ int q35_session_manager_acquire(q35_session_manager* manager,
         if (!selected) {
             for (SessionEntry& entry : manager->entries) {
                 if (entry.state != EntryState::IDLE) continue;
-                if (!selected || entry.last_used < selected->last_used) selected = &entry;
+                if (!selected || entry.last_used < selected->last_used) {
+                    selected = &entry;
+                    source = "lru";
+                }
             }
         }
         if (!selected) {
             write_error(err, errlen, "all sessions are busy");
+            lock.unlock();
+            LOG_WARN("session acquire failed reason=all_sessions_busy");
             return Q35_BUSY;
         }
 
+        const int slot = static_cast<int>(selected - manager->entries.data());
         selected->session_id = session_id ? session_id : "";
         selected->state = EntryState::BUSY;
         *out = selected->session;
         write_error(err, errlen, "");
+        lock.unlock();
+        LOG_INFO("session acquired source=%s slot=%d prefix=%d named=%s",
+                 source, slot, prefix, session_id ? "true" : "false");
         return Q35_OK;
     } catch (const std::exception& exception) {
         write_error(err, errlen, exception.what());
@@ -194,15 +217,18 @@ int q35_session_manager_acquire(q35_session_manager* manager,
 void q35_session_manager_release(q35_session_manager* manager,
                                               q35_session* session, bool keep) {
     if (!manager || !session) return;
-    std::lock_guard<std::mutex> lock(manager->mutex);
+    std::unique_lock<std::mutex> lock(manager->mutex);
     SessionEntry* entry = find_entry(*manager, session);
     if (!entry || entry->state != EntryState::BUSY) return;
+    const int slot = static_cast<int>(entry - manager->entries.data());
     if (keep) {
         entry->state = EntryState::IDLE;
         entry->last_used = ++manager->clock;
     } else {
         reset(*entry);
     }
+    lock.unlock();
+    LOG_INFO("session released slot=%d keep=%s", slot, keep ? "true" : "false");
 }
 
 int q35_session_manager_forget(q35_session_manager* manager,
@@ -211,18 +237,24 @@ int q35_session_manager_forget(q35_session_manager* manager,
     try {
         require(manager, "session manager is null");
         require(session_id && session_id[0], "session_id is empty");
-        std::lock_guard<std::mutex> lock(manager->mutex);
+        std::unique_lock<std::mutex> lock(manager->mutex);
         for (SessionEntry& entry : manager->entries) {
             if (entry.session_id != session_id) continue;
             if (entry.state == EntryState::BUSY) {
                 write_error(err, errlen, "session is busy");
+                lock.unlock();
+                LOG_WARN("session forget failed reason=session_busy");
                 return Q35_BUSY;
             }
+            const int slot = static_cast<int>(&entry - manager->entries.data());
             reset(entry);
             write_error(err, errlen, "");
+            lock.unlock();
+            LOG_INFO("session forgotten slot=%d", slot);
             return Q35_OK;
         }
         write_error(err, errlen, "session not found");
+        lock.unlock();
         return Q35_NOT_FOUND;
     } catch (const std::exception& exception) {
         write_error(err, errlen, exception.what());

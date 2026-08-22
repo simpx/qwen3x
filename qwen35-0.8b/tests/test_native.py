@@ -5,7 +5,7 @@ import argparse
 import json
 from pathlib import Path
 
-from qwen35 import Engine, EngineError, SessionBusy
+from qwen35 import Engine, EngineError, Q35_LOG_INFO, SessionBusy, set_log_callback
 
 
 def main():
@@ -18,6 +18,13 @@ def main():
 
     reference = json.loads(args.reference.read_text())
     case = next(item for item in reference["cases"] if item["name"] == "lesson_short")
+    events = []
+    set_log_callback(
+        args.library,
+        lambda level, file, line, message:
+            events.append((level, file, line, message)),
+        Q35_LOG_INFO,
+    )
     with Engine(args.library, args.weights) as engine:
         first = engine.create_session(64)
         second = engine.create_session(64)
@@ -90,6 +97,17 @@ def main():
         except EngineError as error:
             assert "context is full" in str(error)
         assert tiny.position == 3
+
+    set_log_callback(args.library, None)
+
+    messages = [message for _level, _file, _line, message in events]
+    assert any("model load completed" in message for message in messages)
+    assert any("session sync completed" in message for message in messages)
+    assert any("session acquired" in message for message in messages)
+    assert any("session released" in message for message in messages)
+    assert any("engine closing" in message for message in messages)
+    assert any(file == "engine.cpp" and line > 0 for _, file, line, _ in events)
+    assert any(file == "runtime.cpp" and line > 0 for _, file, line, _ in events)
 
     print("native Engine/Session regression: passed")
 

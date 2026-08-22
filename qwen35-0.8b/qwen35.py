@@ -5,7 +5,7 @@ from __future__ import annotations
 import ctypes
 import threading
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 
 ERROR_CAPACITY = 512
@@ -23,6 +23,20 @@ Q35_OK = 0
 Q35_BUSY = -2
 Q35_NOT_FOUND = -3
 
+Q35_LOG_INFO = 0
+Q35_LOG_WARN = 1
+Q35_LOG_ERROR = 2
+
+LogCallback = Callable[[int, str, int, str], None]
+_NativeLogCallback = ctypes.CFUNCTYPE(
+    None,
+    ctypes.c_void_p,
+    ctypes.c_int,
+    ctypes.c_char_p,
+    ctypes.c_int,
+    ctypes.c_char_p,
+)
+
 
 class _EngineOptions(ctypes.Structure):
     _fields_ = [
@@ -30,11 +44,20 @@ class _EngineOptions(ctypes.Structure):
     ]
 
 
+_LOG_CALLBACKS: dict[str, tuple[ctypes.CDLL, _NativeLogCallback]] = {}
+_LOG_CALLBACK_LOCK = threading.Lock()
+
+
 def _configure(library: ctypes.CDLL) -> None:
     void_p = ctypes.c_void_p
     char_p = ctypes.c_char_p
     size_t = ctypes.c_size_t
     int_p = ctypes.POINTER(ctypes.c_int)
+
+    library.q35_log_set_callback.argtypes = [
+        _NativeLogCallback, void_p, ctypes.c_int
+    ]
+    library.q35_log_set_callback.restype = None
 
     library.q35_engine_create.argtypes = [
         ctypes.POINTER(_EngineOptions), ctypes.POINTER(void_p), char_p, size_t
@@ -94,6 +117,38 @@ def _configure(library: ctypes.CDLL) -> None:
     library.q35_session_manager_forget.restype = ctypes.c_int
 
 
+def set_log_callback(library_path: Path | str,
+                     callback: LogCallback | None,
+                     level: int = Q35_LOG_INFO) -> None:
+    """Configure the process-wide native logger for this shared library."""
+    library_path = Path(library_path).resolve()
+    if not library_path.is_file():
+        raise EngineError(f"engine library not found: {library_path}")
+
+    library = ctypes.CDLL(str(library_path))
+    _configure(library)
+    native_callback = _NativeLogCallback()
+    if callback is not None:
+        def forward_log(_user_data, native_level, file, line, message):
+            try:
+                decode = lambda value: value.decode("utf-8", errors="replace")
+                callback(int(native_level), decode(file), int(line), decode(message))
+            except Exception:
+                # A logger failure must never terminate native inference.
+                pass
+
+        native_callback = _NativeLogCallback(forward_log)
+
+    key = str(library_path)
+    with _LOG_CALLBACK_LOCK:
+        library.q35_log_set_callback(native_callback, None, int(level))
+        if callback is None:
+            _LOG_CALLBACKS.pop(key, None)
+        else:
+            # ctypes callbacks must remain alive while C++ can call them.
+            _LOG_CALLBACKS[key] = (library, native_callback)
+
+
 def _call(function, *arguments) -> None:
     error = ctypes.create_string_buffer(ERROR_CAPACITY)
     result = function(*arguments, error, len(error))
@@ -123,6 +178,10 @@ class Engine:
         self._library = ctypes.CDLL(str(library_path))
         _configure(self._library)
         self._handle = ctypes.c_void_p()
+        self._sessions: set[Session] = set()
+        self._managers: set[SessionManager] = set()
+        self._lock = threading.Lock()
+
         options = _EngineOptions(
             weights_path=str(weights_path).encode(),
         )
@@ -131,9 +190,6 @@ class Engine:
             ctypes.byref(options),
             ctypes.byref(self._handle),
         )
-        self._sessions: set[Session] = set()
-        self._managers: set[SessionManager] = set()
-        self._lock = threading.Lock()
 
     @property
     def vocab_size(self) -> int:
