@@ -51,9 +51,10 @@ correct → simple → readable → usable → fast
 01-hf-reference/         Stage 1：官方 Qwen3.5-0.8B 的 PyTorch / Transformers oracle
 02-cpu-0.8b/             Stage 2：真实 0.8B 的可读 C++ CPU forward + state + 文字 e2e
 03-cuda-0.8b/            Stage 3：同一 0.8B 的 CUDA first-correct version
+04-runtime/              Stage 4：Python OpenAI-compatible API + 常驻 CPU/CUDA engine
 05-qwen38-27b/           Stage 5：固定 Qwen3.8-27B CUDA correctness
 06-prefix-cache/         Stage 6：longest-prefix state snapshot / restore
-07-server/               Stage 7：tokenizer wrapper、CLI、streaming OpenAI-compatible API
+07-service-hardening/    Stage 7：native tokenizer、监控、限流和部署加固
 08-performance-lab/      Stage 8：benchmark、Nsight、GDN / attention / GEMV 实验
 ~~~
 
@@ -211,7 +212,8 @@ bundle，但门槛必须写在 metadata/README 中，不能临时放宽。
 | 1 | Stage 1：生成官方 CPU/CUDA test vectors | `make -C 01-hf-reference cpu` / `make -C 01-hf-reference cuda` | 不改第 0 章数学 |
 | 2 | Stage 2：从 lesson 09 建真实 CPU `Model/State/Work` API 与文字 e2e | `make -C 02-cpu-0.8b test MODEL=...` | 不优化 linear、不把 tokenizer 混进 C++ forward |
 | 3 | Stage 3：CUDA + cuBLAS correctness path | `make -C 03-cuda-0.8b cuda-test` + `make test` | 不写新 fused kernel |
-| 4 | 总回归与提交 | 01、02、03 三个实现目录的 Makefile 都绿 | 不开始 27B |
+| 4 | Stage 4：Python runtime + 常驻 engine | `make -C 04-runtime test` + `make e2e` | 不做多并发 scheduler |
+| 5 | 总回归与提交 | 01--04 的验收命令都绿 | 不开始 27B |
 
 **今晚结束定义：** 真实官方 0.8B 权重能经过 HF → CPU → CUDA → tokenizer wrapper 的完整验证，
 并且 `Model + State + Work + prefill/decode` 的行为有固定测试。到这一步才能开始 `05-qwen38-27b/`。
@@ -292,16 +294,15 @@ E 或 F 重新计算 ABCD。到这里，已经是一个真正的 batch=1 LLM inf
 
 能持续聊天，且 CUDA 与 CPU 的逐层/端到端 regression 均通过。
 
-## 9. 0.8B runtime integration（由 Stage 2 完成）
+## 9. Stage 4 — Python runtime
 
-在切换 27B 前，Stage 2 将 `Model + State + Work` 数据流固定为一个真实可调用的 0.8B runtime：
-token id CLI、官方 tokenizer/chat template 薄包装、prefill/decode state regression、CPU/CUDA vector
-runner 与固定 prompt smoke test。tokenizer 薄包装和文字 e2e 直接放在 `02-cpu-0.8b/`，不再额外建立
-一个只做编排的目录；它们不进入 C++ forward，也不新增 layer math。
+`04-runtime/` 是单用户、单模型、单并发的 Python OpenAI-compatible server。它负责 Bearer
+鉴权、chat template、tokenizer、参数验证和 SSE；CPU/CUDA engine 通过共同的 `--worker`
+协议常驻，逐 token 接收 `start/next/reset`，因此每个 HTTP 请求不会重新加载权重。
 
-**验收：** `prefill` 与逐 token `decode` 必须等价；reset 后状态不得泄漏；CPU/CUDA 能被同一个
-token-id case 调用；全部 0.8B 数值 vector、greedy vector 与文本 smoke test 一条
-命令执行。它是 27B 迁移前最后一道 gate。
+**验收：** mock contract 覆盖鉴权、非流式 JSON、SSE、usage、stop 和不支持参数；真实 e2e
+分别调用 CPU/CUDA 常驻 worker。一次只允许一个生成请求，忙时返回 429，请求结束总会 reset
+模型 state。当前只做 greedy text-only，不伪装支持 sampling、tools 或 vision。
 
 ## 10. Stage 5 — Qwen3.8-27B
 
@@ -352,22 +353,22 @@ checkpoint 即可；block hashing、LRU、共享 cache 与 eviction 都留到以
 
 **验收：** 命中 prefix 的输出必须与从头 prefill 完全等价，同时能测到省去的 prefill tokens。
 
-## 12. Stage 7 — 日常可用 V1
+## 12. Stage 7 — service hardening
 
 **目标时间：3–5 天。**
 
-补齐外围，而不改造模型核心：
+在 Stage 4 的单用户 Python runtime 之上补齐外围，而不改造模型核心：
 
-- tokenizer 和 chat template 包装；
+- 可选 native tokenizer，去掉生产环境 Transformers 依赖；
 - temperature、top-k、top-p、seed；
-- EOS、stop strings、context length；
-- token streaming、Ctrl-C / cancellation；
-- 极薄的 OpenAI-compatible HTTP server：`POST /v1/chat/completions` 与 `stream=true`。
+- prefix cache、明确的取消和超时；
+- 结构化 metrics、限流、TLS/reverse-proxy 部署与长时间 soak test；
+- 在已有 `/v1/chat/completions` contract 上继续做兼容性测试。
 
 目标使用方式：
 
 ~~~sh
-./qwen-server --model qwen38-27b.bin --port 8000
+python3 04-runtime/runtime.py --engine ./qwen38_cuda --weights ./qwen38-27b.bin
 ~~~
 
 **V1 验收：** 自己的 IDE、agent 或聊天客户端可连接；同一用户连续对话命中 prefix cache；

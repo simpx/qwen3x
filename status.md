@@ -64,6 +64,7 @@ single GPU。顺序始终是：
 | CPU regression | 每一步都将完整 248,320 词表 logits 与官方 CPU oracle 对比。版本化最大绝对误差为 `5e-4`，另检查 argmax、greedy ids 与 API state。 |
 | `03-cuda-0.8b/` | non-linear/state 操作由直接 CUDA kernel 实现；所有 linear projection 由 cuBLAS GEMV 实现；模型 state 常驻 GPU。 |
 | CUDA regression | 每一步都与独立生成的官方 CUDA FP32 oracle 对比完整 logits，使用相同 `5e-4` 阈值；另检查 greedy ids 与 state API。 |
+| `04-runtime/` | Python OpenAI-compatible runtime；Bearer 鉴权、chat template、SSE、usage、stop、单并发保护；通过统一 `--worker` 协议让 CPU/CUDA engine 常驻。 |
 | `05-qwen38-27b/` | 不下载 weight shard 的情况下，已检查官方 Qwen3.8-27B config 和 safetensors index；错误 config/schema/byte-count fixture 均会被拒绝。 |
 
 当前 0.8B vector suite 有三组：3-token prompt + 2 decode token、4-token prompt +
@@ -94,8 +95,8 @@ state 约 0.141 GiB，DeltaNet conv history 约 0.005 GiB，full-attention KV ca
   因而绝不能直接复用。
 - 0.8B CPU/CUDA snapshot 有意将 context 上限设为 4096；checkpoint 本身宣称 262,144
   positions。
-- C++ 还没有 native tokenizer、greedy 以外的 sampling、HTTP server、prefix cache、
-  batching、quantization、vision 或 MTP。
+- C++ 还没有 native tokenizer；Python runtime 已有单用户 HTTP/SSE，但仍没有 greedy 以外的
+  sampling、prefix cache、batching、quantization、vision 或 MTP。
 - text-only wrapper 仅有一个 user message 的 regression；system/history 以及明确拒绝
   image/video placeholder token 仍需测试。
 

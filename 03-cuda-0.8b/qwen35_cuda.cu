@@ -703,6 +703,65 @@ void generate_cuda(const char* path, const std::vector<int>& prompt, int count, 
     generate_cuda(model, state, work, prompt, count, result);
 }
 
+// 与 CPU --worker 完全相同的逐 token 协议。DeviceModel、CudaState、CudaWork 都常驻，
+// Python runtime 不需要知道底层使用 CPU 还是 CUDA。
+void worker_cuda(const char* weights_path) {
+    DeviceModel model(weights_path);
+    CudaState state;
+    CudaWork work;
+    int pending_token = -1;
+    bool active = false;
+
+    auto send_next = [&]() {
+        const DeviceTop next = argmax_cuda(work);
+        if (next.token == 248044 || next.token == 248046) {
+            active = false;
+            std::puts("done\tstop");
+        } else {
+            pending_token = next.token;
+            active = true;
+            std::printf("token\t%d\n", next.token);
+        }
+        std::fflush(stdout);
+    };
+
+    std::puts("ready");
+    std::fflush(stdout);
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line == "ping") {
+            std::puts("pong");
+            std::fflush(stdout);
+        } else if (line.rfind("start\t", 0) == 0) {
+            state.reset();
+            active = false;
+            prefill_cuda(model, state, work, parse_ids(line.c_str() + 6));
+            send_next();
+        } else if (line == "next") {
+            if (!active) {
+                std::puts("error\tno active generation");
+                std::fflush(stdout);
+                continue;
+            }
+            decode_cuda(model, state, work, pending_token);
+            send_next();
+        } else if (line == "reset") {
+            state.reset();
+            active = false;
+            pending_token = -1;
+            std::puts("ok");
+            std::fflush(stdout);
+        } else if (line == "quit") {
+            std::puts("bye");
+            std::fflush(stdout);
+            return;
+        } else {
+            std::puts("error\tunknown command");
+            std::fflush(stdout);
+        }
+    }
+}
+
 void cuda_self_test() {
     self_test();
     int devices = 0;
@@ -718,6 +777,7 @@ void cuda_usage(const char* program) {
     std::printf("       %s --trace-logits <qwen35-0.8b.bin> <id,id,...> <out.f32>\n", program);
     std::printf("       %s --state-check <qwen35-0.8b.bin> <prefill-ids> <decode-ids>\n", program);
     std::printf("       %s --generate <qwen35-0.8b.bin> <id,id,...> <new-tokens>\n", program);
+    std::printf("       %s --worker <qwen35-0.8b.bin>\n", program);
 }
 
 }  // namespace qwen35
@@ -757,6 +817,10 @@ int main(int argc, char** argv) {
         std::printf("generated:");
         for (int token : output) std::printf(" %d", token);
         std::putchar('\n');
+        return 0;
+    }
+    if (std::strcmp(argv[1], "--worker") == 0 && argc == 3) {
+        worker_cuda(argv[2]);
         return 0;
     }
     cuda_usage(argv[0]);

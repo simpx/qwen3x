@@ -27,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <iostream>
 #include <limits>
 #include <string>
 #include <vector>
@@ -627,6 +628,65 @@ void generate(const Model& model, State& state, Work& work, const std::vector<in
     }
 }
 
+// Python runtime 使用的常驻协议。模型只加载一次；start 为一个新请求重建 State，
+// next 每次只推进一个 token，因此 runtime 可以逐 token 流式输出或及时取消请求。
+void worker(const char* weights_path) {
+    LoadedModel loaded(weights_path);
+    State state;
+    Work work;
+    int pending_token = -1;
+    bool active = false;
+
+    auto send_next = [&]() {
+        const int token = argmax(work.logits);
+        if (token == END_OF_TEXT_TOKEN || token == IM_END_TOKEN) {
+            active = false;
+            std::puts("done\tstop");
+        } else {
+            pending_token = token;
+            active = true;
+            std::printf("token\t%d\n", token);
+        }
+        std::fflush(stdout);
+    };
+
+    std::puts("ready");
+    std::fflush(stdout);
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line == "ping") {
+            std::puts("pong");
+            std::fflush(stdout);
+        } else if (line.rfind("start\t", 0) == 0) {
+            state = State{};
+            active = false;
+            prefill(loaded.model, state, parse_ids(line.c_str() + 6), work);
+            send_next();
+        } else if (line == "next") {
+            if (!active) {
+                std::puts("error\tno active generation");
+                std::fflush(stdout);
+                continue;
+            }
+            decode(loaded.model, state, pending_token, work);
+            send_next();
+        } else if (line == "reset") {
+            state = State{};
+            active = false;
+            pending_token = -1;
+            std::puts("ok");
+            std::fflush(stdout);
+        } else if (line == "quit") {
+            std::puts("bye");
+            std::fflush(stdout);
+            return;
+        } else {
+            std::puts("error\tunknown command");
+            std::fflush(stdout);
+        }
+    }
+}
+
 void self_test() {
     // 这是无需下载模型的微型单元测试；真实权重的回归见本目录的 make test。
     assert(std::fabs(f32(bf16(1.25f)) - 1.25f) < 1e-6f);
@@ -647,6 +707,7 @@ void usage(const char* program) {
     std::printf("       %s --trace-logits <qwen35-0.8b.bin> <id,id,...> <out.f32>\n", program);
     std::printf("       %s --state-check <qwen35-0.8b.bin> <prefill-ids> <decode-ids>\n", program);
     std::printf("       %s --generate <qwen35-0.8b.bin> <id,id,...> <new-tokens>\n", program);
+    std::printf("       %s --worker <qwen35-0.8b.bin>\n", program);
 }
 
 }  // namespace qwen35
@@ -700,6 +761,10 @@ int main(int argc, char** argv) {
         std::printf("generated:");
         for (int token : output) std::printf(" %d", token);
         std::putchar('\n');
+        return 0;
+    }
+    if (std::strcmp(argv[1], "--worker") == 0 && argc == 3) {
+        worker(argv[2]);
         return 0;
     }
     usage(argv[0]);

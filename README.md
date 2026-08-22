@@ -66,6 +66,7 @@ make test
 | [01-hf-reference/](01-hf-reference/README.md) | 官方 PyTorch/Transformers 的 CPU/CUDA FP32 logits oracle | `make -C 01-hf-reference cpu` / `cuda` |
 | [02-cpu-0.8b/](02-cpu-0.8b/README.md) | 独立 plain C++ CPU forward + 文字/chat e2e | `make -C 02-cpu-0.8b test` |
 | [03-cuda-0.8b/](03-cuda-0.8b/README.md) | 直接 CUDA kernels + cuBLAS，state 留在 GPU | `make -C 03-cuda-0.8b test` |
+| [04-runtime/](04-runtime/README.md) | Python OpenAI-compatible server + 常驻 CPU/CUDA engine | `make -C 04-runtime test` / `e2e` |
 | [05-qwen38-27b/](05-qwen38-27b/README.md) | 官方 27B config/tensor schema/显存 preflight（不下载权重） | `make -C 05-qwen38-27b test` |
 
 每一层都用前一层无法伪造的证据验证：HF full logits → C++ CPU full logits → CUDA full logits →

@@ -38,6 +38,9 @@ struct Work;   // 当前 forward 可覆盖的 FP32 临时向量与 logits
 
 没有 Tensor、Backend、Session、operator dispatch、通用 config 或 class hierarchy。
 
+`--worker` 是给 `04-runtime` 使用的常驻外围协议：`start` 建立一个请求的 State，`next`
+推进一个 token，`reset` 清空请求状态。它不改变 forward，也不把 HTTP/tokenizer 放进 C++。
+
 ## 1. 编译和打包
 
 ```sh
