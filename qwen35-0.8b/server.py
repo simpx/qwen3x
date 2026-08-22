@@ -24,6 +24,10 @@ from typing import Optional
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from rich.console import Console
+from rich.highlighter import RegexHighlighter
+from rich.logging import RichHandler
+from rich.theme import Theme
 from starlette.datastructures import MutableHeaders
 
 from qwen35 import (
@@ -43,6 +47,7 @@ LOG = logging.getLogger("qwen35.runtime")
 SESSION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 REQUEST_ID_CONTEXT = ContextVar("request_id", default="-")
 SESSION_ID_CONTEXT = ContextVar("session_id", default="-")
+REQUEST_STARTED_CONTEXT = ContextVar("request_started", default=None)
 
 PYTHON_LOG_LEVELS = {
     "debug": logging.DEBUG,
@@ -62,6 +67,28 @@ NATIVE_TO_PYTHON_LEVEL = {
     Q35_LOG_WARN: logging.WARNING,
     Q35_LOG_ERROR: logging.ERROR,
 }
+
+LOG_THEME = Theme({
+    "qwen.debug": "dim",
+    "qwen.info": "green",
+    "qwen.warning": "yellow",
+    "qwen.error": "bold red",
+    "qwen.key": "dim",
+    "qwen.number": "bold bright_cyan",
+    "qwen.value": "bright_cyan",
+})
+
+
+class LogHighlighter(RegexHighlighter):
+    """Highlight log levels and key=value fields without changing log text."""
+
+    base_style = "qwen."
+    highlights = [
+        r"(?P<debug>\[debug\])|(?P<info>\[info\])|"
+        r"(?P<warning>\[warning\])|(?P<error>\[error\])",
+        r"(?P<key>\b[A-Za-z_][A-Za-z0-9_]*=)"
+        r"(?:(?P<number>-?\d+(?:\.\d+)?(?:[A-Za-z%]+)?)|(?P<value>[^\s]+))",
+    ]
 
 
 class LogContextFilter(logging.Filter):
@@ -91,7 +118,15 @@ def configure_logging(level: str, log_file: Path | None,
     )
     context_filter = LogContextFilter()
 
-    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    console = RichHandler(
+        console=Console(stderr=True, theme=LOG_THEME),
+        show_time=False,
+        show_level=False,
+        show_path=False,
+        markup=False,
+        highlighter=LogHighlighter(),
+    )
+    handlers: list[logging.Handler] = [console]
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
         handlers.append(RotatingFileHandler(
@@ -134,6 +169,7 @@ class RequestContextMiddleware:
         request_id = "req-" + uuid.uuid4().hex
         context = REQUEST_ID_CONTEXT.set(request_id)
         started = time.monotonic()
+        started_context = REQUEST_STARTED_CONTEXT.set(started)
         status = 500
 
         async def send_with_request_id(message):
@@ -154,6 +190,7 @@ class RequestContextMiddleware:
             LOG.info("request completed method=%s path=%s status=%d elapsed=%.3fs",
                      scope["method"], scope["path"], status,
                      time.monotonic() - started)
+            REQUEST_STARTED_CONTEXT.reset(started_context)
             REQUEST_ID_CONTEXT.reset(context)
 
 
@@ -181,6 +218,14 @@ class Config:
     max_request_bytes: int = 1024 * 1024
     request_timeout: float = 600.0
     native_log_level: int = Q35_LOG_INFO
+
+
+@dataclass
+class GenerationTiming:
+    request_started: float
+    prefill_seconds: float = 0.0
+    decode_started: float = 0.0
+    first_token_at: float = 0.0
 
 
 def error_body(message, *, param=None, code=None, error_type="invalid_request_error"):
@@ -456,6 +501,7 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
         completion_id = "chatcmpl-" + uuid.uuid4().hex
         created = int(time.time())
         started = time.monotonic()
+        timing = GenerationTiming(REQUEST_STARTED_CONTEXT.get() or started)
         headers = {"X-Qwen-Session-Id": parsed["session_id"]}
         LOG.info("generation started completion_id=%s prompt_tokens=%d max_tokens=%d stream=%s",
                  completion_id, len(parsed["prompt_ids"]), parsed["max_tokens"],
@@ -464,13 +510,56 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
         async def release(error=None):
             await asyncio.to_thread(app.state.manager.release, session, keep=error is None)
 
+        def usage_for(output_ids, cached_tokens):
+            prompt_tokens = len(parsed["prompt_ids"])
+            completion_tokens = len(output_ids)
+            return {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "prompt_tokens_details": {"cached_tokens": cached_tokens},
+            }
+
+        def log_decode_completed(output_ids, finish_reason, cached_tokens):
+            usage = usage_for(output_ids, cached_tokens)
+            now = time.monotonic()
+            tokens_to_prefill = usage["prompt_tokens"] - cached_tokens
+            prefill_tps = (tokens_to_prefill / timing.prefill_seconds
+                           if tokens_to_prefill and timing.prefill_seconds > 0 else 0.0)
+            decode_seconds = now - timing.decode_started
+            decode_tps = (usage["completion_tokens"] / decode_seconds
+                          if usage["completion_tokens"] and decode_seconds > 0 else 0.0)
+            ttft = timing.first_token_at - timing.request_started
+            LOG.info(
+                "decode completed completion_id=%s finish_reason=%s elapsed=%.3fs "
+                "ttft=%.3fs prefill_tps=%.2f decode_tps=%.2f "
+                "prompt_tokens=%d cached_tokens=%d completion_tokens=%d total_tokens=%d",
+                completion_id,
+                finish_reason,
+                decode_seconds,
+                ttft,
+                prefill_tps,
+                decode_tps,
+                usage["prompt_tokens"],
+                cached_tokens,
+                usage["completion_tokens"],
+                usage["total_tokens"],
+            )
+            return usage
+
         async def generate_tokens():
-            await asyncio.to_thread(session.sync, parsed["prompt_ids"])
+            prefill_started = time.monotonic()
+            cached_tokens = await asyncio.to_thread(session.sync, parsed["prompt_ids"])
+            timing.prefill_seconds = time.monotonic() - prefill_started
+            timing.decode_started = time.monotonic()
+            LOG.info("decode started completion_id=%s max_tokens=%d",
+                     completion_id, parsed["max_tokens"])
             output_ids = []
             finish_reason = "length"
             token, rng = await next_token(
                 session, parsed["temperature"], parsed["top_p"], parsed["rng"]
             )
+            timing.first_token_at = time.monotonic()
             while len(output_ids) < parsed["max_tokens"]:
                 if await request.is_disconnected():
                     raise EngineError("client disconnected")
@@ -490,18 +579,16 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                 token, rng = await next_token(
                     session, parsed["temperature"], parsed["top_p"], rng, token
                 )
-            return output_ids, finish_reason
+            return output_ids, finish_reason, cached_tokens
 
         async def non_streaming():
             try:
-                output_ids, finish_reason = await generate_tokens()
+                output_ids, finish_reason, cached_tokens = await generate_tokens()
                 decoded = app.state.tokenizer.decode(output_ids, skip_special_tokens=True)
                 text, stopped = stop_view(decoded, parsed["stops"], final=True)
                 if stopped:
                     finish_reason = "stop"
-                usage = {"prompt_tokens": len(parsed["prompt_ids"]),
-                         "completion_tokens": len(output_ids),
-                         "total_tokens": len(parsed["prompt_ids"]) + len(output_ids)}
+                usage = log_decode_completed(output_ids, finish_reason, cached_tokens)
                 return {
                     "id": completion_id,
                     "object": "chat.completion",
@@ -515,23 +602,31 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                 }
             except Exception as error:
                 await release(error)
+                LOG.exception("generation failed completion_id=%s prompt_tokens=%d",
+                              completion_id, len(parsed["prompt_ids"]))
                 raise
-            finally:
-                LOG.info("generation completed completion_id=%s elapsed=%.3fs",
-                         completion_id, time.monotonic() - started)
 
         async def streaming():
             stream_context = SESSION_ID_CONTEXT.set(parsed["session_id"])
             failure = None
             output_ids, published = [], ""
             finish_reason = "length"
+            cached_tokens = 0
             try:
                 yield sse(stream_chunk(completion_id, created, config.served_model_name,
                                        parsed["session_id"], {"role": "assistant", "content": ""}))
-                await asyncio.to_thread(session.sync, parsed["prompt_ids"])
+                prefill_started = time.monotonic()
+                cached_tokens = await asyncio.to_thread(
+                    session.sync, parsed["prompt_ids"]
+                )
+                timing.prefill_seconds = time.monotonic() - prefill_started
+                timing.decode_started = time.monotonic()
+                LOG.info("decode started completion_id=%s max_tokens=%d",
+                         completion_id, parsed["max_tokens"])
                 token, rng = await next_token(
                     session, parsed["temperature"], parsed["top_p"], parsed["rng"]
                 )
+                timing.first_token_at = time.monotonic()
                 while len(output_ids) < parsed["max_tokens"]:
                     if await request.is_disconnected():
                         raise EngineError("client disconnected")
@@ -571,9 +666,7 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                 yield sse(stream_chunk(completion_id, created, config.served_model_name,
                                        parsed["session_id"], {}, finish_reason=finish_reason))
                 if parsed["include_usage"]:
-                    usage = {"prompt_tokens": len(parsed["prompt_ids"]),
-                             "completion_tokens": len(output_ids),
-                             "total_tokens": len(parsed["prompt_ids"]) + len(output_ids)}
+                    usage = usage_for(output_ids, cached_tokens)
                     item = stream_chunk(completion_id, created, config.served_model_name,
                                         parsed["session_id"], {})
                     item["choices"] = []
@@ -582,14 +675,16 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                 yield "data: [DONE]\n\n"
             except Exception as error:
                 failure = error
-                LOG.exception("generation failed completion_id=%s", completion_id)
+                LOG.exception("generation failed completion_id=%s prompt_tokens=%d "
+                              "completion_tokens=%d", completion_id,
+                              len(parsed["prompt_ids"]), len(output_ids))
                 yield sse(error_body(str(error), error_type="server_error"))
                 yield "data: [DONE]\n\n"
             finally:
                 try:
                     await release(failure)
-                    LOG.info("generation completed completion_id=%s elapsed=%.3fs",
-                             completion_id, time.monotonic() - started)
+                    if failure is None:
+                        log_decode_completed(output_ids, finish_reason, cached_tokens)
                 finally:
                     SESSION_ID_CONTEXT.reset(stream_context)
 

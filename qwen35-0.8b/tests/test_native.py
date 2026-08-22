@@ -29,7 +29,7 @@ def main():
         first = engine.create_session(64)
         second = engine.create_session(64)
 
-        first.sync(case["prefill_ids"])
+        assert first.sync(case["prefill_ids"]) == 0
         assert first.position == len(case["prefill_ids"])
         assert first.argmax() == case["next_token"]
         sampled, _rng = first.sample(0.0, 1.0, 123)
@@ -43,17 +43,17 @@ def main():
 
         # Append-only sync evaluates just the suffix.
         extended = case["prefill_ids"] + case["decode_ids"]
-        first.sync(extended)
+        assert first.sync(extended) == len(case["prefill_ids"])
         assert first.position == len(extended)
 
         # A shorter timeline cannot rewind DeltaNet, so sync rebuilds it exactly.
-        first.sync(case["prefill_ids"])
+        assert first.sync(case["prefill_ids"]) == 0
         assert first.position == len(case["prefill_ids"])
         assert first.argmax() == case["next_token"]
 
         # Independent Session State must remain untouched.
         assert second.position == 0
-        second.sync(case["prefill_ids"])
+        assert second.sync(case["prefill_ids"]) == 0
         assert second.argmax() == case["next_token"]
 
         # Bad requests cross the ABI as Python errors; they must not terminate the host.
@@ -68,7 +68,7 @@ def main():
         # the same live state. Acquiring the same ID concurrently is rejected.
         manager = engine.create_session_manager(2, 64)
         managed = manager.acquire("agent-a", case["prefill_ids"])
-        managed.sync(case["prefill_ids"])
+        assert managed.sync(case["prefill_ids"]) == 0
         manager.release(managed, keep=True)
 
         managed = manager.acquire("agent-a", case["prefill_ids"])
@@ -84,13 +84,14 @@ def main():
         # reused anonymously, the old name is intentionally no longer bound.
         anonymous = manager.acquire(None, case["prefill_ids"] + case["decode_ids"])
         assert anonymous.position == len(case["prefill_ids"])
-        anonymous.sync(case["prefill_ids"] + case["decode_ids"])
+        assert anonymous.sync(case["prefill_ids"] + case["decode_ids"]) \
+            == len(case["prefill_ids"])
         manager.release(anonymous, keep=True)
         assert not manager.forget("agent-a")
         manager.close()
 
         tiny = engine.create_session(3)
-        tiny.sync(case["prefill_ids"])
+        assert tiny.sync(case["prefill_ids"]) == 0
         try:
             tiny.eval(198)
             raise AssertionError("full context accepted another token")
@@ -102,9 +103,12 @@ def main():
 
     messages = [message for _level, _file, _line, message in events]
     assert any("model load completed" in message for message in messages)
-    assert any("session sync completed" in message for message in messages)
+    assert any("prefill started" in message for message in messages)
+    assert any("prefill completed" in message for message in messages)
     assert any("session acquired" in message for message in messages)
     assert any("session released" in message for message in messages)
+    assert any("cache hit" in message for message in messages)
+    assert any("cache miss" in message for message in messages)
     assert any("engine closing" in message for message in messages)
     assert any("session created" in message for message in messages)
     assert any(file == "engine.cpp" and line > 0 for _, file, line, _ in events)

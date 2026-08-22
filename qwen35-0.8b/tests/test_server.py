@@ -4,7 +4,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from qwen35 import SessionBusy
-from server import Config, create_app
+from server import Config, LogHighlighter, create_app
 
 
 class FakeTokenizer:
@@ -23,11 +23,13 @@ class FakeSession:
         self.index = index
         self.step = 0
         self.sync_count = 0
+        self.cached_tokens = 0
 
     def sync(self, tokens):
         assert tokens == [10, 11]
         self.sync_count += 1
         self.step = 0
+        return self.cached_tokens
 
     def argmax(self):
         return [20, 21, 22][self.step]
@@ -126,6 +128,19 @@ class ServerTest(unittest.TestCase):
         body.update(extra)
         return self.client.post("/v1/chat/completions", headers=self.headers, json=body)
 
+    def test_log_highlighter_marks_structured_values(self):
+        text = LogHighlighter()(
+            "[info] cache hit reused_tokens=128 elapsed=0.125s reason=append"
+        )
+        highlighted = {
+            (span.style, text.plain[span.start:span.end])
+            for span in text.spans
+        }
+        self.assertIn(("qwen.info", "[info]"), highlighted)
+        self.assertIn(("qwen.number", "128"), highlighted)
+        self.assertIn(("qwen.number", "0.125s"), highlighted)
+        self.assertIn(("qwen.value", "append"), highlighted)
+
     def test_auth_health_and_models(self):
         first = self.client.get("/healthz")
         second = self.client.get("/healthz")
@@ -143,11 +158,25 @@ class ServerTest(unittest.TestCase):
             self.assertEqual(client.get("/v1/models").status_code, 200)
 
     def test_non_streaming_uses_named_resident_session(self):
-        response = self.request(session_id="agent-a")
+        with self.assertLogs("qwen35.runtime", level="INFO") as logs:
+            response = self.request(session_id="agent-a")
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["choices"][0]["message"]["content"], "你好！")
         self.assertEqual(response.json()["session_id"], "agent-a")
         self.assertEqual(response.headers["x-qwen-session-id"], "agent-a")
+        self.assertEqual(
+            response.json()["usage"]["prompt_tokens_details"]["cached_tokens"], 0
+        )
+        self.assertTrue(any(
+            "prompt_tokens=2 cached_tokens=0 completion_tokens=3 total_tokens=5" in line
+            for line in logs.output
+        ))
+        self.assertTrue(any("decode started" in line for line in logs.output))
+        self.assertTrue(any("decode completed" in line for line in logs.output))
+        self.assertTrue(any(
+            "ttft=" in line and "prefill_tps=" in line and "decode_tps=" in line
+            for line in logs.output
+        ))
         first = self.manager.named["agent-a"]
 
         response = self.request(session_id="agent-a", max_completion_tokens=1)
@@ -157,14 +186,38 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(first.sync_count, 2)
 
     def test_streaming_contract(self):
-        response = self.request(session_id="agent-stream", stream=True,
-                                stream_options={"include_usage": True})
+        with self.assertLogs("qwen35.runtime", level="INFO") as logs:
+            response = self.request(session_id="agent-stream", stream=True,
+                                    stream_options={"include_usage": True})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIn('"content":"你"', response.text)
         self.assertIn('"content":"好"', response.text)
         self.assertIn('"content":"！"', response.text)
         self.assertIn('"session_id":"agent-stream"', response.text)
+        self.assertIn(
+            '"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5,'
+            '"prompt_tokens_details":{"cached_tokens":0}}',
+            response.text,
+        )
         self.assertTrue(response.text.endswith("data: [DONE]\n\n"))
+        self.assertTrue(any(
+            "prompt_tokens=2 cached_tokens=0 completion_tokens=3 total_tokens=5" in line
+            for line in logs.output
+        ))
+
+    def test_streaming_omits_usage_without_option(self):
+        response = self.request(session_id="agent-no-usage", stream=True)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn('"usage":', response.text)
+        self.assertTrue(response.text.endswith("data: [DONE]\n\n"))
+
+    def test_usage_reports_engine_cache_hit(self):
+        self.manager.sessions[0].cached_tokens = 2
+        response = self.request(max_completion_tokens=1)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json()["usage"]["prompt_tokens_details"]["cached_tokens"], 2
+        )
 
     def test_sampling_options(self):
         response = self.request(temperature=0.8, top_p=0.9, seed=123,

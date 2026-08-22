@@ -778,7 +778,8 @@ int q35_session_reset(q35_session* session,
 }
 
 int q35_session_sync(q35_session* session, const int* tokens, int count,
-                                 char* err, size_t errlen) {
+                     int* cached_tokens, char* err, size_t errlen) {
+    if (cached_tokens) *cached_tokens = 0;
     return guard(err, errlen, [&] {
         require(session, "session is null");
         require(tokens, "tokens pointer is null");
@@ -795,12 +796,26 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
             ++common;
         }
         const bool rebuild = common != live;
-        const int append_from = rebuild ? 0 : common;
-        LOG_DEBUG("session prefix compared live=%d request=%d common=%d",
+        const int reused = rebuild ? 0 : common;
+        const int tokens_to_prefill = count - reused;
+        const char* mode = reused == 0 ? "from_start" :
+                           tokens_to_prefill == 0 ? "cache_only" : "append_suffix";
+        if (cached_tokens) *cached_tokens = reused;
+        LOG_DEBUG("prompt compared session_tokens=%d prompt_tokens=%d "
+                  "matching_prefix_tokens=%d",
                   live, count, common);
-        LOG_INFO("session sync started mode=%s live=%d request=%d common=%d append=%d",
-                 rebuild ? "rebuild" : "append", live, count, common,
-                 count - append_from);
+        if (reused > 0) {
+            LOG_INFO("cache hit cached_tokens=%d tokens_to_prefill=%d",
+                     reused, tokens_to_prefill);
+        } else {
+            LOG_INFO("cache miss reason=%s matching_prefix_tokens=%d cached_tokens=0 "
+                     "tokens_to_prefill=%d",
+                     live == 0 ? "empty_session" : "prompt_not_continuation",
+                     common, tokens_to_prefill);
+        }
+        LOG_INFO("prefill started mode=%s session_tokens=%d prompt_tokens=%d "
+                 "cached_tokens=%d tokens_to_prefill=%d",
+                 mode, live, count, reused, tokens_to_prefill);
         const auto started = std::chrono::steady_clock::now();
         // Only exact continuation is safely append-only. Shortening or editing rebuilds State.
         if (rebuild) {
@@ -810,7 +825,8 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
         for (int index = common; index < count; ++index) session->append(tokens[index]);
         const double elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
-        LOG_INFO("session sync completed position=%d elapsed=%.3fs", count, elapsed);
+        LOG_INFO("prefill completed position=%d cached_tokens=%d prefilled_tokens=%d "
+                 "elapsed=%.3fs", count, reused, tokens_to_prefill, elapsed);
     });
 }
 

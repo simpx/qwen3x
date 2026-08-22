@@ -73,9 +73,11 @@ int q35_session_reset(q35_session* session, char* err, size_t errlen);
 /*
  * Bring the Session to exactly tokens[count]. If the live timeline is already
  * a prefix, only the new suffix runs through forward; otherwise State is reset
- * and the complete sequence is prefetched again.
+ * and the complete sequence is prefetched again. cached_tokens receives the
+ * number of prompt tokens whose existing State was reused; it may be NULL.
  */
 int q35_session_sync(q35_session* session, const int* tokens, int count,
+                     int* cached_tokens,
                      char* err, size_t errlen);
 
 /* Append one token and update State/logits. */
