@@ -11,9 +11,9 @@ CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic
 
 all: $(LIBRARY)
 
-$(LIBRARY): qwen35.cpp qwen35.h
+$(LIBRARY): engine.cpp runtime.cpp qwen35.h internal.h
 	mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -fPIC -shared qwen35.cpp -o $@
+	$(CXX) $(CXXFLAGS) -fPIC -shared engine.cpp runtime.cpp -o $@
 
 weights: $(WEIGHTS)
 

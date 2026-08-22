@@ -34,7 +34,9 @@ SessionManager
 
 ```text
 qwen35.h                 Engine、Session、SessionManager 的公共 C ABI
-qwen35.cpp               CPU Model/State/Work/forward + Engine/Session/SessionManager
+engine.cpp               CPU Model/State/Work/forward + Engine/Session
+runtime.cpp              SessionManager、ID/prefix、BUSY 和 LRU
+internal.h               Engine 向 Runtime 提供只读 token timeline 的私有接口
 qwen35.py                上述 C ABI 的薄 ctypes 包装
 server.py                OpenAI chat completions、SSE、鉴权和 tokenizer
 pack_weights.py          官方 safetensors -> mmap-friendly 固定 tensor stream

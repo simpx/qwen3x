@@ -1,12 +1,11 @@
-// qwen35.cpp -- Qwen3.5-0.8B production runtime 的 plain C++ CPU engine。
+// engine.cpp -- Qwen3.5-0.8B production runtime 的 plain C++ CPU engine。
 //
-// 数学实现延续 00-lessons/09 和 02-cpu-0.8b。这个文件只保留五块：
+// 数学实现延续 00-lessons/09 和 02-cpu-0.8b。这个文件只保留四块：
 //   1. Model：固定权重；
 //   2. State / Work：跨 token 历史与单次 forward 临时量；
 //   3. deltanet / attention / ffn：三个已经学过的 branch；
-//   4. forward：完整主干；
-//   5. SessionManager：固定 Session、ID/prefix 查找和 LRU。
-// File/Reader 只负责 mmap 权重；文件末尾用窄 C ABI 暴露这些对象。
+//   4. forward：完整主干。
+// File/Reader 只负责 mmap 权重；文件末尾用窄 C ABI 暴露 Engine/Session。
 //
 //   token id
 //     -> embedding                              -> hidden[H]
@@ -31,7 +30,6 @@
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -39,6 +37,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "internal.h"
 #include "qwen35.h"
 
 namespace qwen35 {
@@ -678,34 +677,19 @@ struct q35_session {
     }
 };
 
-enum class EntryState {
-    FREE,
-    IDLE,
-    BUSY,
-};
+namespace q35_internal {
 
-struct SessionEntry {
-    std::unique_ptr<q35_session> session;
-    std::string session_id;
-    EntryState state = EntryState::FREE;
-    uint64_t last_used = 0;
-
-    SessionEntry(q35_engine* engine, int context_size)
-        : session(std::make_unique<q35_session>(engine, context_size)) {}
-};
-
-struct q35_session_manager {
-    std::mutex mutex;
-    std::vector<SessionEntry> entries;
-    uint64_t clock = 0;
-
-    q35_session_manager(q35_engine* engine, int session_count, int context_size) {
-        entries.reserve(static_cast<size_t>(session_count));
-        for (int index = 0; index < session_count; ++index) {
-            entries.emplace_back(engine, context_size);
-        }
+const int* session_tokens(const q35_session* session, int* count) {
+    if (!count) return nullptr;
+    if (!session) {
+        *count = 0;
+        return nullptr;
     }
-};
+    *count = static_cast<int>(session->tokens.size());
+    return session->tokens.data();
+}
+
+}  // namespace q35_internal
 
 namespace {
 
@@ -733,24 +717,9 @@ void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 
-bool is_prefix(const q35_session& session, const int* tokens, int count) {
-    if (session.tokens.size() > static_cast<size_t>(count)) return false;
-    for (size_t index = 0; index < session.tokens.size(); ++index) {
-        if (session.tokens[index] != tokens[index]) return false;
-    }
-    return true;
-}
-
-SessionEntry* find_entry(q35_session_manager& manager, const q35_session* session) {
-    for (SessionEntry& entry : manager.entries) {
-        if (entry.session.get() == session) return &entry;
-    }
-    return nullptr;
-}
-
 }  // namespace
 
-extern "C" int q35_engine_create(const q35_engine_options* options, q35_engine** out,
+int q35_engine_create(const q35_engine_options* options, q35_engine** out,
                                   char* err, size_t errlen) {
     return guard(err, errlen, [&] {
         require(options, "engine options are null");
@@ -763,11 +732,11 @@ extern "C" int q35_engine_create(const q35_engine_options* options, q35_engine**
     });
 }
 
-extern "C" void q35_engine_destroy(q35_engine* engine) {
+void q35_engine_destroy(q35_engine* engine) {
     delete engine;
 }
 
-extern "C" int q35_session_create(q35_engine* engine, int context_size, q35_session** out,
+int q35_session_create(q35_engine* engine, int context_size, q35_session** out,
                                    char* err, size_t errlen) {
     return guard(err, errlen, [&] {
         require(engine, "engine is null");
@@ -779,11 +748,11 @@ extern "C" int q35_session_create(q35_engine* engine, int context_size, q35_sess
     });
 }
 
-extern "C" void q35_session_destroy(q35_session* session) {
+void q35_session_destroy(q35_session* session) {
     delete session;
 }
 
-extern "C" int q35_session_reset(q35_session* session,
+int q35_session_reset(q35_session* session,
                                   char* err, size_t errlen) {
     return guard(err, errlen, [&] {
         require(session, "session is null");
@@ -791,7 +760,7 @@ extern "C" int q35_session_reset(q35_session* session,
     });
 }
 
-extern "C" int q35_session_sync(q35_session* session, const int* tokens, int count,
+int q35_session_sync(q35_session* session, const int* tokens, int count,
                                  char* err, size_t errlen) {
     return guard(err, errlen, [&] {
         require(session, "session is null");
@@ -817,7 +786,7 @@ extern "C" int q35_session_sync(q35_session* session, const int* tokens, int cou
     });
 }
 
-extern "C" int q35_session_eval(q35_session* session, int token,
+int q35_session_eval(q35_session* session, int token,
                                  char* err, size_t errlen) {
     return guard(err, errlen, [&] {
         require(session, "session is null");
@@ -827,31 +796,31 @@ extern "C" int q35_session_eval(q35_session* session, int token,
     });
 }
 
-extern "C" int q35_session_position(const q35_session* session) {
+int q35_session_position(const q35_session* session) {
     return session ? session->state.position : -1;
 }
 
-extern "C" int q35_session_argmax(const q35_session* session) {
+int q35_session_argmax(const q35_session* session) {
     if (!session || !session->logits_valid) return -1;
     return qwen35::argmax(session->work.logits);
 }
 
-extern "C" int q35_session_sample(q35_session* session, float temperature, int top_k,
+int q35_session_sample(q35_session* session, float temperature, int top_k,
                                    float top_p, uint64_t* rng) {
     if (!session || !session->logits_valid || !rng) return -1;
     return qwen35::sample(session->work.logits, temperature, top_k, top_p,
                           *rng, session->sample_order);
 }
 
-extern "C" bool q35_token_is_stop(int token) {
+bool q35_token_is_stop(int token) {
     return token == qwen35::END_OF_TEXT_TOKEN || token == qwen35::IM_END_TOKEN;
 }
 
-extern "C" int q35_vocab_size(void) {
+int q35_vocab_size(void) {
     return qwen35::V;
 }
 
-extern "C" int q35_session_copy_logits(const q35_session* session, float* output, int capacity,
+int q35_session_copy_logits(const q35_session* session, float* output, int capacity,
                                         char* err, size_t errlen) {
     return guard(err, errlen, [&] {
         require(session, "session is null");
@@ -860,149 +829,4 @@ extern "C" int q35_session_copy_logits(const q35_session* session, float* output
         require(capacity >= qwen35::V, "logits output is smaller than vocabulary");
         std::memcpy(output, session->work.logits.data(), sizeof(float) * qwen35::V);
     });
-}
-
-extern "C" int q35_session_manager_create(q35_engine* engine, int session_count,
-                                            int context_size, q35_session_manager** out,
-                                            char* err, size_t errlen) {
-    return guard(err, errlen, [&] {
-        require(engine, "engine is null");
-        require(out, "session manager output pointer is null");
-        *out = nullptr;
-        require(session_count > 0, "session_count must be positive");
-        require(context_size > 0 && context_size <= qwen35::MAX_CONTEXT,
-                "context_size is outside 1..262144");
-        *out = new q35_session_manager(engine, session_count, context_size);
-    });
-}
-
-extern "C" void q35_session_manager_destroy(q35_session_manager* manager) {
-    delete manager;
-}
-
-extern "C" int q35_session_manager_acquire(q35_session_manager* manager,
-                                             const char* session_id,
-                                             const int* tokens, int count,
-                                             q35_session** out,
-                                             char* err, size_t errlen) {
-    try {
-        require(manager, "session manager is null");
-        require(out, "session output pointer is null");
-        *out = nullptr;
-        require(tokens, "tokens pointer is null");
-        require(count > 0, "token sequence is empty");
-        if (session_id) require(session_id[0] != '\0', "session_id is empty");
-
-        std::lock_guard<std::mutex> lock(manager->mutex);
-        SessionEntry* selected = nullptr;
-
-        // session_id 是快速路由：已绑定的 ID 永远优先于 prefix 搜索。
-        if (session_id) {
-            for (SessionEntry& entry : manager->entries) {
-                if (entry.session_id == session_id) {
-                    if (entry.state == EntryState::BUSY) {
-                        write_error(err, errlen, "session is already busy");
-                        return Q35_BUSY;
-                    }
-                    selected = &entry;
-                    break;
-                }
-            }
-        }
-
-        // 没有 ID 命中时，选择最长的完整 live prefix，最大化可复用的 forward。
-        if (!selected) {
-            size_t best = 0;
-            for (SessionEntry& entry : manager->entries) {
-                if (entry.state != EntryState::IDLE ||
-                    !is_prefix(*entry.session, tokens, count)) continue;
-                const size_t length = entry.session->tokens.size();
-                if (!selected || length > best) {
-                    selected = &entry;
-                    best = length;
-                }
-            }
-        }
-
-        // 没有 prefix 时先拿未使用的 Entry，最后才淘汰最旧的 IDLE Entry。
-        if (!selected) {
-            for (SessionEntry& entry : manager->entries) {
-                if (entry.state == EntryState::FREE) {
-                    selected = &entry;
-                    break;
-                }
-            }
-        }
-        if (!selected) {
-            for (SessionEntry& entry : manager->entries) {
-                if (entry.state != EntryState::IDLE) continue;
-                if (!selected || entry.last_used < selected->last_used) selected = &entry;
-            }
-        }
-        if (!selected) {
-            write_error(err, errlen, "all sessions are busy");
-            return Q35_BUSY;
-        }
-
-        // 重新分配 Entry 时旧 ID 立即失效；匿名请求不会冒用旧命名会话。
-        selected->session_id = session_id ? session_id : "";
-        selected->state = EntryState::BUSY;
-        *out = selected->session.get();
-        write_error(err, errlen, "");
-        return Q35_OK;
-    } catch (const std::exception& exception) {
-        write_error(err, errlen, exception.what());
-        return Q35_ERROR;
-    } catch (...) {
-        write_error(err, errlen, "unknown C++ exception");
-        return Q35_ERROR;
-    }
-}
-
-extern "C" void q35_session_manager_release(q35_session_manager* manager,
-                                              q35_session* session, bool keep) {
-    if (!manager || !session) return;
-    std::lock_guard<std::mutex> lock(manager->mutex);
-    SessionEntry* entry = find_entry(*manager, session);
-    if (!entry || entry->state != EntryState::BUSY) return;
-    if (keep) {
-        entry->state = EntryState::IDLE;
-        entry->last_used = ++manager->clock;
-    } else {
-        entry->session->reset();
-        entry->session_id.clear();
-        entry->state = EntryState::FREE;
-        entry->last_used = 0;
-    }
-}
-
-extern "C" int q35_session_manager_forget(q35_session_manager* manager,
-                                            const char* session_id,
-                                            char* err, size_t errlen) {
-    try {
-        require(manager, "session manager is null");
-        require(session_id && session_id[0], "session_id is empty");
-        std::lock_guard<std::mutex> lock(manager->mutex);
-        for (SessionEntry& entry : manager->entries) {
-            if (entry.session_id != session_id) continue;
-            if (entry.state == EntryState::BUSY) {
-                write_error(err, errlen, "session is busy");
-                return Q35_BUSY;
-            }
-            entry.session->reset();
-            entry.session_id.clear();
-            entry.state = EntryState::FREE;
-            entry.last_used = 0;
-            write_error(err, errlen, "");
-            return Q35_OK;
-        }
-        write_error(err, errlen, "session not found");
-        return Q35_NOT_FOUND;
-    } catch (const std::exception& exception) {
-        write_error(err, errlen, exception.what());
-        return Q35_ERROR;
-    } catch (...) {
-        write_error(err, errlen, "unknown C++ exception");
-        return Q35_ERROR;
-    }
 }
