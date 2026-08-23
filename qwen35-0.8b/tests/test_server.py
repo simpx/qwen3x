@@ -151,7 +151,8 @@ class ServerTest(unittest.TestCase):
             response.json()["usage"]["prompt_tokens_details"]["cached_tokens"], 0
         )
         self.assertTrue(any(
-            "prompt_tokens=2 cached_tokens=0 completion_tokens=3 total_tokens=5" in line
+            "prompt_tokens=2 cache_hit_tokens=0 to_prefill_tokens=2 "
+            "completion_tokens=3 total_tokens=5" in line
             for line in logs.output
         ))
         self.assertTrue(any("decode started" in line for line in logs.output))
@@ -184,7 +185,8 @@ class ServerTest(unittest.TestCase):
         )
         self.assertTrue(response.text.endswith("data: [DONE]\n\n"))
         self.assertTrue(any(
-            "prompt_tokens=2 cached_tokens=0 completion_tokens=3 total_tokens=5" in line
+            "prompt_tokens=2 cache_hit_tokens=0 to_prefill_tokens=2 "
+            "completion_tokens=3 total_tokens=5" in line
             for line in logs.output
         ))
 

@@ -507,7 +507,8 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
             LOG.info(
                 "decode completed completion_id=%s finish_reason=%s elapsed=%.3fs "
                 "ttft=%.3fs prefill_tps=%.2f decode_tps=%.2f "
-                "prompt_tokens=%d cached_tokens=%d completion_tokens=%d total_tokens=%d",
+                "prompt_tokens=%d cache_hit_tokens=%d to_prefill_tokens=%d "
+                "completion_tokens=%d total_tokens=%d",
                 completion_id,
                 finish_reason,
                 decode_seconds,
@@ -516,6 +517,7 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                 decode_tps,
                 usage["prompt_tokens"],
                 cached_tokens,
+                tokens_to_prefill,
                 usage["completion_tokens"],
                 usage["total_tokens"],
             )

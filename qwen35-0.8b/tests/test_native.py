@@ -129,11 +129,30 @@ def main():
     assert any("model load completed" in message for message in messages)
     assert any("prefill started" in message for message in messages)
     assert any("prefill completed" in message for message in messages)
-    assert any("session acquired" in message for message in messages)
-    assert any("session released" in message for message in messages)
-    assert any("cache hit" in message for message in messages)
-    assert any("cache miss" in message for message in messages)
-    assert any("source=checkpoint" in message for message in messages)
+    assert any("session acquire" in message and "prompt_tokens=" in message
+               and "live_state_tokens=" in message
+               and "checkpoint_state_tokens=" in message
+               and "cache_result=" in message
+               and "cache_hit_tokens=" in message
+               and "to_prefill_tokens=" in message for message in messages)
+    assert any("session release" in message and "live_state_tokens=" in message
+               and "checkpoint_state_tokens=" in message for message in messages)
+    assert any("session sync" in message and "cache_result=hit_live" in message
+               for message in messages)
+    assert any("session sync" in message and "cache_result=new" in message
+               for message in messages)
+    assert any("cache_result=hit_checkpoint" in message for message in messages)
+    assert any("session sync" in message and "prompt_tokens=" in message
+               and "live_state_tokens=" in message
+               and "checkpoint_state_tokens=" in message
+               and "checkpoint_at=" in message
+               and "cache_hit_tokens=" in message
+               and "to_prefill_tokens=" in message for message in messages)
+    assert any("session checkpoint restored" in message
+               and "live_state_tokens=" in message
+               and "checkpoint_state_tokens=" in message for message in messages)
+    assert any("session checkpoint saved" in message
+               and "checkpoint_state_tokens=" in message for message in messages)
     assert any("engine closing" in message for message in messages)
     assert any("session created" in message for message in messages)
     assert any(file == "engine.cpp" and line > 0 for _, file, line, _ in events)

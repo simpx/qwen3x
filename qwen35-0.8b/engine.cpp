@@ -476,7 +476,6 @@ void mock_forward(State& state, int token, Work& work,
                   const std::vector<std::vector<FP32>>& logits_bank) {
     if (state.position >= state.capacity) die("session context is full");
     if (logits_bank.empty()) die("mock logits bank is empty");
-    LOG_DEBUG("mock forward started token=%d position=%d", token, state.position);
 
     for (int layer = 0; layer < N; ++layer) {
         if (layer % 4 != 3) {
@@ -506,7 +505,7 @@ void mock_forward(State& state, int token, Work& work,
         row = static_cast<size_t>(token - MOCK_TARGET_TOKENS.front() + 1);
     }
     std::copy(logits_bank[row].begin(), logits_bank[row].end(), work.logits.begin());
-    LOG_DEBUG("mock forward completed token=%d position=%d logits_row=%zu target=%d",
+    LOG_DEBUG("mock forward token=%d position=%d logits_row=%zu target=%d",
               token, state.position, row, MOCK_TARGET_TOKENS[row]);
 }
 
@@ -800,11 +799,13 @@ struct q35_session {
         }
         checkpoint.logits = work.logits;
         checkpoint.valid = true;
-        LOG_DEBUG("checkpoint saved position=%d", checkpoint.position);
+        LOG_INFO("session checkpoint saved checkpoint_state_tokens=%d",
+                 checkpoint.position);
     }
 
     void restore_checkpoint() {
         if (!checkpoint.valid) throw std::runtime_error("checkpoint is invalid");
+        const int live_position = state.position;
         for (int layer = 0; layer < qwen35::N; ++layer) {
             if (layer % 4 != 3) {
                 std::copy(checkpoint.conv_history[layer].begin(),
@@ -834,14 +835,22 @@ struct q35_session {
         tokens.resize(static_cast<size_t>(checkpoint.position));
         std::copy(checkpoint.logits.begin(), checkpoint.logits.end(), work.logits.begin());
         logits_valid = true;
-        LOG_DEBUG("checkpoint restored position=%d", checkpoint.position);
+        LOG_INFO("session checkpoint restored live_state_tokens=%d "
+                 "checkpoint_state_tokens=%d discarded_tokens=%d",
+                 checkpoint.position, checkpoint.position,
+                 live_position - checkpoint.position);
     }
 };
 
 namespace q35_internal {
 
-int session_reusable_prefix(const q35_session* session,
-                            const int* tokens, int count) {
+int session_checkpoint_state_tokens(const q35_session* session) {
+    if (!session || !session->checkpoint.valid) return 0;
+    return session->checkpoint.position;
+}
+
+int session_cache_hit_tokens(const q35_session* session,
+                             const int* tokens, int count) {
     if (!session || !tokens || count <= 0) return 0;
     return session->match_prefix(tokens, count).reused;
 }
@@ -969,25 +978,18 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
             match.use_checkpoint = false;
         }
         const int tokens_to_prefill = count - reused;
-        const char* source = reused == 0 ? "from_start" :
-                             match.use_checkpoint ? "checkpoint" : "live";
+        const char* cache_result = reused > 0 ?
+                                   (match.use_checkpoint ? "hit_checkpoint" : "hit_live") :
+                                   (live == 0 ? "new" : "rebuild");
         const char* mode = tokens_to_prefill == 0 ? "cache_only" : "append_suffix";
+        const int checkpoint_position =
+            session->checkpoint.valid ? session->checkpoint.position : 0;
         if (cached_tokens) *cached_tokens = reused;
-        LOG_DEBUG("prompt compared session_tokens=%d prompt_tokens=%d "
-                  "selected_source=%s matched_tokens=%d",
-                  live, count, source, reused);
-        if (reused > 0) {
-            LOG_INFO("cache hit source=%s cached_tokens=%d tokens_to_prefill=%d",
-                     source, reused, tokens_to_prefill);
-        } else {
-            LOG_INFO("cache miss reason=%s matching_prefix_tokens=%d cached_tokens=0 "
-                     "tokens_to_prefill=%d",
-                     live == 0 ? "empty_session" : "no_checkpoint_prefix",
-                     match.common, tokens_to_prefill);
-        }
-        LOG_INFO("prefill started source=%s mode=%s session_tokens=%d "
-                 "prompt_tokens=%d cached_tokens=%d tokens_to_prefill=%d",
-                 source, mode, live, count, reused, tokens_to_prefill);
+        LOG_INFO("session sync prompt_tokens=%d live_state_tokens=%d "
+                 "checkpoint_state_tokens=%d checkpoint_at=%d "
+                 "cache_result=%s cache_hit_tokens=%d to_prefill_tokens=%d",
+                 count, live, checkpoint_position, checkpoint_at,
+                 cache_result, reused, tokens_to_prefill);
         const auto started = std::chrono::steady_clock::now();
         if (match.use_checkpoint) {
             session->restore_checkpoint();
@@ -999,6 +1001,9 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
             session->save_checkpoint();
             checkpoint_saved = true;
         }
+        LOG_INFO("session prefill started mode=%s prompt_tokens=%d "
+                 "cache_hit_tokens=%d to_prefill_tokens=%d",
+                 mode, count, reused, tokens_to_prefill);
         for (int index = reused; index < count; ++index) {
             session->append(tokens[index]);
             if (session->state.position == checkpoint_at) {
@@ -1012,8 +1017,12 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
         }
         const double elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
-        LOG_INFO("prefill completed position=%d cached_tokens=%d prefilled_tokens=%d "
-                 "elapsed=%.3fs", count, reused, tokens_to_prefill, elapsed);
+        const int final_checkpoint =
+            session->checkpoint.valid ? session->checkpoint.position : 0;
+        LOG_INFO("session prefill completed prompt_tokens=%d "
+                 "live_state_tokens=%d checkpoint_state_tokens=%d "
+                 "cache_hit_tokens=%d to_prefill_tokens=%d elapsed=%.3fs",
+                 count, count, final_checkpoint, reused, tokens_to_prefill, elapsed);
     });
 }
 

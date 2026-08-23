@@ -114,6 +114,18 @@ Python 和 C++ 使用同一条日志链：C++ 通过全局 callback 上报消息
 轮转文件；可以用 `--log-level`、`--log-file`、`--log-max-mb` 和 `--log-backups` 调整。每个 HTTP
 响应都会返回服务端生成的 `X-Request-Id`，可直接用它串起一次请求的 Python/C++ 日志。
 
+Session/cache 日志中的 `session` 始终指一个持有 State/token timeline 的 C++ Session，而
+`slot` 只是 SessionManager 中容纳它的位置。其余字段固定使用以下名词：`prompt_tokens` 是本次完整 prompt 的 token 数；
+`live_state_tokens` 和 `checkpoint_state_tokens` 分别是 Session 两个可恢复 State 的 token
+位置（`checkpoint_state_tokens=0` 表示尚未保存）；`cache_hit_tokens` 是本次实际复用的 State
+长度；`to_prefill_tokens` 是仍需执行 forward 的 prompt token 数。因而始终满足
+`prompt_tokens = cache_hit_tokens + to_prefill_tokens`。每次 `sync()` 会用一条 `session sync`
+日志汇总这些状态、本次 `checkpoint_at` 和 `cache_result`；`cache_result` 的值为
+`new`、`hit_checkpoint`、`hit_live` 或 `rebuild`。其后的日志只记录
+checkpoint restore/save 和 prefill 等实际动作。一次请求的 Session 主生命周期固定为
+`session acquire -> session sync -> session release`：`acquire` 说明 SessionManager 为什么选择
+这个 slot，`sync` 说明 Engine 如何复用和推进，`release` 说明请求结束后保留的两个 State。
+
 默认不启用鉴权。需要 Bearer 鉴权时，显式设置 `QWEN_API_KEY` 再启动：
 
 ```sh

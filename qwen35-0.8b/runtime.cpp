@@ -122,22 +122,31 @@ int q35_session_manager_acquire(q35_session_manager* manager,
 
         std::unique_lock<std::mutex> lock(manager->mutex);
         SessionEntry* selected = nullptr;
-        const char* selected_by = nullptr;
-        int matched_tokens = 0;
+        const char* selection = nullptr;
+        int selected_cache_hit_tokens = 0;
 
         // 比较每个空闲 Session 的 live/checkpoint；
         // reusable 是它能完整复用的 token 数，选择其中最大的一个。
         int best = 0;
-        for (SessionEntry& entry : manager->entries) {
+        for (size_t slot = 0; slot < manager->entries.size(); ++slot) {
+            SessionEntry& entry = manager->entries[slot];
             if (entry.state != EntryState::IDLE) continue;
-            const int reusable = q35_internal::session_reusable_prefix(
+            const int cache_hit_tokens = q35_internal::session_cache_hit_tokens(
                 entry.session, tokens, count
             );
-            if (reusable > best) {
+            const int live_state_tokens = q35_session_position(entry.session);
+            const int checkpoint_state_tokens =
+                q35_internal::session_checkpoint_state_tokens(entry.session);
+            LOG_DEBUG("session candidate slot=%zu prompt_tokens=%d "
+                      "live_state_tokens=%d checkpoint_state_tokens=%d "
+                      "cache_hit_tokens=%d",
+                      slot, count, live_state_tokens, checkpoint_state_tokens,
+                      cache_hit_tokens);
+            if (cache_hit_tokens > best) {
                 selected = &entry;
-                best = reusable;
-                selected_by = "token_prefix";
-                matched_tokens = reusable;
+                best = cache_hit_tokens;
+                selection = "prefix";
+                selected_cache_hit_tokens = cache_hit_tokens;
             }
         }
 
@@ -146,7 +155,7 @@ int q35_session_manager_acquire(q35_session_manager* manager,
             for (SessionEntry& entry : manager->entries) {
                 if (entry.state == EntryState::FREE) {
                     selected = &entry;
-                    selected_by = "empty_slot";
+                    selection = "free";
                     break;
                 }
             }
@@ -156,7 +165,7 @@ int q35_session_manager_acquire(q35_session_manager* manager,
                 if (entry.state != EntryState::IDLE) continue;
                 if (!selected || entry.last_used < selected->last_used) {
                     selected = &entry;
-                    selected_by = "lru_replacement";
+                    selection = "lru";
                 }
             }
         }
@@ -168,14 +177,23 @@ int q35_session_manager_acquire(q35_session_manager* manager,
         }
 
         const int slot = static_cast<int>(selected - manager->entries.data());
-        const int session_tokens = q35_session_position(selected->session);
+        const int live_state_tokens = q35_session_position(selected->session);
+        const int checkpoint_state_tokens =
+            q35_internal::session_checkpoint_state_tokens(selected->session);
+        const char* cache_result = selected_cache_hit_tokens > 0 ?
+                                   (selected_cache_hit_tokens == live_state_tokens ?
+                                    "hit_live" : "hit_checkpoint") :
+                                   (live_state_tokens == 0 ? "new" : "rebuild");
+        const int to_prefill_tokens = count - selected_cache_hit_tokens;
         selected->state = EntryState::BUSY;
         *out = selected->session;
         write_error(err, errlen, "");
         lock.unlock();
-        LOG_INFO("session acquired selected_by=%s slot=%d session_tokens=%d "
-                 "matched_tokens=%d",
-                 selected_by, slot, session_tokens, matched_tokens);
+        LOG_INFO("session acquire slot=%d selection=%s prompt_tokens=%d "
+                 "live_state_tokens=%d checkpoint_state_tokens=%d "
+                 "cache_result=%s cache_hit_tokens=%d to_prefill_tokens=%d",
+                 slot, selection, count, live_state_tokens, checkpoint_state_tokens,
+                 cache_result, selected_cache_hit_tokens, to_prefill_tokens);
         return Q35_OK;
     } catch (const std::exception& exception) {
         write_error(err, errlen, exception.what());
@@ -189,7 +207,6 @@ int q35_session_manager_acquire(q35_session_manager* manager,
 void q35_session_manager_release(q35_session_manager* manager,
                                               q35_session* session, bool keep) {
     if (!manager || !session) return;
-    LOG_DEBUG("session release started keep_state=%s", keep ? "true" : "false");
     std::unique_lock<std::mutex> lock(manager->mutex);
     SessionEntry* entry = find_entry(*manager, session);
     if (!entry || entry->state != EntryState::BUSY) return;
@@ -200,6 +217,12 @@ void q35_session_manager_release(q35_session_manager* manager,
     } else {
         reset(*entry);
     }
+    const int live_state_tokens = q35_session_position(entry->session);
+    const int checkpoint_state_tokens =
+        q35_internal::session_checkpoint_state_tokens(entry->session);
     lock.unlock();
-    LOG_INFO("session released slot=%d keep_state=%s", slot, keep ? "true" : "false");
+    LOG_INFO("session release slot=%d result=%s live_state_tokens=%d "
+             "checkpoint_state_tokens=%d",
+             slot, keep ? "kept" : "cleared", live_state_tokens,
+             checkpoint_state_tokens);
 }
