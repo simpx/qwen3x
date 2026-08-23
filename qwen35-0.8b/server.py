@@ -397,14 +397,23 @@ def decode_generated(tokenizer, output_ids, enable_thinking, think_end_token):
     reasoning_ids, content_ids = split_generated_ids(
         output_ids, enable_thinking, think_end_token
     )
-    reasoning = tokenizer.decode(reasoning_ids, skip_special_tokens=True)
-    content = tokenizer.decode(content_ids, skip_special_tokens=True)
+    reasoning = tokenizer.decode(
+        reasoning_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+    )
+    content = tokenizer.decode(
+        content_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+    )
     if enable_thinking:
         # The template owns the newlines around </think>; they are not part of
         # reasoning_content or visible content, but remain in Session tokens.
         reasoning = reasoning.rstrip()
         content = content.lstrip()
     return reasoning, content
+
+
+def stable_stream_text(text: str) -> str:
+    """Hold an incomplete UTF-8 suffix until later tokens finish it."""
+    return text.rstrip("\ufffd")
 
 
 def sse(data) -> str:
@@ -684,6 +693,8 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                         app.state.tokenizer, output_ids, parsed["enable_thinking"],
                         parsed["think_end_token"]
                     )
+                    reasoning = stable_stream_text(reasoning)
+                    content = stable_stream_text(content)
                     visible_content, stopped = stop_view(content, parsed["stops"])
                     if not reasoning.startswith(published_reasoning):
                         raise EngineError("tokenizer rewrote streamed reasoning")

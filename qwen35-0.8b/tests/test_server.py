@@ -8,7 +8,7 @@ from server import CHAT_TEMPLATE, Config, LogHighlighter, create_app
 
 
 class FakeTokenizer:
-    pieces = {20: "你", 21: "好", 22: "！", 99: ""}
+    pieces = {20: "你", 21: "好", 22: "！", 30: "", 31: "", 99: ""}
 
     def __init__(self):
         self.chat_template = None
@@ -23,6 +23,12 @@ class FakeTokenizer:
         return [10, 11] if add_generation_prompt else [10]
 
     def decode(self, ids, **_kwargs):
+        # Simulate a byte-level tokenizer: token 30 is incomplete by itself,
+        # then token 31 completes the same Unicode character.
+        if ids == [30]:
+            return "b\ufffd"
+        if ids == [30, 31]:
+            return "bǐ"
         return "".join(self.pieces[token] for token in ids)
 
     def convert_tokens_to_ids(self, token):
@@ -241,6 +247,20 @@ class ServerTest(unittest.TestCase):
         self.assertIn('"reasoning_content":"你"', response.text)
         self.assertIn('"content":"好"', response.text)
         self.assertIn('"content":"！"', response.text)
+
+    def test_streaming_holds_incomplete_utf8_until_next_token(self):
+        self.manager.sessions[0].output_tokens = [30, 31, 99, 21]
+        response = self.request(
+            max_completion_tokens=4,
+            stream=True,
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn('"reasoning_content":"b"', response.text)
+        self.assertIn('"reasoning_content":"ǐ"', response.text)
+        self.assertNotIn("\ufffd", response.text)
+        self.assertNotIn("tokenizer rewrote", response.text)
+        self.assertTrue(response.text.endswith("data: [DONE]\n\n"))
 
     def test_streaming_contract(self):
         with self.assertLogs("qwen35.runtime", level="INFO") as logs:
