@@ -468,7 +468,8 @@ void ffn(const Layer& layer, const FP32* input, Work& work, FP32* out) {
 
 // 这是完整的单 token forward。调用一次只处理一个 token；
 // prompt 的 prefill 只是对 prompt ids 连续调用它，decode 则在每次 argmax 后再调用。
-void forward(const Model& model, State& state, int token, Work& work) {
+void forward(const Model& model, State& state, int token, Work& work,
+             bool compute_logits = true) {
     if (state.position >= state.capacity) die("session context is full");
     LOG_DEBUG("forward started token=%d position=%d", token, state.position);
     embed(model.embedding, token, work.hidden.data());  // token id -> hidden[H]。
@@ -490,13 +491,15 @@ void forward(const Model& model, State& state, int token, Work& work) {
         ffn(layer, work.normalized.data(), work, work.branch.data());
         residual_add(work.hidden.data(), work.branch.data(), work.hidden.data());
     }
-    rms(work.hidden.data(), model.final_norm, H, work.normalized.data());
-    LOG_DEBUG("final norm completed");
-    // lm_head：为词表的每一个候选 token 各算一个 logit。这里 W 直接重用 model.embedding：
-    // logits[v] = dot(final_hidden, embedding[v])。这叫 tied embedding，避免再存一份 [V,H]
-    // 输出矩阵；它与开头 embed() 的“按 token id 取同一张表的一行”正好相对。
-    mv({model.embedding, V, H}, work.normalized.data(), work.logits.data());
-    LOG_DEBUG("lm head completed logits=%d", V);
+    if (compute_logits) {
+        rms(work.hidden.data(), model.final_norm, H, work.normalized.data());
+        LOG_DEBUG("final norm completed");
+        // lm_head：为词表的每一个候选 token 各算一个 logit。这里 W 直接重用 model.embedding：
+        // logits[v] = dot(final_hidden, embedding[v])。这叫 tied embedding，避免再存一份 [V,H]
+        // 输出矩阵；它与开头 embed() 的“按 token id 取同一张表的一行”正好相对。
+        mv({model.embedding, V, H}, work.normalized.data(), work.logits.data());
+        LOG_DEBUG("lm head completed logits=%d", V);
+    }
     ++state.position;
     LOG_DEBUG("forward completed token=%d position=%d", token, state.position);
 }
@@ -665,7 +668,9 @@ struct LoadedModel {
 // work.logits 预测最后一个 prompt token 后的下一个 token。
 void prefill(const Model& model, State& state, const std::vector<int>& tokens, Work& work) {
     if (tokens.empty()) die("prefill prompt is empty");
-    for (int token : tokens) forward(model, state, token, work);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        forward(model, state, tokens[i], work, i + 1 == tokens.size());
+    }
 }
 
 // decode 同样只是一个有语义的名字：token 是上一步采样得到、重新喂给模型的 id。
@@ -801,16 +806,16 @@ struct q35_session {
         logits_valid = false;
     }
 
-    void append(int token) {
+    void append(int token, bool compute_logits = true) {
         if (engine->mock) {
             const int previous_token = tokens.empty() ? -1 : tokens.back();
             qwen35::mock_forward(state, previous_token, token, work,
                                  engine->mock_logits);
         } else {
-            qwen35::forward(engine->model->model, state, token, work);
+            qwen35::forward(engine->model->model, state, token, work, compute_logits);
         }
         tokens.push_back(token);
-        logits_valid = true;
+        logits_valid = compute_logits || engine->mock;
     }
 
     PrefixMatch match_prefix(const int* request, int count) const {
@@ -1048,7 +1053,10 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
                  "cache_hit_tokens=%d to_prefill_tokens=%d",
                  mode, count, reused, tokens_to_prefill);
         for (int index = reused; index < count; ++index) {
-            session->append(tokens[index]);
+            // Intermediate prompt tokens update State but do not need a full V-sized
+            // lm_head. A checkpoint and the final prompt position do need logits.
+            const bool need_logits = index + 1 == checkpoint_at || index + 1 == count;
+            session->append(tokens[index], need_logits);
             if (session->state.position == checkpoint_at) {
                 session->save_checkpoint();
                 checkpoint_saved = true;
