@@ -50,6 +50,8 @@ void q35_log_set_callback(q35_log_callback callback,
 
 typedef struct {
     const char* bin_path;
+    /* Use lightweight State updates and a fixed logits bank instead of model math. */
+    bool mock;
 } q35_engine_options;
 
 int q35_engine_create(const q35_engine_options* options, q35_engine** out,

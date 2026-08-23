@@ -70,6 +70,18 @@ cd qwen35-0.8b
 make run
 ```
 
+调试 Session、cache、checkpoint、sampling 和 HTTP 时，可以跳过耗时的模型数学：
+
+```sh
+make run MOCK=1
+```
+
+Mock 仍加载并校验真实 packed weights，也使用真实 tokenizer、Session State 形状、KV cache、
+完整 `logits[V]`、argmax/sample、stop token 和流式返回。区别仅在于单 token forward 轻量更新
+State，并按当前输入 token 从启动时准备好的 logits bank 中选择一行；它不区分 prefill 和
+decode。任意非数字 token 按 `position % 10` 映射到数字，随后稳定执行
+`0 -> 1 -> ... -> 9 -> stop`。
+
 另开一个终端发送最小流式请求：
 
 ```sh

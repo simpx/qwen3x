@@ -8,10 +8,12 @@ LIBRARY ?= $(BUILD)/libqwen35.so
 BIN ?= $(BUILD)/qwen35-0.8b.bin
 SERVER ?= http://127.0.0.1:8000
 LOG_LEVEL ?= debug
+MOCK ?= 0
+MOCK_ARG := $(if $(filter 1 true yes,$(MOCK)),--mock,)
 
 CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic
 
-.PHONY: all sync sync-prod weights unit-test native-test test e2e run chat clean
+.PHONY: all sync sync-prod weights unit-test mock-test native-test test e2e run chat clean
 
 all: $(LIBRARY)
 
@@ -37,13 +39,16 @@ unit-test:
 native-test: $(LIBRARY) $(BIN)
 	PYTHONPATH=. $(PYTHON) tests/test_native.py --library "$(LIBRARY)" --bin "$(BIN)"
 
-test: unit-test native-test
+mock-test: $(LIBRARY) $(BIN)
+	PYTHONPATH=. $(PYTHON) tests/test_mock.py --library "$(LIBRARY)" --bin "$(BIN)"
+
+test: unit-test mock-test native-test
 
 e2e: $(LIBRARY) $(BIN)
 	PYTHONPATH=. $(PYTHON) tests/test_e2e.py --tokenizer "$(TOKENIZER)" --library "$(LIBRARY)" --bin "$(BIN)"
 
 run: $(LIBRARY) $(BIN)
-	$(PYTHON_PROD) server.py --tokenizer "$(TOKENIZER)" --library "$(LIBRARY)" --bin "$(BIN)" --log-level "$(LOG_LEVEL)"
+	$(PYTHON_PROD) server.py --tokenizer "$(TOKENIZER)" --library "$(LIBRARY)" --bin "$(BIN)" --log-level "$(LOG_LEVEL)" $(MOCK_ARG)
 
 chat:
 	curl --silent --show-error --no-buffer "$(SERVER)/v1/chat/completions" \

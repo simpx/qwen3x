@@ -61,6 +61,11 @@ constexpr int DQK = KH * KD, DO = VH * VD, DQKV = 2 * DQK + DO;
 constexpr int MAX_CONTEXT = 262144;
 constexpr uint32_t MODEL_FORMAT_VERSION = 1;
 constexpr int END_OF_TEXT_TOKEN = 248044, IM_END_TOKEN = 248046;
+// Qwen token ids 15..24 decode as the digits 0..9. Each row predicts its digit;
+// the final row predicts stop after the input token 9.
+constexpr std::array<int, 11> MOCK_TARGET_TOKENS = {
+    15, 16, 17, 18, 19, 20, 21, 22, 23, 24, IM_END_TOKEN,
+};
 using FP32 = float;
 using BF16 = uint16_t;
 static_assert(sizeof(FP32) == 4 && std::numeric_limits<FP32>::is_iec559);
@@ -463,6 +468,48 @@ void forward(const Model& model, State& state, int token, Work& work) {
     LOG_DEBUG("forward completed token=%d position=%d", token, state.position);
 }
 
+// Mock forward has the same one-token contract as forward(), but does no model
+// math. It keeps State shapes and position valid, then selects one prebuilt
+// logits[V] row from the current input token. It neither knows nor needs to
+// know whether its caller is prefill (sync loop) or decode (one eval call).
+void mock_forward(State& state, int token, Work& work,
+                  const std::vector<std::vector<FP32>>& logits_bank) {
+    if (state.position >= state.capacity) die("session context is full");
+    if (logits_bank.empty()) die("mock logits bank is empty");
+    LOG_DEBUG("mock forward started token=%d position=%d", token, state.position);
+
+    for (int layer = 0; layer < N; ++layer) {
+        if (layer % 4 != 3) {
+            // Touch one deterministic element in each fixed DeltaNet State.
+            // Checkpoint save/restore therefore still moves meaningful data,
+            // without running the expensive DeltaNet equations.
+            auto& conv = state.conv_history[layer];
+            auto& memory = state.delta_memory[layer];
+            const size_t marker = static_cast<size_t>(state.position) +
+                                  static_cast<size_t>(token);
+            conv[marker % conv.size()] = static_cast<FP32>(token);
+            memory[marker % memory.size()] = static_cast<FP32>(token);
+        } else {
+            // Preserve the real attention cache shape [T,KVH,AD].
+            state.key_cache[layer].resize(state.key_cache[layer].size() + KV_WIDTH);
+            state.value_cache[layer].resize(state.value_cache[layer].size() + KV_WIDTH);
+        }
+    }
+
+    ++state.position;
+    // A non-digit selects only rows 0..9, so prefill can never directly
+    // produce stop. position is already part of State/checkpoint and needs no
+    // extra Mock cursor or hash.
+    size_t row = static_cast<size_t>(state.position % 10);
+    if (token >= MOCK_TARGET_TOKENS.front() && token <= MOCK_TARGET_TOKENS[9]) {
+        // digit 0 -> row for 1, ..., digit 8 -> row for 9, digit 9 -> stop row.
+        row = static_cast<size_t>(token - MOCK_TARGET_TOKENS.front() + 1);
+    }
+    std::copy(logits_bank[row].begin(), logits_bank[row].end(), work.logits.begin());
+    LOG_DEBUG("mock forward completed token=%d position=%d logits_row=%zu target=%d",
+              token, state.position, row, MOCK_TARGET_TOKENS[row]);
+}
+
 // 到这里模型数学已经结束。以下 File/Reader 只把 packed 文件绑定成上面的 Model 指针。
 // packed 格式是 [magic 8][version u32][reserved u32]，随后每个 tensor 从 64-byte 边界开始。
 struct File {
@@ -654,6 +701,8 @@ int sample(const std::vector<FP32>& logits, FP32 temperature, int top_k, FP32 to
 
 struct q35_engine {
     std::unique_ptr<qwen35::LoadedModel> model;
+    bool mock = false;
+    std::vector<std::vector<qwen35::FP32>> mock_logits;
 };
 
 namespace {
@@ -713,7 +762,11 @@ struct q35_session {
     }
 
     void append(int token) {
-        qwen35::forward(engine->model->model, state, token, work);
+        if (engine->mock) {
+            qwen35::mock_forward(state, token, work, engine->mock_logits);
+        } else {
+            qwen35::forward(engine->model->model, state, token, work);
+        }
         tokens.push_back(token);
         logits_valid = true;
     }
@@ -837,6 +890,16 @@ int q35_engine_create(const q35_engine_options* options, q35_engine** out,
         const double elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
         LOG_INFO("model load completed elapsed=%.3fs", elapsed);
+        engine->mock = options->mock;
+        if (engine->mock) {
+            engine->mock_logits.resize(qwen35::MOCK_TARGET_TOKENS.size());
+            for (size_t row = 0; row < engine->mock_logits.size(); ++row) {
+                auto& logits = engine->mock_logits[row];
+                logits.assign(qwen35::V, -1000.0f);
+                logits[qwen35::MOCK_TARGET_TOKENS[row]] = 1000.0f;
+            }
+            LOG_INFO("mock compute enabled logits_rows=%zu", engine->mock_logits.size());
+        }
         LOG_DEBUG("model ready layers=%d hidden=%d vocab=%d", qwen35::N, qwen35::H,
                   qwen35::V);
         *out = engine.release();

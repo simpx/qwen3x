@@ -212,6 +212,7 @@ class Config:
     max_request_bytes: int = 1024 * 1024
     request_timeout: float = 600.0
     native_log_level: int = Q35_LOG_INFO
+    mock: bool = False
 
 
 @dataclass
@@ -395,7 +396,7 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
             )
             try:
                 engine = await asyncio.to_thread(
-                    Engine, config.library_path, config.bin_path
+                    Engine, config.library_path, config.bin_path, mock=config.mock
                 )
                 manager = await asyncio.to_thread(
                     engine.create_session_manager, config.slot_count, config.max_context_tokens
@@ -406,8 +407,9 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
         app.state.tokenizer = tokenizer
         app.state.manager = manager
         app.state.engine = engine if engine is not None else manager.engine
-        LOG.info("server ready model=%s slots=%d context=%d", config.served_model_name,
-                 config.slot_count, config.max_context_tokens)
+        LOG.info("server ready model=%s slots=%d context=%d compute=%s",
+                 config.served_model_name, config.slot_count, config.max_context_tokens,
+                 "mock" if config.mock else "real")
         try:
             yield
         finally:
@@ -684,6 +686,8 @@ def parse_args():
     parser.add_argument("--max-context-tokens", type=int, default=4096)
     parser.add_argument("--default-max-tokens", type=int, default=128)
     parser.add_argument("--request-timeout", type=float, default=600.0)
+    parser.add_argument("--mock", action="store_true",
+                        help="replace model math with a fixed logits bank")
     parser.add_argument("--log-level", choices=PYTHON_LOG_LEVELS, default="debug")
     parser.add_argument("--log-file", type=Path, default=HERE / "logs/qwen35.log")
     parser.add_argument("--log-max-mb", type=int, default=20)
@@ -711,6 +715,7 @@ def main():
         default_max_tokens=args.default_max_tokens,
         request_timeout=args.request_timeout,
         native_log_level=NATIVE_LOG_LEVELS[args.log_level],
+        mock=args.mock,
     )
     uvicorn.run(create_app(config), host=args.host, port=args.port, workers=1,
                 log_level=args.log_level, proxy_headers=False,

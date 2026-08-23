@@ -41,6 +41,7 @@ _NativeLogCallback = ctypes.CFUNCTYPE(
 class _EngineOptions(ctypes.Structure):
     _fields_ = [
         ("bin_path", ctypes.c_char_p),
+        ("mock", ctypes.c_bool),
     ]
 
 
@@ -167,7 +168,7 @@ def _check(result: int, error) -> None:
 class Engine:
     """One loaded model. Sessions borrow its mmap'd read-only weights."""
 
-    def __init__(self, library_path: Path | str, bin_path: Path | str):
+    def __init__(self, library_path: Path | str, bin_path: Path | str, *, mock: bool = False):
         library_path = Path(library_path).resolve()
         bin_path = Path(bin_path).resolve()
         if not library_path.is_file():
@@ -184,6 +185,7 @@ class Engine:
 
         options = _EngineOptions(
             bin_path=str(bin_path).encode(),
+            mock=mock,
         )
         _call(
             self._library.q35_engine_create,
