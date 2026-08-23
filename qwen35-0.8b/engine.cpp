@@ -62,13 +62,13 @@ constexpr int MAX_CONTEXT = 262144;
 constexpr uint32_t MODEL_FORMAT_VERSION = 1;
 constexpr int END_OF_TEXT_TOKEN = 248044, IM_END_TOKEN = 248046;
 constexpr int THINK_START_TOKEN = 248068, THINK_END_TOKEN = 248069;
-constexpr int NEWLINE_TOKEN = 198;
+constexpr int NEWLINE_TOKEN = 198, DOUBLE_NEWLINE_TOKEN = 271;
 constexpr int MOCK_REASONING_TOKEN = 26003;  // "think"
 // Rows 0..9 predict digits 0..9; row 10 predicts stop after digit 9.
 // The final rows reproduce the exact separators emitted by the chat template.
 constexpr std::array<int, 15> MOCK_TARGET_TOKENS = {
     15, 16, 17, 18, 19, 20, 21, 22, 23, 24, IM_END_TOKEN,
-    MOCK_REASONING_TOKEN, NEWLINE_TOKEN, THINK_END_TOKEN, 271,
+    MOCK_REASONING_TOKEN, NEWLINE_TOKEN, THINK_END_TOKEN, DOUBLE_NEWLINE_TOKEN,
 };
 using FP32 = float;
 using BF16 = uint16_t;

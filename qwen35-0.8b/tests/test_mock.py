@@ -60,7 +60,7 @@ def main():
         thinking.eval(198)
         assert thinking.argmax() == 248069  # </think>
         thinking.eval(248069)
-        assert thinking.argmax() == 271  # \n\n
+        assert thinking.argmax() == 271  # DOUBLE_NEWLINE_TOKEN: \n\n
         thinking.eval(271)
         assert 15 <= thinking.argmax() <= 24
 
