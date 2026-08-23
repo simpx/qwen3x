@@ -10,9 +10,9 @@ from server import Config, LogHighlighter, create_app
 class FakeTokenizer:
     texts = {20: "你", 21: "你好", 22: "你好！"}
 
-    def apply_chat_template(self, messages, **_kwargs):
+    def apply_chat_template(self, messages, *, add_generation_prompt, **_kwargs):
         assert messages[-1]["role"] == "user"
-        return [10, 11]
+        return [10, 11] if add_generation_prompt else [10]
 
     def decode(self, ids, **_kwargs):
         return self.texts[ids[-1]] if ids else ""
@@ -24,11 +24,14 @@ class FakeSession:
         self.step = 0
         self.sync_count = 0
         self.cached_tokens = 0
+        self.checkpoint_at = None
 
-    def sync(self, tokens):
+    def sync(self, tokens, checkpoint_at):
         assert tokens == [10, 11]
+        assert checkpoint_at == 1
         self.sync_count += 1
         self.step = 0
+        self.checkpoint_at = checkpoint_at
         return self.cached_tokens
 
     def argmax(self):

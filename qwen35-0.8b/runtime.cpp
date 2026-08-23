@@ -125,7 +125,7 @@ int q35_session_manager_acquire(q35_session_manager* manager,
         const char* selected_by = nullptr;
         int matched_tokens = 0;
 
-        // 比较每个空闲 Session 的 live/anchor；
+        // 比较每个空闲 Session 的 live/checkpoint；
         // reusable 是它能完整复用的 token 数，选择其中最大的一个。
         int best = 0;
         for (SessionEntry& entry : manager->entries) {

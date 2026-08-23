@@ -684,7 +684,7 @@ struct Checkpoint {
 struct PrefixMatch {
     int common = 0;
     int reused = 0;
-    bool use_anchor = false;
+    bool use_checkpoint = false;
 };
 
 }  // namespace
@@ -695,8 +695,8 @@ struct q35_session {
     qwen35::Work work;
     std::vector<int> tokens;
     std::vector<int> sample_order;
-    // live State 是当前点；anchor 是唯一额外保存在内存中的点。
-    Checkpoint anchor;
+    // live State 是当前点；checkpoint 是唯一额外保存在内存中的点。
+    Checkpoint checkpoint;
     bool logits_valid = false;
 
     q35_session(q35_engine* owner, int context_size)
@@ -708,7 +708,7 @@ struct q35_session {
     void reset() {
         state.reset();
         tokens.clear();
-        anchor.clear();
+        checkpoint.clear();
         logits_valid = false;
     }
 
@@ -725,63 +725,63 @@ struct q35_session {
         const int live = static_cast<int>(tokens.size());
         if (live > 0 && match.common == live) {
             match.reused = live;
-        } else if (anchor.valid && match.common >= anchor.position) {
-            // anchor 对应 live 的前 anchor.position 个 token，因此无需再次扫描。
-            match.reused = anchor.position;
-            match.use_anchor = true;
+        } else if (checkpoint.valid && match.common >= checkpoint.position) {
+            // checkpoint 对应 live 的前 checkpoint.position 个 token。
+            match.reused = checkpoint.position;
+            match.use_checkpoint = true;
         } else {
-            // live 和 anchor 都不是 request 的完整前缀，只能从 token 0 重新计算。
+            // live 和 checkpoint 都不是 request 的完整前缀。
             match.reused = 0;
-            match.use_anchor = false;
+            match.use_checkpoint = false;
         }
         return match;
     }
 
-    void save_anchor() {
-        anchor.valid = false;
-        anchor.position = state.position;
+    void save_checkpoint() {
+        checkpoint.valid = false;
+        checkpoint.position = state.position;
         for (int layer = 0; layer < qwen35::N; ++layer) {
             if (layer % 4 == 3) continue;
-            anchor.conv_history[layer] = state.conv_history[layer];
-            anchor.delta_memory[layer] = state.delta_memory[layer];
+            checkpoint.conv_history[layer] = state.conv_history[layer];
+            checkpoint.delta_memory[layer] = state.delta_memory[layer];
         }
-        anchor.logits = work.logits;
-        anchor.valid = true;
-        LOG_DEBUG("anchor saved position=%d", anchor.position);
+        checkpoint.logits = work.logits;
+        checkpoint.valid = true;
+        LOG_DEBUG("checkpoint saved position=%d", checkpoint.position);
     }
 
-    void restore_anchor() {
-        if (!anchor.valid) throw std::runtime_error("anchor is invalid");
+    void restore_checkpoint() {
+        if (!checkpoint.valid) throw std::runtime_error("checkpoint is invalid");
         for (int layer = 0; layer < qwen35::N; ++layer) {
             if (layer % 4 != 3) {
-                std::copy(anchor.conv_history[layer].begin(),
-                          anchor.conv_history[layer].end(),
+                std::copy(checkpoint.conv_history[layer].begin(),
+                          checkpoint.conv_history[layer].end(),
                           state.conv_history[layer].begin());
-                std::copy(anchor.delta_memory[layer].begin(),
-                          anchor.delta_memory[layer].end(),
+                std::copy(checkpoint.delta_memory[layer].begin(),
+                          checkpoint.delta_memory[layer].end(),
                           state.delta_memory[layer].begin());
                 continue;
             }
-            // anchor 始终是 live 时间线的祖先，所以它的 Attention KV 已经位于 vector 前缀。
+            // checkpoint 是 live 时间线的祖先，Attention KV 已位于 vector 前缀。
             // position 是 token 数；扁平 KV vector 的 shape 是 [T,KVH,AD]，
             // resize() 需要的是 FP32 元素数，因此是 T * (KVH*AD)。
             const size_t kv_elements =
-                static_cast<size_t>(anchor.position) * qwen35::KV_WIDTH;
+                static_cast<size_t>(checkpoint.position) * qwen35::KV_WIDTH;
             if (state.key_cache[layer].size() < kv_elements ||
                 state.value_cache[layer].size() < kv_elements) {
-                throw std::runtime_error("attention cache is shorter than anchor");
+                throw std::runtime_error("attention cache is shorter than checkpoint");
             }
             state.key_cache[layer].resize(kv_elements);
             state.value_cache[layer].resize(kv_elements);
         }
-        state.position = anchor.position;
-        if (tokens.size() < static_cast<size_t>(anchor.position)) {
-            throw std::runtime_error("token history is shorter than anchor");
+        state.position = checkpoint.position;
+        if (tokens.size() < static_cast<size_t>(checkpoint.position)) {
+            throw std::runtime_error("token history is shorter than checkpoint");
         }
-        tokens.resize(static_cast<size_t>(anchor.position));
-        std::copy(anchor.logits.begin(), anchor.logits.end(), work.logits.begin());
+        tokens.resize(static_cast<size_t>(checkpoint.position));
+        std::copy(checkpoint.logits.begin(), checkpoint.logits.end(), work.logits.begin());
         logits_valid = true;
-        LOG_DEBUG("anchor restored position=%d", anchor.position);
+        LOG_DEBUG("checkpoint restored position=%d", checkpoint.position);
     }
 };
 
@@ -877,24 +877,37 @@ int q35_session_reset(q35_session* session,
 }
 
 int q35_session_sync(q35_session* session, const int* tokens, int count,
-                     int* cached_tokens, char* err, size_t errlen) {
+                     int checkpoint_at, int* cached_tokens,
+                     char* err, size_t errlen) {
     if (cached_tokens) *cached_tokens = 0;
     return guard(err, errlen, [&] {
         require(session, "session is null");
         require(tokens, "tokens pointer is null");
         require(count > 0, "token sequence is empty");
         require(count <= session->state.capacity, "token sequence exceeds session context");
+        require(checkpoint_at == -1 || (checkpoint_at > 0 && checkpoint_at <= count),
+                "checkpoint_at must be -1 or in [1,count]");
         for (int index = 0; index < count; ++index) {
             require(tokens[index] >= 0 && tokens[index] < qwen35::V,
                     "token is outside vocabulary");
         }
 
         const int live = static_cast<int>(session->tokens.size());
-        const PrefixMatch match = session->match_prefix(tokens, count);
-        const int reused = match.reused;
+        PrefixMatch match = session->match_prefix(tokens, count);
+        int reused = match.reused;
+        // 如果要保存的位置已经被 live 跨过，只有现成的同位置
+        // checkpoint 还能使用。否则必须从 0 forward，才能拿到那一刻的 State。
+        const bool checkpoint_already_saved =
+            checkpoint_at > 0 && session->checkpoint.valid &&
+            session->checkpoint.position == checkpoint_at &&
+            match.common >= checkpoint_at;
+        if (checkpoint_at >= 0 && checkpoint_at < reused && !checkpoint_already_saved) {
+            reused = 0;
+            match.use_checkpoint = false;
+        }
         const int tokens_to_prefill = count - reused;
         const char* source = reused == 0 ? "from_start" :
-                             match.use_anchor ? "anchor" : "live";
+                             match.use_checkpoint ? "checkpoint" : "live";
         const char* mode = tokens_to_prefill == 0 ? "cache_only" : "append_suffix";
         if (cached_tokens) *cached_tokens = reused;
         LOG_DEBUG("prompt compared session_tokens=%d prompt_tokens=%d "
@@ -913,15 +926,27 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
                  "prompt_tokens=%d cached_tokens=%d tokens_to_prefill=%d",
                  source, mode, live, count, reused, tokens_to_prefill);
         const auto started = std::chrono::steady_clock::now();
-        if (match.use_anchor) {
-            session->restore_anchor();
+        if (match.use_checkpoint) {
+            session->restore_checkpoint();
         } else if (reused == 0) {
             session->reset();
         }
-        for (int index = reused; index < count; ++index) session->append(tokens[index]);
+        bool checkpoint_saved = checkpoint_already_saved;
+        if (checkpoint_at == reused && checkpoint_at > 0 && !checkpoint_saved) {
+            session->save_checkpoint();
+            checkpoint_saved = true;
+        }
+        for (int index = reused; index < count; ++index) {
+            session->append(tokens[index]);
+            if (session->state.position == checkpoint_at) {
+                session->save_checkpoint();
+                checkpoint_saved = true;
+            }
+        }
         // 到这里 prompt 中缺少的 token 已全部 forward，prefill 已完成，decode 尚未开始。
-        // Session 不区分阶段；这里只是选择在 sync 返回前保存新的 anchor。
-        session->save_anchor();
+        if (checkpoint_at > 0 && !checkpoint_saved) {
+            throw std::runtime_error("checkpoint position was not evaluated");
+        }
         const double elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
         LOG_INFO("prefill completed position=%d cached_tokens=%d prefilled_tokens=%d "

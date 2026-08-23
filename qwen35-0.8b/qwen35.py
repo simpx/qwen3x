@@ -73,7 +73,7 @@ def _configure(library: ctypes.CDLL) -> None:
     library.q35_session_reset.argtypes = [void_p, char_p, size_t]
     library.q35_session_reset.restype = ctypes.c_int
     library.q35_session_sync.argtypes = [
-        void_p, int_p, ctypes.c_int, int_p, char_p, size_t
+        void_p, int_p, ctypes.c_int, ctypes.c_int, int_p, char_p, size_t
     ]
     library.q35_session_sync.restype = ctypes.c_int
     library.q35_session_eval.argtypes = [void_p, ctypes.c_int, char_p, size_t]
@@ -262,10 +262,12 @@ class Session:
             self._require_open()
             return int(self._engine._library.q35_session_position(self._handle))
 
-    def sync(self, tokens: Iterable[int]) -> int:
+    def sync(self, tokens: Iterable[int], checkpoint_at: int | None = None) -> int:
         values = [int(token) for token in tokens]
         if not values:
             raise EngineError("token sequence is empty")
+        if checkpoint_at is None:
+            checkpoint_at = len(values)
         native = (ctypes.c_int * len(values))(*values)
         cached_tokens = ctypes.c_int()
         with self._lock:
@@ -275,6 +277,7 @@ class Session:
                 self._handle,
                 native,
                 len(values),
+                int(checkpoint_at),
                 ctypes.byref(cached_tokens),
             )
             return int(cached_tokens.value)

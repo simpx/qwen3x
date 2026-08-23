@@ -288,12 +288,22 @@ def parse_request(body, config: Config, tokenizer):
 
     messages = normalize_messages(body.get("messages"))
     try:
+        stable_ids = tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=False, return_dict=False
+        )
         prompt_ids = tokenizer.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True, return_dict=False
         )
     except Exception as error:
         raise APIError(400, f"chat template rejected messages: {error}", param="messages") from error
+    stable_ids = [int(token) for token in stable_ids]
     prompt_ids = [int(token) for token in prompt_ids]
+    if not stable_ids or prompt_ids[:len(stable_ids)] != stable_ids:
+        raise APIError(
+            500,
+            "chat template generation prompt is not an append-only suffix",
+            code="invalid_chat_template",
+        )
 
     maximum = body.get("max_completion_tokens", body.get("max_tokens", config.default_max_tokens))
     if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
@@ -318,6 +328,7 @@ def parse_request(body, config: Config, tokenizer):
 
     return {
         "prompt_ids": prompt_ids,
+        "checkpoint_at": len(stable_ids),
         "max_tokens": maximum,
         "stops": stops,
         "stream": stream,
@@ -510,7 +521,9 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
 
         async def generate_tokens():
             prefill_started = time.monotonic()
-            cached_tokens = await asyncio.to_thread(session.sync, parsed["prompt_ids"])
+            cached_tokens = await asyncio.to_thread(
+                session.sync, parsed["prompt_ids"], parsed["checkpoint_at"]
+            )
             timing.prefill_seconds = time.monotonic() - prefill_started
             timing.decode_started = time.monotonic()
             LOG.info("decode started completion_id=%s max_tokens=%d",
@@ -576,7 +589,7 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                                        {"role": "assistant", "content": ""}))
                 prefill_started = time.monotonic()
                 cached_tokens = await asyncio.to_thread(
-                    session.sync, parsed["prompt_ids"]
+                    session.sync, parsed["prompt_ids"], parsed["checkpoint_at"]
                 )
                 timing.prefill_seconds = time.monotonic() - prefill_started
                 timing.decode_started = time.monotonic()

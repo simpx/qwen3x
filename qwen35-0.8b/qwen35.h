@@ -70,12 +70,16 @@ void q35_session_destroy(q35_session* session);
 int q35_session_reset(q35_session* session, char* err, size_t errlen);
 
 /*
- * Bring the Session to exactly tokens[count]. If its live State or saved anchor
+ * Bring the Session to exactly tokens[count]. If its live State or saved checkpoint
  * is a prefix, only the new suffix runs through forward; otherwise State is
  * reset and the complete sequence is prefetched again. cached_tokens receives
  * the number of prompt tokens whose existing State was reused; it may be NULL.
+ * After tokens[0:checkpoint_at] have been evaluated, save that State as the
+ * Session's additional checkpoint. checkpoint_at must be in [1,count], or -1
+ * to keep the existing checkpoint without creating a new one.
  */
 int q35_session_sync(q35_session* session, const int* tokens, int count,
+                     int checkpoint_at,
                      int* cached_tokens,
                      char* err, size_t errlen);
 

@@ -57,6 +57,15 @@ def main():
         assert abs(restored_logits[case["next_token"]] -
                    logits[case["next_token"]]) <= reference["max_abs_error"]
 
+        # checkpoint_at may be earlier than the end of prefill. Engine must
+        # capture the State while forward crosses that exact token boundary.
+        early = engine.create_session(64)
+        checkpoint_at = len(case["prefill_ids"]) - 1
+        assert early.sync(case["prefill_ids"], checkpoint_at) == 0
+        early.eval(case["decode_ids"][0])
+        assert early.sync(case["prefill_ids"][:checkpoint_at]) == checkpoint_at
+        assert early.position == checkpoint_at
+
         # Append-only sync still evaluates just the suffix.
         assert first.sync(extended) == len(case["prefill_ids"])
         assert first.position == len(extended)
@@ -82,7 +91,7 @@ def main():
             managed.eval(token)
         manager.release(managed, keep=True)
 
-        # The saved anchor makes this Session the longest prefix match even
+        # The saved checkpoint makes this Session the longest prefix match even
         # though its live timeline is longer than the request.
         managed = manager.acquire(case["prefill_ids"])
         assert managed.position == len(extended)
@@ -98,7 +107,7 @@ def main():
             managed.eval(token)
         manager.release(managed, keep=True)
 
-        # Prefix lookup again finds that same anchor without an external ID.
+        # Prefix lookup again finds that same checkpoint without an external ID.
         reused = manager.acquire(case["prefill_ids"])
         assert reused.position == len(extended)
         assert reused.sync(case["prefill_ids"]) == len(case["prefill_ids"])
@@ -124,7 +133,7 @@ def main():
     assert any("session released" in message for message in messages)
     assert any("cache hit" in message for message in messages)
     assert any("cache miss" in message for message in messages)
-    assert any("source=anchor" in message for message in messages)
+    assert any("source=checkpoint" in message for message in messages)
     assert any("engine closing" in message for message in messages)
     assert any("session created" in message for message in messages)
     assert any(file == "engine.cpp" and line > 0 for _, file, line, _ in events)
