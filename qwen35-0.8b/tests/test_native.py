@@ -41,15 +41,25 @@ def main():
         logits = first.copy_logits()
         assert abs(logits[case["next_token"]] - case["next_logit"]) <= reference["max_abs_error"]
 
-        # Append-only sync evaluates just the suffix.
+        # Decode advances the live point, while sync's prompt boundary remains
+        # available as this Session's second checkpoint.
         extended = case["prefill_ids"] + case["decode_ids"]
-        assert first.sync(extended) == len(case["prefill_ids"])
+        for token in case["decode_ids"]:
+            first.eval(token)
         assert first.position == len(extended)
 
-        # A shorter timeline cannot rewind DeltaNet, so sync rebuilds it exactly.
-        assert first.sync(case["prefill_ids"]) == 0
+        # A shorter request can restore the saved checkpoint without
+        # rebuilding DeltaNet from token zero.
+        assert first.sync(case["prefill_ids"]) == len(case["prefill_ids"])
         assert first.position == len(case["prefill_ids"])
         assert first.argmax() == case["next_token"]
+        restored_logits = first.copy_logits()
+        assert abs(restored_logits[case["next_token"]] -
+                   logits[case["next_token"]]) <= reference["max_abs_error"]
+
+        # Append-only sync still evaluates just the suffix.
+        assert first.sync(extended) == len(case["prefill_ids"])
+        assert first.position == len(extended)
 
         # Independent Session State must remain untouched.
         assert second.position == 0
@@ -69,23 +79,30 @@ def main():
         manager = engine.create_session_manager(2, 64)
         managed = manager.acquire("agent-a", case["prefill_ids"])
         assert managed.sync(case["prefill_ids"]) == 0
+        for token in case["decode_ids"]:
+            managed.eval(token)
         manager.release(managed, keep=True)
 
+        # A bound session_id selects the same Session first; sync then chooses
+        # its saved checkpoint from the two actual token timelines.
         managed = manager.acquire("agent-a", case["prefill_ids"])
-        assert managed.position == len(case["prefill_ids"])
+        assert managed.position == len(extended)
         try:
             manager.acquire("agent-a", case["prefill_ids"])
             raise AssertionError("busy named session was acquired twice")
         except SessionBusy:
             pass
+        assert managed.sync(case["prefill_ids"]) == len(case["prefill_ids"])
+        for token in case["decode_ids"]:
+            managed.eval(token)
         manager.release(managed, keep=True)
 
-        # Anonymous lookup can reuse the longest complete token prefix. Once
-        # reused anonymously, the old name is intentionally no longer bound.
-        anonymous = manager.acquire(None, case["prefill_ids"] + case["decode_ids"])
-        assert anonymous.position == len(case["prefill_ids"])
-        assert anonymous.sync(case["prefill_ids"] + case["decode_ids"]) \
-            == len(case["prefill_ids"])
+        # Anonymous lookup also considers both points. Here live is longer than
+        # the request, so only the saved checkpoint can match it.
+        # Anonymous reuse intentionally removes the old name binding.
+        anonymous = manager.acquire(None, case["prefill_ids"])
+        assert anonymous.position == len(extended)
+        assert anonymous.sync(case["prefill_ids"]) == len(case["prefill_ids"])
         manager.release(anonymous, keep=True)
         assert not manager.forget("agent-a")
         manager.close()
@@ -109,6 +126,7 @@ def main():
     assert any("session released" in message for message in messages)
     assert any("cache hit" in message for message in messages)
     assert any("cache miss" in message for message in messages)
+    assert any("source=anchor" in message for message in messages)
     assert any("engine closing" in message for message in messages)
     assert any("session created" in message for message in messages)
     assert any(file == "engine.cpp" and line > 0 for _, file, line, _ in events)

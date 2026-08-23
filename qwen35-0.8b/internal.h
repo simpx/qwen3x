@@ -9,6 +9,11 @@ namespace q35_internal {
 // next sync, eval or reset on this Session.
 const int* session_tokens(const q35_session* session, int* count);
 
+// Return the longest complete Session checkpoint that prefixes tokens.
+// Zero means this Session has no reusable checkpoint for the request.
+int session_reusable_prefix(const q35_session* session,
+                            const int* tokens, int count);
+
 // Format one log message and synchronously pass it to the host callback.
 void logf(q35_log_level level, const char* file, int line,
           const char* format, ...);

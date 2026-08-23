@@ -114,17 +114,22 @@ curl -X DELETE http://127.0.0.1:8000/v1/sessions/my-agent
 ```
 
 同一 `session_id` 的下一次请求会回到同一个 C++ Session。Runtime 仍发送完整 token 序列，
-`q35_session_sync()` 判断旧时间线是否是新序列的完整前缀：是则只 forward 新后缀；否则 reset
-并从头 rebuild。这与 GDN State 的约束一致，不假装支持任意位置回滚。
+每个 Session 当前有两个可命中点：`live` 是当前 State，`anchor` 是额外保存在内存中的 State。
+Session 不区分 prefill 和 decode；当前策略只是在每次 `sync()` 结束时更新 anchor。
+`q35_session_sync()` 用真实 token id 选择较长的完整前缀：命中 live 就继续 append，命中 anchor
+就恢复它，否则 reset 并从头 rebuild。
+
+保存 anchor 时只额外复制 DeltaNet 的 recurrent/conv state；Attention KV 本来就是按 token
+append 的，所以恢复时只截断到 checkpoint position，不额外复制一整份 KV。
 
 ## 当前边界
 
 - CPU BF16-weight / FP32-compute，支持 greedy、temperature 和 top-p sampling，text-only。
 - 固定 Session 数量；全部 BUSY 时返回 429，IDLE Session 按最长 prefix 或 LRU 重新绑定。
 - 中断只能在 token 边界发现；一次 CPU forward 尚不能抢占。
-- 没有共享的 prefix block、snapshot/disk cache、batching、vision、tools 或 MTP；当前 prefix 命中
-  是把一个完整 Session 重新交给请求，而不是让多个 Session 同时共享一份 State。
+- 没有跨 Session 共享的 prefix block、disk cache、batching、vision、tools 或 MTP；当前 prefix
+  命中是把一个完整 Session 重新交给请求，而不是让多个 Session 同时共享一份 State。
 - `session_id` 是本项目扩展，不是 Chat Completions 标准字段。
 
-下一步可以在不改变 C ABI 基本关系的前提下加入 snapshot 和 CUDA Engine。公共前缀以后可
+下一步可以在不改变 C ABI 基本关系的前提下加入 disk checkpoint 和 CUDA Engine。公共前缀以后可
 作为 pinned prefix 优化：Attention block 可共享，DeltaNet 起点 State 仍需复制给各 Session。

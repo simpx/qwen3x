@@ -54,7 +54,8 @@ constexpr int AH = 8, KVH = 2, AD = 256, RD = 64;
 // CK 是 causal depthwise convolution 的 kernel 宽度。
 constexpr int KH = 16, VH = 16, KD = 128, VD = 128, CK = 4;
 // 以下是经常一起出现的平铺宽度。DQKV 的布局固定为 [small_Q | small_K | V]。
-constexpr int AS = AH * AD, KVS = KVH * AD, DQK = KH * KD, DO = VH * VD, DQKV = 2 * DQK + DO;
+constexpr int AS = AH * AD, KV_WIDTH = KVH * AD;
+constexpr int DQK = KH * KD, DO = VH * VD, DQKV = 2 * DQK + DO;
 // checkpoint 的最大 position。每个 Session 在创建时选择不超过它的 context_size，
 // State/Work 只按该 Session 的实际上限分配，而不是无条件分配 262K。
 constexpr int MAX_CONTEXT = 262144;
@@ -223,8 +224,8 @@ struct State {
                 conv_history[layer].assign(static_cast<size_t>(DQKV) * (CK - 1), 0.0f);
                 delta_memory[layer].assign(static_cast<size_t>(VH) * KD * VD, 0.0f);
             } else {
-                key_cache[layer].reserve(static_cast<size_t>(capacity) * KVS);
-                value_cache[layer].reserve(static_cast<size_t>(capacity) * KVS);
+                key_cache[layer].reserve(static_cast<size_t>(capacity) * KV_WIDTH);
+                value_cache[layer].reserve(static_cast<size_t>(capacity) * KV_WIDTH);
             }
         }
     }
@@ -268,8 +269,8 @@ struct Work {
     std::vector<FP32> query_and_gate = std::vector<FP32>(2 * AS); // [AH,2,AD]
     std::vector<FP32> query = std::vector<FP32>(AS);              // [AH,AD]
     std::vector<FP32> attention_gate = std::vector<FP32>(AS);     // [AH,AD]
-    std::vector<FP32> key = std::vector<FP32>(KVS);               // [KVH,AD]
-    std::vector<FP32> value = std::vector<FP32>(KVS);             // [KVH,AD]
+    std::vector<FP32> key = std::vector<FP32>(KV_WIDTH);          // [KVH,AD]
+    std::vector<FP32> value = std::vector<FP32>(KV_WIDTH);        // [KVH,AD]
     std::vector<FP32> attention_output = std::vector<FP32>(AS);   // [AH,AD]
     std::vector<FP32> attention_score; // [context_size]
 
@@ -360,7 +361,7 @@ void deltanet(const DeltaWeights& weights, std::vector<FP32>& conv_history,
 void attention(const AttentionWeights& weights, std::vector<FP32>& key_cache,
                std::vector<FP32>& value_cache, int position, const FP32* input,
                Work& work, FP32* out) {
-    // q_proj 输出 [Q, gate] 两个 [AS] 向量；k/v 分别是 GQA 的 [KVS] 向量。
+    // q_proj 输出 [Q, gate] 两个 [AS] 向量；k/v 分别是 GQA 的 [KVH,AD] 向量。
     mv(weights.q, input, work.query_and_gate.data());
     mv(weights.k, input, work.key.data());
     mv(weights.v, input, work.value.data());
@@ -382,7 +383,7 @@ void attention(const AttentionWeights& weights, std::vector<FP32>& key_cache,
     // 先 append 再读，等价于 causal attention 允许 token t 读取 0..t（包括自己）。
     key_cache.insert(key_cache.end(), work.key.begin(), work.key.end());
     value_cache.insert(value_cache.end(), work.value.begin(), work.value.end());
-    const int tokens = static_cast<int>(key_cache.size() / KVS);
+    const int tokens = static_cast<int>(key_cache.size() / KV_WIDTH);
     const FP32 scale = 1.0f / std::sqrt(static_cast<FP32>(AD));
     FP32* score = work.attention_score.data();  // [T]，逐 head 复用，不在 forward 中分配。
 
@@ -554,9 +555,9 @@ struct LoadedModel {
                 layer.attention.q = {
                     reader.take<BF16>(static_cast<size_t>(2 * AS) * H), 2 * AS, H};
                 layer.attention.k = {
-                    reader.take<BF16>(static_cast<size_t>(KVS) * H), KVS, H};
+                    reader.take<BF16>(static_cast<size_t>(KV_WIDTH) * H), KV_WIDTH, H};
                 layer.attention.v = {
-                    reader.take<BF16>(static_cast<size_t>(KVS) * H), KVS, H};
+                    reader.take<BF16>(static_cast<size_t>(KV_WIDTH) * H), KV_WIDTH, H};
                 layer.attention.qnorm = reader.take<BF16>(AD);
                 layer.attention.knorm = reader.take<BF16>(AD);
                 layer.attention.out = {
@@ -655,12 +656,47 @@ struct q35_engine {
     std::unique_ptr<qwen35::LoadedModel> model;
 };
 
+namespace {
+
+int common_token_prefix(const std::vector<int>& saved,
+                        const int* tokens, int count) {
+    int common = 0;
+    while (common < static_cast<int>(saved.size()) && common < count &&
+           saved[common] == tokens[common]) {
+        ++common;
+    }
+    return common;
+}
+
+struct Checkpoint {
+    bool valid = false;
+    int position = 0;
+    std::array<std::vector<qwen35::FP32>, qwen35::N> conv_history;
+    std::array<std::vector<qwen35::FP32>, qwen35::N> delta_memory;
+    std::vector<qwen35::FP32> logits;
+
+    void clear() {
+        valid = false;
+        position = 0;
+    }
+};
+
+struct PrefixMatch {
+    int common = 0;
+    int reused = 0;
+    bool use_anchor = false;
+};
+
+}  // namespace
+
 struct q35_session {
     q35_engine* engine;
     qwen35::State state;
     qwen35::Work work;
     std::vector<int> tokens;
     std::vector<int> sample_order;
+    // live State 是当前点；anchor 是唯一额外保存在内存中的点。
+    Checkpoint anchor;
     bool logits_valid = false;
 
     q35_session(q35_engine* owner, int context_size)
@@ -672,6 +708,7 @@ struct q35_session {
     void reset() {
         state.reset();
         tokens.clear();
+        anchor.clear();
         logits_valid = false;
     }
 
@@ -679,6 +716,72 @@ struct q35_session {
         qwen35::forward(engine->model->model, state, token, work);
         tokens.push_back(token);
         logits_valid = true;
+    }
+
+    PrefixMatch match_prefix(const int* request, int count) const {
+        PrefixMatch match;
+        match.common = common_token_prefix(tokens, request, count);
+
+        const int live = static_cast<int>(tokens.size());
+        if (live > 0 && match.common == live) {
+            match.reused = live;
+        } else if (anchor.valid && match.common >= anchor.position) {
+            // anchor 对应 live 的前 anchor.position 个 token，因此无需再次扫描。
+            match.reused = anchor.position;
+            match.use_anchor = true;
+        } else {
+            // live 和 anchor 都不是 request 的完整前缀，只能从 token 0 重新计算。
+            match.reused = 0;
+            match.use_anchor = false;
+        }
+        return match;
+    }
+
+    void save_anchor() {
+        anchor.valid = false;
+        anchor.position = state.position;
+        for (int layer = 0; layer < qwen35::N; ++layer) {
+            if (layer % 4 == 3) continue;
+            anchor.conv_history[layer] = state.conv_history[layer];
+            anchor.delta_memory[layer] = state.delta_memory[layer];
+        }
+        anchor.logits = work.logits;
+        anchor.valid = true;
+        LOG_DEBUG("anchor saved position=%d", anchor.position);
+    }
+
+    void restore_anchor() {
+        if (!anchor.valid) throw std::runtime_error("anchor is invalid");
+        for (int layer = 0; layer < qwen35::N; ++layer) {
+            if (layer % 4 != 3) {
+                std::copy(anchor.conv_history[layer].begin(),
+                          anchor.conv_history[layer].end(),
+                          state.conv_history[layer].begin());
+                std::copy(anchor.delta_memory[layer].begin(),
+                          anchor.delta_memory[layer].end(),
+                          state.delta_memory[layer].begin());
+                continue;
+            }
+            // anchor 始终是 live 时间线的祖先，所以它的 Attention KV 已经位于 vector 前缀。
+            // position 是 token 数；扁平 KV vector 的 shape 是 [T,KVH,AD]，
+            // resize() 需要的是 FP32 元素数，因此是 T * (KVH*AD)。
+            const size_t kv_elements =
+                static_cast<size_t>(anchor.position) * qwen35::KV_WIDTH;
+            if (state.key_cache[layer].size() < kv_elements ||
+                state.value_cache[layer].size() < kv_elements) {
+                throw std::runtime_error("attention cache is shorter than anchor");
+            }
+            state.key_cache[layer].resize(kv_elements);
+            state.value_cache[layer].resize(kv_elements);
+        }
+        state.position = anchor.position;
+        if (tokens.size() < static_cast<size_t>(anchor.position)) {
+            throw std::runtime_error("token history is shorter than anchor");
+        }
+        tokens.resize(static_cast<size_t>(anchor.position));
+        std::copy(anchor.logits.begin(), anchor.logits.end(), work.logits.begin());
+        logits_valid = true;
+        LOG_DEBUG("anchor restored position=%d", anchor.position);
     }
 };
 
@@ -692,6 +795,12 @@ const int* session_tokens(const q35_session* session, int* count) {
     }
     *count = static_cast<int>(session->tokens.size());
     return session->tokens.data();
+}
+
+int session_reusable_prefix(const q35_session* session,
+                            const int* tokens, int count) {
+    if (!session || !tokens || count <= 0) return 0;
+    return session->match_prefix(tokens, count).reused;
 }
 
 }  // namespace q35_internal
@@ -790,39 +899,39 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
                     "token is outside vocabulary");
         }
 
-        int common = 0;
         const int live = static_cast<int>(session->tokens.size());
-        while (common < live && common < count && session->tokens[common] == tokens[common]) {
-            ++common;
-        }
-        const bool rebuild = common != live;
-        const int reused = rebuild ? 0 : common;
+        const PrefixMatch match = session->match_prefix(tokens, count);
+        const int reused = match.reused;
         const int tokens_to_prefill = count - reused;
-        const char* mode = reused == 0 ? "from_start" :
-                           tokens_to_prefill == 0 ? "cache_only" : "append_suffix";
+        const char* source = reused == 0 ? "from_start" :
+                             match.use_anchor ? "anchor" : "live";
+        const char* mode = tokens_to_prefill == 0 ? "cache_only" : "append_suffix";
         if (cached_tokens) *cached_tokens = reused;
         LOG_DEBUG("prompt compared session_tokens=%d prompt_tokens=%d "
-                  "matching_prefix_tokens=%d",
-                  live, count, common);
+                  "selected_source=%s matched_tokens=%d",
+                  live, count, source, reused);
         if (reused > 0) {
-            LOG_INFO("cache hit cached_tokens=%d tokens_to_prefill=%d",
-                     reused, tokens_to_prefill);
+            LOG_INFO("cache hit source=%s cached_tokens=%d tokens_to_prefill=%d",
+                     source, reused, tokens_to_prefill);
         } else {
             LOG_INFO("cache miss reason=%s matching_prefix_tokens=%d cached_tokens=0 "
                      "tokens_to_prefill=%d",
-                     live == 0 ? "empty_session" : "prompt_not_continuation",
-                     common, tokens_to_prefill);
+                     live == 0 ? "empty_session" : "no_checkpoint_prefix",
+                     match.common, tokens_to_prefill);
         }
-        LOG_INFO("prefill started mode=%s session_tokens=%d prompt_tokens=%d "
-                 "cached_tokens=%d tokens_to_prefill=%d",
-                 mode, live, count, reused, tokens_to_prefill);
+        LOG_INFO("prefill started source=%s mode=%s session_tokens=%d "
+                 "prompt_tokens=%d cached_tokens=%d tokens_to_prefill=%d",
+                 source, mode, live, count, reused, tokens_to_prefill);
         const auto started = std::chrono::steady_clock::now();
-        // Only exact continuation is safely append-only. Shortening or editing rebuilds State.
-        if (rebuild) {
+        if (match.use_anchor) {
+            session->restore_anchor();
+        } else if (reused == 0) {
             session->reset();
-            common = 0;
         }
-        for (int index = common; index < count; ++index) session->append(tokens[index]);
+        for (int index = reused; index < count; ++index) session->append(tokens[index]);
+        // 到这里 prompt 中缺少的 token 已全部 forward，prefill 已完成，decode 尚未开始。
+        // Session 不区分阶段；这里只是选择在 sync 返回前保存新的 anchor。
+        session->save_anchor();
         const double elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
         LOG_INFO("prefill completed position=%d cached_tokens=%d prefilled_tokens=%d "

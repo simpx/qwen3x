@@ -39,16 +39,6 @@ void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 
-bool is_prefix(const q35_session* session, const int* tokens, int count) {
-    int live_count = 0;
-    const int* live_tokens = q35_internal::session_tokens(session, &live_count);
-    if (live_count > count) return false;
-    for (int index = 0; index < live_count; ++index) {
-        if (live_tokens[index] != tokens[index]) return false;
-    }
-    return true;
-}
-
 }  // namespace
 
 struct q35_session_manager {
@@ -138,6 +128,7 @@ int q35_session_manager_acquire(q35_session_manager* manager,
         std::unique_lock<std::mutex> lock(manager->mutex);
         SessionEntry* selected = nullptr;
         const char* selected_by = nullptr;
+        int matched_tokens = 0;
 
         // session_id is a routing hint and always wins over prefix lookup.
         if (session_id) {
@@ -151,23 +142,28 @@ int q35_session_manager_acquire(q35_session_manager* manager,
                     }
                     selected = &entry;
                     selected_by = "session_id";
+                    matched_tokens = q35_internal::session_reusable_prefix(
+                        entry.session, tokens, count
+                    );
                     break;
                 }
             }
         }
 
-        // Otherwise reuse the longest complete live prefix.
+        // 没有按 session_id 找到时，比较每个空闲 Session 的 live/anchor；
+        // reusable 是它能完整复用的 token 数，选择其中最大的一个。
         if (!selected) {
-            int best = -1;
+            int best = 0;
             for (SessionEntry& entry : manager->entries) {
-                if (entry.state != EntryState::IDLE ||
-                    !is_prefix(entry.session, tokens, count)) continue;
-                int live_count = 0;
-                q35_internal::session_tokens(entry.session, &live_count);
-                if (live_count > best) {
+                if (entry.state != EntryState::IDLE) continue;
+                const int reusable = q35_internal::session_reusable_prefix(
+                    entry.session, tokens, count
+                );
+                if (reusable > best) {
                     selected = &entry;
-                    best = live_count;
+                    best = reusable;
                     selected_by = "token_prefix";
+                    matched_tokens = reusable;
                 }
             }
         }
@@ -206,8 +202,9 @@ int q35_session_manager_acquire(q35_session_manager* manager,
         *out = selected->session;
         write_error(err, errlen, "");
         lock.unlock();
-        LOG_INFO("session acquired selected_by=%s slot=%d session_tokens=%d",
-                 selected_by, slot, session_tokens);
+        LOG_INFO("session acquired selected_by=%s slot=%d session_tokens=%d "
+                 "matched_tokens=%d",
+                 selected_by, slot, session_tokens, matched_tokens);
         return Q35_OK;
     } catch (const std::exception& exception) {
         write_error(err, errlen, exception.what());
