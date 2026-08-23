@@ -1,0 +1,141 @@
+#!/usr/bin/env -S uv run --locked --no-dev python
+"""Minimal multi-turn client for the local Qwen OpenAI server."""
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+
+LOCAL_SERVER = "http://127.0.0.1:8000"
+
+
+class ClientError(RuntimeError):
+    pass
+
+
+def colored(text, code, enabled):
+    return f"\033[{code}m{text}\033[0m" if enabled else text
+
+
+def error_message(error):
+    try:
+        body = json.loads(error.read().decode("utf-8"))
+        return body.get("error", {}).get("message") or str(body)
+    except Exception:
+        return f"HTTP {error.code}: {error.reason}"
+
+
+def stream_chat(endpoint, api_key, body, on_text, timeout):
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = "Bearer " + api_key
+    request = urllib.request.Request(endpoint, data=data, headers=headers, method="POST")
+
+    parts = []
+    usage = None
+    try:
+        response = urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.HTTPError as error:
+        raise ClientError(error_message(error)) from error
+    except urllib.error.URLError as error:
+        raise ClientError(f"cannot connect to {endpoint}: {error.reason}") from error
+
+    with response:
+        for raw_line in response:
+            line = raw_line.decode("utf-8").strip()
+            if not line.startswith("data: "):
+                continue
+            payload = line[6:]
+            if payload == "[DONE]":
+                break
+            item = json.loads(payload)
+            if item.get("usage") is not None:
+                usage = item["usage"]
+            choices = item.get("choices") or []
+            if not choices:
+                continue
+            text = choices[0].get("delta", {}).get("content")
+            if text:
+                parts.append(text)
+                on_text(text)
+    if usage is None:
+        raise ClientError("server stream ended without usage")
+    return "".join(parts), usage
+
+
+def usage_text(usage):
+    cached = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+    return (
+        f"prompt={usage.get('prompt_tokens', 0)}  "
+        f"cached={cached}  "
+        f"completion={usage.get('completion_tokens', 0)}  "
+        f"total={usage.get('total_tokens', 0)}"
+    )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog="client",
+        description="Send positional prompts as consecutive turns.",
+    )
+    parser.add_argument("prompts", nargs="+", help="user messages, one argument per turn")
+    parser.add_argument("-u", "--url", default=LOCAL_SERVER, help="server base URL")
+    parser.add_argument("-m", "--model", default="qwen3.5-0.8b")
+    parser.add_argument("-n", "--max-tokens", type=int, default=256)
+    parser.add_argument("-t", "--temperature", type=float, default=0.0)
+    parser.add_argument("-p", "--top-p", type=float, default=1.0)
+    parser.add_argument("-S", "--system", default=None, help="optional system message")
+    parser.add_argument("-k", "--api-key", default=os.environ.get("QWEN_API_KEY"))
+    parser.add_argument("--timeout", type=float, default=3600.0)
+    parser.add_argument("--no-color", action="store_true")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    endpoint = args.url.rstrip("/") + "/v1/chat/completions"
+    messages = []
+    if args.system:
+        messages.append({"role": "system", "content": args.system})
+
+    color = sys.stdout.isatty() and not args.no_color and "NO_COLOR" not in os.environ
+    req_label = colored("req", "1;36", color)
+    resp_label = colored("resp", "1;32", color)
+    usage_label = colored("usage", "1;33", color)
+
+    for prompt in args.prompts:
+        messages.append({"role": "user", "content": prompt})
+        print(f"{req_label}: {prompt}")
+        print(f"{resp_label}: ", end="", flush=True)
+        body = {
+            "model": args.model,
+            "messages": messages,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "max_completion_tokens": args.max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        try:
+            response, usage = stream_chat(
+                endpoint, args.api_key, body,
+                lambda text: print(text, end="", flush=True),
+                args.timeout,
+            )
+        except ClientError as error:
+            print()
+            print(colored(f"error: {error}", "1;31", color), file=sys.stderr)
+            return 1
+        print()
+        print(f"{usage_label}: {usage_text(usage)}")
+        print()
+        messages.append({"role": "assistant", "content": response})
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

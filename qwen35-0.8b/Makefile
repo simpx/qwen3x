@@ -32,7 +32,7 @@ $(BIN): pack_weights.py
 	$(PYTHON_PROD) pack_weights.py "$(TOKENIZER)" "$@"
 
 unit-test:
-	$(PYTHON) -m unittest discover -v -s tests -p 'test_server.py'
+	$(PYTHON) -m unittest -v tests.test_server tests.test_client
 
 native-test: $(LIBRARY) $(BIN)
 	PYTHONPATH=. $(PYTHON) tests/test_native.py --library "$(LIBRARY)" --bin "$(BIN)"

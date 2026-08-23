@@ -40,6 +40,7 @@ log.cpp                  Engine/Runtime 共用的进程级日志回调
 internal.h               Engine 向 Runtime 提供只读 token timeline 的私有接口
 qwen35.py                上述 C ABI 的薄 ctypes 包装
 server.py                OpenAI chat completions、SSE、鉴权和 tokenizer
+client                   默认连接本机的极简多轮命令行客户端
 pack_weights.py          官方 safetensors -> mmap-friendly 固定 tensor stream
 pyproject.toml / uv.lock Python 直接依赖和完整锁定环境
 tests/                   HTTP、真实权重 ABI/SessionManager 和真实 HTTP e2e
@@ -73,6 +74,20 @@ make run
 
 ```sh
 make chat
+```
+
+更方便的多轮测试：
+
+```sh
+./client "你好" "我刚才说了什么？"
+```
+
+每个位置参数是一轮 user 消息。Client 会等待本轮响应完成，再携带完整可见对话发送下一轮；
+服务端根据完整 token 前缀自动复用 Session，并以 `req / resp / usage` 格式显示结果。常用选项：
+
+```sh
+./client -n 64 -t 0.7 -p 0.9 "你好" "继续"
+./client --help
 ```
 
 `pyproject.toml` 声明依赖，`uv.lock` 锁定完整环境；两者都应提交。`uv run` 会自动创建和同步
