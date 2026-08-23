@@ -63,6 +63,22 @@ make e2e
 append-only sync、编辑/缩短后的 rebuild 和完整词表 logit；`e2e` 走真实 tokenizer、HTTP、
 SessionManager 和 C++ forward。
 
+## CPU 性能基线
+
+优化前先记录只包含真实 C++ Engine 的 baseline：
+
+```sh
+make bench
+```
+
+它先用 1 个 token warmup mmap 权重页，然后用新 Session 分别测量
+`sync()` prefill 和逐 token `eval()` decode。这条路径不包含 tokenizer、HTTP 和
+sampling，也不使用 mock。可以调整测量长度：
+
+```sh
+make bench BENCH_PREFILL=16 BENCH_DECODE=8
+```
+
 ## 启动
 
 ```sh

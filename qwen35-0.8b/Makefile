@@ -10,10 +10,12 @@ SERVER ?= http://127.0.0.1:8000
 LOG_LEVEL ?= debug
 MOCK ?= 0
 MOCK_ARG := $(if $(filter 1 true yes,$(MOCK)),--mock,)
+BENCH_PREFILL ?= 8
+BENCH_DECODE ?= 4
 
 CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic
 
-.PHONY: all sync sync-prod weights unit-test mock-test native-test test e2e run chat clean
+.PHONY: all sync sync-prod weights unit-test mock-test native-test test e2e run chat bench clean
 
 all: $(LIBRARY)
 
@@ -54,6 +56,13 @@ chat:
 	curl --silent --show-error --no-buffer "$(SERVER)/v1/chat/completions" \
 		-H 'Content-Type: application/json' \
 		-d '{"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"你好，请用一句话介绍自己。"}],"temperature":0,"max_completion_tokens":1024,"stream":true,"stream_options":{"include_usage":true}}'
+
+bench: $(LIBRARY) $(BIN)
+	PYTHONPATH=. $(PYTHON_PROD) bench.py \
+		--library "$(LIBRARY)" \
+		--bin "$(BIN)" \
+		--prefill-tokens "$(BENCH_PREFILL)" \
+		--decode-tokens "$(BENCH_DECODE)"
 
 clean:
 	rm -rf $(BUILD)
