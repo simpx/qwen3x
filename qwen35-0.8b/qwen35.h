@@ -17,7 +17,6 @@ enum {
     Q35_OK = 0,
     Q35_ERROR = -1,
     Q35_BUSY = -2,
-    Q35_NOT_FOUND = -3,
 };
 
 /* Engine: one loaded, read-only Qwen3.5-0.8B model. */
@@ -71,10 +70,10 @@ void q35_session_destroy(q35_session* session);
 int q35_session_reset(q35_session* session, char* err, size_t errlen);
 
 /*
- * Bring the Session to exactly tokens[count]. If the live timeline is already
- * a prefix, only the new suffix runs through forward; otherwise State is reset
- * and the complete sequence is prefetched again. cached_tokens receives the
- * number of prompt tokens whose existing State was reused; it may be NULL.
+ * Bring the Session to exactly tokens[count]. If its live State or saved anchor
+ * is a prefix, only the new suffix runs through forward; otherwise State is
+ * reset and the complete sequence is prefetched again. cached_tokens receives
+ * the number of prompt tokens whose existing State was reused; it may be NULL.
  */
 int q35_session_sync(q35_session* session, const int* tokens, int count,
                      int* cached_tokens,
@@ -101,9 +100,9 @@ int q35_session_copy_logits(const q35_session* session, float* output, int capac
 /*
  * SessionManager: a fixed pool of preallocated Sessions.
  *
- * It binds optional server-issued session IDs, reuses anonymous Sessions by
- * token prefix, tracks FREE/IDLE/BUSY state and applies LRU replacement. It
- * does not know about HTTP, JSON, tokenization, chat formats or disk cache.
+ * It reuses Sessions by token prefix, tracks FREE/IDLE/BUSY state and applies
+ * LRU replacement. It does not know about HTTP, JSON, tokenization, chat
+ * formats or disk cache.
  * Engine must outlive its SessionManager.
  */
 
@@ -116,34 +115,23 @@ void q35_session_manager_destroy(q35_session_manager* manager);
 /*
  * Select and acquire one Session exclusively.
  *
- * 1. Reuse the Entry bound to session_id, when it exists.
- * 2. Otherwise prefer an IDLE Session whose complete token timeline is a
- *    prefix of tokens[count].
- * 3. Otherwise use a FREE/LRU Entry.
+ * 1. Prefer the IDLE Session with the longest reusable prefix of tokens[count].
+ * 2. Otherwise use a FREE/LRU Entry.
  *
- * A non-NULL session_id is copied when a new binding is created. NULL means an
- * anonymous OpenAI-style request. The function only selects the Session and
- * marks it BUSY; the caller must still call q35_session_sync(). Returns
- * Q35_BUSY when the bound Session or every Session is already BUSY.
+ * The function only selects the Session and marks it BUSY; the caller must
+ * still call q35_session_sync(). Returns Q35_BUSY when every Session is BUSY.
  */
 int q35_session_manager_acquire(q35_session_manager* manager,
-                                const char* session_id,
                                 const int* tokens, int count,
                                 q35_session** out,
                                 char* err, size_t errlen);
 
 /*
- * Release exclusive access. keep=true retains either a named or anonymous
- * Session as IDLE for future reuse. keep=false resets it, removes any ID
- * binding and makes the Entry FREE.
+ * Release exclusive access. keep=true retains the Session as IDLE for future
+ * prefix reuse. keep=false resets it and makes the Entry FREE.
  */
 void q35_session_manager_release(q35_session_manager* manager,
                                  q35_session* session, bool keep);
-
-/* Forget and reset an IDLE named Session. Returns Q35_NOT_FOUND or Q35_BUSY. */
-int q35_session_manager_forget(q35_session_manager* manager,
-                               const char* session_id,
-                               char* err, size_t errlen);
 
 #ifdef __cplusplus
 }

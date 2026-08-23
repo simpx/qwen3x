@@ -21,7 +21,6 @@ class SessionBusy(EngineError):
 
 Q35_OK = 0
 Q35_BUSY = -2
-Q35_NOT_FOUND = -3
 
 Q35_LOG_DEBUG = 0
 Q35_LOG_INFO = 1
@@ -111,13 +110,11 @@ def _configure(library: ctypes.CDLL) -> None:
     library.q35_session_manager_destroy.argtypes = [void_p]
     library.q35_session_manager_destroy.restype = None
     library.q35_session_manager_acquire.argtypes = [
-        void_p, char_p, int_p, ctypes.c_int, ctypes.POINTER(void_p), char_p, size_t
+        void_p, int_p, ctypes.c_int, ctypes.POINTER(void_p), char_p, size_t
     ]
     library.q35_session_manager_acquire.restype = ctypes.c_int
     library.q35_session_manager_release.argtypes = [void_p, void_p, ctypes.c_bool]
     library.q35_session_manager_release.restype = None
-    library.q35_session_manager_forget.argtypes = [void_p, char_p, char_p, size_t]
-    library.q35_session_manager_forget.restype = ctypes.c_int
 
 
 def set_log_callback(library_path: Path | str,
@@ -365,7 +362,7 @@ class Session:
 
 
 class SessionManager:
-    """Fixed native pool that owns Session state, ID bindings, prefix reuse and LRU."""
+    """Fixed native pool that owns Session state, prefix reuse and LRU."""
 
     def __init__(self, engine: Engine, session_count: int, context_size: int):
         self._engine = engine
@@ -385,18 +382,17 @@ class SessionManager:
     def engine(self) -> Engine:
         return self._engine
 
-    def acquire(self, session_id: str | None, tokens: Iterable[int]) -> Session:
+    def acquire(self, tokens: Iterable[int]) -> Session:
         values = [int(token) for token in tokens]
         if not values:
             raise EngineError("token sequence is empty")
         native = (ctypes.c_int * len(values))(*values)
-        encoded = session_id.encode("utf-8") if session_id is not None else None
         with self._lock:
             self._require_open()
             handle = ctypes.c_void_p()
             error = ctypes.create_string_buffer(ERROR_CAPACITY)
             result = self._engine._library.q35_session_manager_acquire(
-                self._handle, encoded, native, len(values), ctypes.byref(handle),
+                self._handle, native, len(values), ctypes.byref(handle),
                 error, len(error),
             )
             _check(result, error)
@@ -414,18 +410,6 @@ class SessionManager:
             )
             self._active.remove(session)
             session._detach()
-
-    def forget(self, session_id: str) -> bool:
-        with self._lock:
-            self._require_open()
-            error = ctypes.create_string_buffer(ERROR_CAPACITY)
-            result = self._engine._library.q35_session_manager_forget(
-                self._handle, session_id.encode("utf-8"), error, len(error)
-            )
-            if result == Q35_NOT_FOUND:
-                return False
-            _check(result, error)
-            return True
 
     def close(self) -> None:
         engine = self._engine

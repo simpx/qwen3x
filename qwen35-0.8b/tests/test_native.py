@@ -74,37 +74,35 @@ def main():
             assert "outside vocabulary" in str(error)
         assert second.position == len(case["prefill_ids"])
 
-        # SessionManager owns fixed Sessions and routes named requests back to
-        # the same live state. Acquiring the same ID concurrently is rejected.
+        # SessionManager owns fixed Sessions and selects by reusable prefix.
         manager = engine.create_session_manager(2, 64)
-        managed = manager.acquire("agent-a", case["prefill_ids"])
+        managed = manager.acquire(case["prefill_ids"])
         assert managed.sync(case["prefill_ids"]) == 0
         for token in case["decode_ids"]:
             managed.eval(token)
         manager.release(managed, keep=True)
 
-        # A bound session_id selects the same Session first; sync then chooses
-        # its saved checkpoint from the two actual token timelines.
-        managed = manager.acquire("agent-a", case["prefill_ids"])
+        # The saved anchor makes this Session the longest prefix match even
+        # though its live timeline is longer than the request.
+        managed = manager.acquire(case["prefill_ids"])
         assert managed.position == len(extended)
+        other = manager.acquire(case["prefill_ids"])
         try:
-            manager.acquire("agent-a", case["prefill_ids"])
-            raise AssertionError("busy named session was acquired twice")
+            manager.acquire(case["prefill_ids"])
+            raise AssertionError("a third Session was acquired from a two-slot pool")
         except SessionBusy:
             pass
+        manager.release(other, keep=False)
         assert managed.sync(case["prefill_ids"]) == len(case["prefill_ids"])
         for token in case["decode_ids"]:
             managed.eval(token)
         manager.release(managed, keep=True)
 
-        # Anonymous lookup also considers both points. Here live is longer than
-        # the request, so only the saved checkpoint can match it.
-        # Anonymous reuse intentionally removes the old name binding.
-        anonymous = manager.acquire(None, case["prefill_ids"])
-        assert anonymous.position == len(extended)
-        assert anonymous.sync(case["prefill_ids"]) == len(case["prefill_ids"])
-        manager.release(anonymous, keep=True)
-        assert not manager.forget("agent-a")
+        # Prefix lookup again finds that same anchor without an external ID.
+        reused = manager.acquire(case["prefill_ids"])
+        assert reused.position == len(extended)
+        assert reused.sync(case["prefill_ids"]) == len(case["prefill_ids"])
+        manager.release(reused, keep=True)
         manager.close()
 
         tiny = engine.create_session(3)

@@ -66,41 +66,21 @@ class FakeManager:
         self.engine = engine
         self.session_count = session_count
         self.sessions = [engine.create_session(128) for _ in range(session_count)]
-        self.named = {}
         self.active = set()
 
-    def acquire(self, session_id, _tokens):
-        if session_id in self.named:
-            session = self.named[session_id]
-            if session in self.active:
-                raise SessionBusy("session is already busy")
-        else:
-            session = next(item for item in self.sessions if item not in self.active)
-            if session_id is not None:
-                for old_id, item in list(self.named.items()):
-                    if item is session:
-                        del self.named[old_id]
-                self.named[session_id] = session
+    def acquire(self, _tokens):
+        session = next(
+            (item for item in self.sessions if item not in self.active), None
+        )
+        if session is None:
+            raise SessionBusy("all sessions are busy")
         self.active.add(session)
         return session
 
     def release(self, session, *, keep):
         self.active.remove(session)
         if not keep:
-            for session_id, item in list(self.named.items()):
-                if item is session:
-                    del self.named[session_id]
             session.reset()
-
-    def forget(self, session_id):
-        session = self.named.get(session_id)
-        if session is None:
-            return False
-        if session in self.active:
-            raise SessionBusy("session is busy")
-        del self.named[session_id]
-        session.reset()
-        return True
 
 
 class ServerTest(unittest.TestCase):
@@ -157,13 +137,13 @@ class ServerTest(unittest.TestCase):
         with TestClient(create_app(config, tokenizer=FakeTokenizer(), manager=manager)) as client:
             self.assertEqual(client.get("/v1/models").status_code, 200)
 
-    def test_non_streaming_uses_named_resident_session(self):
+    def test_non_streaming_reuses_resident_session(self):
         with self.assertLogs("qwen35.runtime", level="INFO") as logs:
-            response = self.request(session_id="agent-a")
+            response = self.request()
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["choices"][0]["message"]["content"], "你好！")
-        self.assertEqual(response.json()["session_id"], "agent-a")
-        self.assertEqual(response.headers["x-qwen-session-id"], "agent-a")
+        self.assertNotIn("session_id", response.json())
+        self.assertNotIn("x-qwen-session-id", response.headers)
         self.assertEqual(
             response.json()["usage"]["prompt_tokens_details"]["cached_tokens"], 0
         )
@@ -177,23 +157,23 @@ class ServerTest(unittest.TestCase):
             "ttft=" in line and "prefill_tps=" in line and "decode_tps=" in line
             for line in logs.output
         ))
-        first = self.manager.named["agent-a"]
+        first = self.manager.sessions[0]
 
-        response = self.request(session_id="agent-a", max_completion_tokens=1)
+        response = self.request(max_completion_tokens=1)
         self.assertEqual(response.status_code, 200)
-        second = self.manager.named["agent-a"]
+        second = self.manager.sessions[0]
         self.assertIs(first, second)
         self.assertEqual(first.sync_count, 2)
 
     def test_streaming_contract(self):
         with self.assertLogs("qwen35.runtime", level="INFO") as logs:
-            response = self.request(session_id="agent-stream", stream=True,
+            response = self.request(stream=True,
                                     stream_options={"include_usage": True})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIn('"content":"你"', response.text)
         self.assertIn('"content":"好"', response.text)
         self.assertIn('"content":"！"', response.text)
-        self.assertIn('"session_id":"agent-stream"', response.text)
+        self.assertNotIn('"session_id"', response.text)
         self.assertIn(
             '"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5,'
             '"prompt_tokens_details":{"cached_tokens":0}}',
@@ -206,7 +186,7 @@ class ServerTest(unittest.TestCase):
         ))
 
     def test_streaming_omits_usage_without_option(self):
-        response = self.request(session_id="agent-no-usage", stream=True)
+        response = self.request(stream=True)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertNotIn('"usage":', response.text)
         self.assertTrue(response.text.endswith("data: [DONE]\n\n"))
@@ -225,16 +205,19 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["choices"][0]["message"]["content"], "你")
 
-    def test_anonymous_request_creates_no_named_binding(self):
+    def test_response_has_no_session_extension(self):
         response = self.request(max_completion_tokens=1)
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.headers["x-qwen-session-id"].startswith("ephemeral-"))
-        self.assertFalse(self.manager.named)
+        self.assertNotIn("session_id", response.json())
+        self.assertNotIn("x-qwen-session-id", response.headers)
 
-    def test_delete_session(self):
-        self.request(session_id="agent-delete", max_completion_tokens=1)
-        response = self.client.delete("/v1/sessions/agent-delete", headers=self.headers)
-        self.assertEqual(response.json(), {"id": "agent-delete", "deleted": True})
+        rejected = self.request(session_id="custom-session", max_completion_tokens=1)
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(rejected.json()["error"]["param"], "session_id")
+
+    def test_sessions_extension_is_absent(self):
+        response = self.client.delete("/v1/sessions/anything", headers=self.headers)
+        self.assertEqual(response.status_code, 404)
 
 
 if __name__ == "__main__":

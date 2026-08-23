@@ -48,7 +48,7 @@ run: $(LIBRARY) $(BIN)
 chat:
 	curl --silent --show-error --no-buffer "$(SERVER)/v1/chat/completions" \
 		-H 'Content-Type: application/json' \
-		-d '{"model":"qwen3.5-0.8b","session_id":"make-chat","messages":[{"role":"user","content":"你好，请用一句话介绍自己。"}],"temperature":0,"max_completion_tokens":1024,"stream":true,"stream_options":{"include_usage":true}}'
+		-d '{"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"你好，请用一句话介绍自己。"}],"temperature":0,"max_completion_tokens":1024,"stream":true,"stream_options":{"include_usage":true}}'
 
 clean:
 	rm -rf $(BUILD)

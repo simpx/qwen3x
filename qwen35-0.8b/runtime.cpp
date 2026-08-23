@@ -1,4 +1,4 @@
-// runtime.cpp -- resident Session selection, identity, prefix reuse and LRU.
+// runtime.cpp -- resident Session selection, prefix reuse and LRU.
 //
 // This file deliberately knows nothing about Model, State, Work or forward.
 // It owns a fixed number of opaque q35_session objects and coordinates which
@@ -10,7 +10,6 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
-#include <string>
 #include <vector>
 
 #include "internal.h"
@@ -25,7 +24,6 @@ enum class EntryState {
 
 struct SessionEntry {
     q35_session* session = nullptr;
-    std::string session_id;
     EntryState state = EntryState::FREE;
     uint64_t last_used = 0;
 };
@@ -62,7 +60,6 @@ SessionEntry* find_entry(q35_session_manager& manager, const q35_session* sessio
 
 void reset(SessionEntry& entry) {
     q35_session_reset(entry.session, nullptr, 0);
-    entry.session_id.clear();
     entry.state = EntryState::FREE;
     entry.last_used = 0;
 }
@@ -112,7 +109,6 @@ void q35_session_manager_destroy(q35_session_manager* manager) {
 }
 
 int q35_session_manager_acquire(q35_session_manager* manager,
-                                             const char* session_id,
                                              const int* tokens, int count,
                                              q35_session** out,
                                              char* err, size_t errlen) {
@@ -122,7 +118,6 @@ int q35_session_manager_acquire(q35_session_manager* manager,
         *out = nullptr;
         require(tokens, "tokens pointer is null");
         require(count > 0, "token sequence is empty");
-        if (session_id) require(session_id[0] != '\0', "session_id is empty");
         LOG_DEBUG("session lookup started prompt_tokens=%d", count);
 
         std::unique_lock<std::mutex> lock(manager->mutex);
@@ -130,41 +125,19 @@ int q35_session_manager_acquire(q35_session_manager* manager,
         const char* selected_by = nullptr;
         int matched_tokens = 0;
 
-        // session_id is a routing hint and always wins over prefix lookup.
-        if (session_id) {
-            for (SessionEntry& entry : manager->entries) {
-                if (entry.session_id == session_id) {
-                    if (entry.state == EntryState::BUSY) {
-                        write_error(err, errlen, "session is already busy");
-                        lock.unlock();
-                        LOG_WARN("session lookup failed reason=session_id_busy");
-                        return Q35_BUSY;
-                    }
-                    selected = &entry;
-                    selected_by = "session_id";
-                    matched_tokens = q35_internal::session_reusable_prefix(
-                        entry.session, tokens, count
-                    );
-                    break;
-                }
-            }
-        }
-
-        // 没有按 session_id 找到时，比较每个空闲 Session 的 live/anchor；
+        // 比较每个空闲 Session 的 live/anchor；
         // reusable 是它能完整复用的 token 数，选择其中最大的一个。
-        if (!selected) {
-            int best = 0;
-            for (SessionEntry& entry : manager->entries) {
-                if (entry.state != EntryState::IDLE) continue;
-                const int reusable = q35_internal::session_reusable_prefix(
-                    entry.session, tokens, count
-                );
-                if (reusable > best) {
-                    selected = &entry;
-                    best = reusable;
-                    selected_by = "token_prefix";
-                    matched_tokens = reusable;
-                }
+        int best = 0;
+        for (SessionEntry& entry : manager->entries) {
+            if (entry.state != EntryState::IDLE) continue;
+            const int reusable = q35_internal::session_reusable_prefix(
+                entry.session, tokens, count
+            );
+            if (reusable > best) {
+                selected = &entry;
+                best = reusable;
+                selected_by = "token_prefix";
+                matched_tokens = reusable;
             }
         }
 
@@ -195,9 +168,7 @@ int q35_session_manager_acquire(q35_session_manager* manager,
         }
 
         const int slot = static_cast<int>(selected - manager->entries.data());
-        int session_tokens = 0;
-        q35_internal::session_tokens(selected->session, &session_tokens);
-        selected->session_id = session_id ? session_id : "";
+        const int session_tokens = q35_session_position(selected->session);
         selected->state = EntryState::BUSY;
         *out = selected->session;
         write_error(err, errlen, "");
@@ -231,40 +202,4 @@ void q35_session_manager_release(q35_session_manager* manager,
     }
     lock.unlock();
     LOG_INFO("session released slot=%d keep_state=%s", slot, keep ? "true" : "false");
-}
-
-int q35_session_manager_forget(q35_session_manager* manager,
-                                            const char* session_id,
-                                            char* err, size_t errlen) {
-    try {
-        require(manager, "session manager is null");
-        require(session_id && session_id[0], "session_id is empty");
-        LOG_DEBUG("session forget started");
-        std::unique_lock<std::mutex> lock(manager->mutex);
-        for (SessionEntry& entry : manager->entries) {
-            if (entry.session_id != session_id) continue;
-            if (entry.state == EntryState::BUSY) {
-                write_error(err, errlen, "session is busy");
-                lock.unlock();
-                LOG_WARN("session forget failed reason=session_busy");
-                return Q35_BUSY;
-            }
-            const int slot = static_cast<int>(&entry - manager->entries.data());
-            reset(entry);
-            write_error(err, errlen, "");
-            lock.unlock();
-            LOG_INFO("session forgotten slot=%d", slot);
-            return Q35_OK;
-        }
-        write_error(err, errlen, "session not found");
-        lock.unlock();
-        LOG_DEBUG("session forget missed");
-        return Q35_NOT_FOUND;
-    } catch (const std::exception& exception) {
-        write_error(err, errlen, exception.what());
-        return Q35_ERROR;
-    } catch (...) {
-        write_error(err, errlen, "unknown C++ exception");
-        return Q35_ERROR;
-    }
 }

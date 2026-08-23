@@ -9,7 +9,6 @@ import hmac
 import json
 import logging
 import os
-import re
 import secrets
 import threading
 import time
@@ -44,9 +43,7 @@ from qwen35 import (
 
 HERE = Path(__file__).resolve().parent
 LOG = logging.getLogger("qwen35.runtime")
-SESSION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 REQUEST_ID_CONTEXT = ContextVar("request_id", default="-")
-SESSION_ID_CONTEXT = ContextVar("session_id", default="-")
 REQUEST_STARTED_CONTEXT = ContextVar("request_started", default=None)
 
 PYTHON_LOG_LEVELS = {
@@ -94,12 +91,9 @@ class LogHighlighter(RegexHighlighter):
 class LogContextFilter(logging.Filter):
     def filter(self, record):
         request_id = REQUEST_ID_CONTEXT.get()
-        session_id = SESSION_ID_CONTEXT.get()
         context = []
         if request_id != "-":
             context.append(f"request_id={request_id}")
-        if session_id != "-":
-            context.append(f"session_id={session_id}")
         record.context = (" ".join(context) + " ") if context else ""
         record.tid = threading.get_native_id()
         record.level_lower = record.levelname.lower()
@@ -265,12 +259,14 @@ def normalize_messages(messages):
     return result
 
 
-def parse_request(body, request: Request, config: Config, tokenizer):
+def parse_request(body, config: Config, tokenizer):
     if not isinstance(body, dict):
         raise APIError(400, "request body must be a JSON object")
     if body.get("model") != config.served_model_name:
         raise APIError(404, f"model {body.get('model')!r} not found", param="model",
                        code="model_not_found")
+    if "session_id" in body:
+        raise APIError(400, "session_id is not supported", param="session_id")
     for key in ("tools", "tool_choice", "functions", "function_call", "response_format"):
         if key in body and body[key] not in (None, [], "none"):
             raise APIError(400, f"{key} is not supported", param=key)
@@ -320,25 +316,12 @@ def parse_request(body, request: Request, config: Config, tokenizer):
     if not isinstance(stream_options, dict):
         raise APIError(400, "stream_options must be an object", param="stream_options")
 
-    body_session = body.get("session_id")
-    header_session = request.headers.get("x-qwen-session-id")
-    if body_session is not None and header_session is not None and body_session != header_session:
-        raise APIError(400, "body and header session_id disagree", param="session_id")
-    session_id = body_session if body_session is not None else header_session
-    persistent = session_id is not None
-    if session_id is None:
-        session_id = "ephemeral-" + uuid.uuid4().hex
-    if not isinstance(session_id, str) or not SESSION_ID.fullmatch(session_id):
-        raise APIError(400, "session_id must be 1..128 safe ASCII characters", param="session_id")
-
     return {
         "prompt_ids": prompt_ids,
         "max_tokens": maximum,
         "stops": stops,
         "stream": stream,
         "include_usage": bool(stream_options.get("include_usage", False)),
-        "session_id": session_id,
-        "persistent": persistent,
         "temperature": float(temperature),
         "top_p": float(top_p),
         "rng": seed if seed is not None else secrets.randbits(64),
@@ -360,14 +343,13 @@ def sse(data) -> str:
     return "data: " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n\n"
 
 
-def stream_chunk(completion_id, created, model, session_id, delta,
+def stream_chunk(completion_id, created, model, delta,
                  finish_reason=None, usage=None):
     result = {
         "id": completion_id,
         "object": "chat.completion.chunk",
         "created": created,
         "model": model,
-        "session_id": session_id,
         "choices": [{"index": 0, "delta": delta, "logprobs": None,
                      "finish_reason": finish_reason}],
     }
@@ -466,43 +448,22 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
         return {"object": "list", "data": [{"id": config.served_model_name,
                 "object": "model", "created": 0, "owned_by": "qwen3x"}]}
 
-    @app.delete("/v1/sessions/{session_id}")
-    async def delete_session(session_id: str, request: Request):
-        await authenticate(request)
-        session_context = SESSION_ID_CONTEXT.set(session_id)
-        try:
-            removed = await asyncio.to_thread(app.state.manager.forget, session_id)
-        except SessionBusy as error:
-            raise APIError(409, str(error), code="session_busy") from error
-        finally:
-            SESSION_ID_CONTEXT.reset(session_context)
-        if not removed:
-            raise APIError(404, "session not found", code="session_not_found")
-        return {"id": session_id, "deleted": True}
-
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         await authenticate(request)
-        parsed = parse_request(await read_json(request), request, config, app.state.tokenizer)
-        session_context = SESSION_ID_CONTEXT.set(parsed["session_id"])
+        parsed = parse_request(await read_json(request), config, app.state.tokenizer)
         try:
-            native_session_id = parsed["session_id"] if parsed["persistent"] else None
             session = await asyncio.to_thread(
-                app.state.manager.acquire, native_session_id, parsed["prompt_ids"]
+                app.state.manager.acquire, parsed["prompt_ids"]
             )
         except SessionBusy as error:
-            SESSION_ID_CONTEXT.reset(session_context)
             raise APIError(429, str(error), code="engine_busy",
                            error_type="rate_limit_error") from error
-        except Exception:
-            SESSION_ID_CONTEXT.reset(session_context)
-            raise
 
         completion_id = "chatcmpl-" + uuid.uuid4().hex
         created = int(time.time())
         started = time.monotonic()
         timing = GenerationTiming(REQUEST_STARTED_CONTEXT.get() or started)
-        headers = {"X-Qwen-Session-Id": parsed["session_id"]}
         LOG.info("generation started completion_id=%s prompt_tokens=%d max_tokens=%d stream=%s",
                  completion_id, len(parsed["prompt_ids"]), parsed["max_tokens"],
                  parsed["stream"])
@@ -594,7 +555,6 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                     "object": "chat.completion",
                     "created": created,
                     "model": config.served_model_name,
-                    "session_id": parsed["session_id"],
                     "choices": [{"index": 0, "message": {"role": "assistant", "content": text,
                                                                "refusal": None},
                                  "logprobs": None, "finish_reason": finish_reason}],
@@ -607,14 +567,13 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                 raise
 
         async def streaming():
-            stream_context = SESSION_ID_CONTEXT.set(parsed["session_id"])
             failure = None
             output_ids, published = [], ""
             finish_reason = "length"
             cached_tokens = 0
             try:
                 yield sse(stream_chunk(completion_id, created, config.served_model_name,
-                                       parsed["session_id"], {"role": "assistant", "content": ""}))
+                                       {"role": "assistant", "content": ""}))
                 prefill_started = time.monotonic()
                 cached_tokens = await asyncio.to_thread(
                     session.sync, parsed["prompt_ids"]
@@ -643,7 +602,7 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                     delta = visible[len(published):]
                     if delta:
                         yield sse(stream_chunk(completion_id, created, config.served_model_name,
-                                               parsed["session_id"], {"content": delta}))
+                                               {"content": delta}))
                         published = visible
                     if stopped:
                         finish_reason = "stop"
@@ -662,13 +621,13 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                     raise EngineError("tokenizer rewrote already streamed text")
                 if visible != published:
                     yield sse(stream_chunk(completion_id, created, config.served_model_name,
-                                           parsed["session_id"], {"content": visible[len(published):]}))
+                                           {"content": visible[len(published):]}))
                 yield sse(stream_chunk(completion_id, created, config.served_model_name,
-                                       parsed["session_id"], {}, finish_reason=finish_reason))
+                                       {}, finish_reason=finish_reason))
                 if parsed["include_usage"]:
                     usage = usage_for(output_ids, cached_tokens)
                     item = stream_chunk(completion_id, created, config.served_model_name,
-                                        parsed["session_id"], {})
+                                        {})
                     item["choices"] = []
                     item["usage"] = usage
                     yield sse(item)
@@ -681,27 +640,20 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                 yield sse(error_body(str(error), error_type="server_error"))
                 yield "data: [DONE]\n\n"
             finally:
-                try:
-                    await release(failure)
-                    if failure is None:
-                        log_decode_completed(output_ids, finish_reason, cached_tokens)
-                finally:
-                    SESSION_ID_CONTEXT.reset(stream_context)
+                await release(failure)
+                if failure is None:
+                    log_decode_completed(output_ids, finish_reason, cached_tokens)
 
         if parsed["stream"]:
-            response = StreamingResponse(streaming(), media_type="text/event-stream", headers={
-                **headers, "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+            return StreamingResponse(streaming(), media_type="text/event-stream", headers={
+                "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
             })
-            SESSION_ID_CONTEXT.reset(session_context)
-            return response
         try:
             response = await non_streaming()
             await release()
-            return JSONResponse(response, headers=headers)
+            return JSONResponse(response)
         except EngineError as error:
             raise APIError(500, str(error), error_type="server_error") from error
-        finally:
-            SESSION_ID_CONTEXT.reset(session_context)
 
     return app
 

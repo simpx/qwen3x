@@ -5,10 +5,6 @@
 
 namespace q35_internal {
 
-// Read-only view of the Session timeline. The pointer remains valid until the
-// next sync, eval or reset on this Session.
-const int* session_tokens(const q35_session* session, int* count);
-
 // Return the longest complete Session checkpoint that prefixes tokens.
 // Zero means this Session has no reusable checkpoint for the request.
 int session_reusable_prefix(const q35_session* session,

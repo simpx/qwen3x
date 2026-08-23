@@ -23,7 +23,7 @@ Session
 
 SessionManager
   = 固定数量的预创建 Session
-  = session_id + prefix lookup + FREE/IDLE/BUSY + LRU
+  = prefix lookup + FREE/IDLE/BUSY + LRU
 ```
 
 `Engine`、`Session` 和 `SessionManager` 都定义在 C++。Python 只处理 HTTP、JSON、tokenizer 和
@@ -82,7 +82,7 @@ systemd 启动前先执行一次 `make sync-prod`；service 使用 `--no-sync`�
 包索引。开发和测试使用 `make sync`，它会额外安装 `dev` dependency group。
 
 Python 和 C++ 使用同一条日志链：C++ 通过全局 callback 上报消息和源码位置，Python
-统一补上时间、native thread ID、`request_id`、`session_id`，同时写终端和
+统一补上时间、native thread ID 和 `request_id`，同时写终端和
 `logs/qwen35.log`。日志默认保留 5 个 20 MB
 轮转文件；可以用 `--log-level`、`--log-file`、`--log-max-mb` 和 `--log-backups` 调整。每个 HTTP
 响应都会返回服务端生成的 `X-Request-Id`，可直接用它串起一次请求的 Python/C++ 日志。
@@ -93,31 +93,21 @@ Python 和 C++ 使用同一条日志链：C++ 通过全局 callback 上报消息
 QWEN_API_KEY='换成随机长字符串' make run
 ```
 
-默认监听 `127.0.0.1:8000`。标准 OpenAI Chat Completions 请求可以不传 Session ID；manager 会按
-完整 token prefix 尝试复用空闲 Session。需要稳定回到同一条时间线时，传扩展字段或请求头：
+默认监听 `127.0.0.1:8000`。请求使用标准 OpenAI Chat Completions 字段：
 
 ```json
 {
   "model": "qwen3.5-0.8b",
-  "session_id": "my-agent",
   "messages": [{"role": "user", "content": "你好"}],
   "temperature": 0,
   "stream": true
 }
 ```
 
-也可以使用 `X-Qwen-Session-Id: my-agent`。响应正文、SSE chunk 和响应头都会返回 session id。
-删除常驻状态：
-
-```sh
-curl -X DELETE http://127.0.0.1:8000/v1/sessions/my-agent
-```
-
-同一 `session_id` 的下一次请求会回到同一个 C++ Session。Runtime 仍发送完整 token 序列，
+多轮请求仍需像标准 Chat Completions 一样携带完整 `messages`。Runtime tokenize 后，在所有空闲
+Session 的 live/anchor 中选择最长 token prefix；没有命中时才使用 FREE/LRU Session 并 rebuild。
 每个 Session 当前有两个可命中点：`live` 是当前 State，`anchor` 是额外保存在内存中的 State。
 Session 不区分 prefill 和 decode；当前策略只是在每次 `sync()` 结束时更新 anchor。
-`q35_session_sync()` 用真实 token id 选择较长的完整前缀：命中 live 就继续 append，命中 anchor
-就恢复它，否则 reset 并从头 rebuild。
 
 保存 anchor 时只额外复制 DeltaNet 的 recurrent/conv state；Attention KV 本来就是按 token
 append 的，所以恢复时只截断到 checkpoint position，不额外复制一整份 KV。
@@ -129,7 +119,6 @@ append 的，所以恢复时只截断到 checkpoint position，不额外复制�
 - 中断只能在 token 边界发现；一次 CPU forward 尚不能抢占。
 - 没有跨 Session 共享的 prefix block、disk cache、batching、vision、tools 或 MTP；当前 prefix
   命中是把一个完整 Session 重新交给请求，而不是让多个 Session 同时共享一份 State。
-- `session_id` 是本项目扩展，不是 Chat Completions 标准字段。
 
 下一步可以在不改变 C ABI 基本关系的前提下加入 disk checkpoint 和 CUDA Engine。公共前缀以后可
 作为 pinned prefix 优化：Attention block 可共享，DeltaNet 起点 State 仍需复制给各 Session。

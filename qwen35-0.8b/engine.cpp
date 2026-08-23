@@ -787,16 +787,6 @@ struct q35_session {
 
 namespace q35_internal {
 
-const int* session_tokens(const q35_session* session, int* count) {
-    if (!count) return nullptr;
-    if (!session) {
-        *count = 0;
-        return nullptr;
-    }
-    *count = static_cast<int>(session->tokens.size());
-    return session->tokens.data();
-}
-
 int session_reusable_prefix(const q35_session* session,
                             const int* tokens, int count) {
     if (!session || !tokens || count <= 0) return 0;

@@ -28,7 +28,6 @@ def main():
                 headers={"Authorization": "Bearer test"},
                 json={
                     "model": "qwen3.5-0.8b",
-                    "session_id": "e2e-agent",
                     "messages": [{"role": "user", "content": "用一句话介绍 DeltaNet。"}],
                     "temperature": 0,
                     "max_completion_tokens": 8,
@@ -38,7 +37,7 @@ def main():
             body = response.json()
             text = body["choices"][0]["message"]["content"]
             assert text
-            assert body["session_id"] == "e2e-agent"
+            assert "session_id" not in body
             print(f"native HTTP e2e: {text!r}")
 
         # create_app does not own an injected manager.
