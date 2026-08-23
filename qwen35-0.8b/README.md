@@ -156,8 +156,8 @@ QWEN_API_KEY='换成随机长字符串' make run
 多轮请求仍需像标准 Chat Completions 一样携带完整 `messages`。Runtime tokenize 后，在所有空闲
 Session 的 live/checkpoint 中选择最长 token prefix；没有命中时才使用 FREE/LRU Session 并 rebuild。
 每个 Session 当前有两个可命中点：`live` 是当前 State，`checkpoint` 是额外保存在内存中的 State。
-Runtime 使用不带 generation prompt 的 token 数作为 `checkpoint_at`；Engine 在
-`sync()` forward 到该位置时保存 checkpoint，避开 `<think>` 等只属于当次生成的控制 token。
+Runtime 当前把完整 prompt 的 token 数作为 `checkpoint_at`；Engine 在 `sync()` 完成全部 prefill
+后保存 checkpoint。这个位置仍由 Runtime 显式传入，Engine 不推断模板边界，方便以后调整保存策略。
 
 保存 checkpoint 时只额外复制 DeltaNet 的 recurrent/conv state；Attention KV 本来就是按 token
 append 的，所以恢复时只截断到 checkpoint position，不额外复制一整份 KV。

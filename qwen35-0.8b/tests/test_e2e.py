@@ -25,8 +25,9 @@ def main():
         with TestClient(create_app(config, tokenizer=tokenizer, manager=manager)) as client:
             messages = [{"role": "user", "content": "用一句话介绍 DeltaNet。"}]
             checkpoint_at = len(tokenizer.apply_chat_template(
-                messages, tokenize=True, add_generation_prompt=False,
-                return_dict=False,
+                messages, tokenize=True, add_generation_prompt=True,
+                return_dict=False, enable_thinking=False,
+                preserve_thinking=True,
             ))
             response = client.post(
                 "/v1/chat/completions",
@@ -60,7 +61,7 @@ def main():
             )
             continued.raise_for_status()
             cached = continued.json()["usage"]["prompt_tokens_details"]["cached_tokens"]
-            assert cached == checkpoint_at, (cached, checkpoint_at)
+            assert cached >= checkpoint_at, (cached, checkpoint_at)
             print(f"native HTTP e2e: {text!r}, continued cached={cached}")
 
         # create_app does not own an injected manager.

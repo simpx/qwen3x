@@ -41,7 +41,7 @@ class FakeSession:
 
     def sync(self, tokens, checkpoint_at):
         assert tokens == [10, 11]
-        assert checkpoint_at == 1
+        assert checkpoint_at == len(tokens)
         self.sync_count += 1
         self.step = 0
         self.checkpoint_at = checkpoint_at
