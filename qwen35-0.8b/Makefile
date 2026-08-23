@@ -13,7 +13,7 @@ MOCK_ARG := $(if $(filter 1 true yes,$(MOCK)),--mock,)
 BENCH_PREFILL ?= 8
 BENCH_DECODE ?= 4
 
-CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic
+CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic -march=native
 
 .PHONY: all sync sync-prod weights unit-test mock-test native-test test e2e run chat bench clean
 

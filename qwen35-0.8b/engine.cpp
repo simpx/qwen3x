@@ -28,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <immintrin.h>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -143,16 +144,44 @@ struct Model {
 
 // 两个 FP32 向量：[count] dot [count] -> 标量。
 FP32 dot_f32(const FP32* left, const FP32* right, int count) {
+#if defined(__AVX512F__)
+    __m512 sums = _mm512_setzero_ps();
+    int i = 0;
+    for (; i + 16 <= count; i += 16) {
+        sums = _mm512_fmadd_ps(_mm512_loadu_ps(left + i),
+                               _mm512_loadu_ps(right + i), sums);
+    }
+    FP32 sum = _mm512_reduce_add_ps(sums);
+    for (; i < count; ++i) sum += left[i] * right[i];
+    return sum;
+#else
     FP32 sum = 0.0f;
     for (int i = 0; i < count; ++i) sum += left[i] * right[i];
     return sum;
+#endif
 }
 
 // BF16 权重行与 FP32 输入：[count] dot [count] -> FP32 标量。
 FP32 dot_bf16(const BF16* weight, const FP32* input, int count) {
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+    __m512 sums = _mm512_setzero_ps();
+    int i = 0;
+    for (; i + 16 <= count; i += 16) {
+        const __m256i packed = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(weight + i));
+        __m512i bits = _mm512_cvtepu16_epi32(packed);
+        bits = _mm512_slli_epi32(bits, 16);
+        const __m512 values = _mm512_castsi512_ps(bits);
+        sums = _mm512_fmadd_ps(values, _mm512_loadu_ps(input + i), sums);
+    }
+    FP32 sum = _mm512_reduce_add_ps(sums);
+    for (; i < count; ++i) sum += f32(weight[i]) * input[i];
+    return sum;
+#else
     FP32 sum = 0.0f;
     for (int i = 0; i < count; ++i) sum += f32(weight[i]) * input[i];
     return sum;
+#endif
 }
 
 // GEMV：W[rows,cols] @ input[cols] -> output[rows]；遍历输出行，每行做一次 dot。
