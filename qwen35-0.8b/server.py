@@ -42,6 +42,7 @@ from qwen35 import (
 
 
 HERE = Path(__file__).resolve().parent
+CHAT_TEMPLATE = (HERE / "chat_template.jinja").read_text(encoding="utf-8")
 LOG = logging.getLogger("qwen35.runtime")
 REQUEST_ID_CONTEXT = ContextVar("request_id", default="-")
 REQUEST_STARTED_CONTEXT = ContextVar("request_started", default=None)
@@ -254,7 +255,17 @@ def normalize_messages(messages):
             raise APIError(400, f"unsupported message role: {role!r}", param=f"messages[{index}].role")
         if role == "system" and index != 0:
             raise APIError(400, "system/developer message must be first", param="messages")
-        result.append({"role": role, "content": text_content(message)})
+        normalized = {"role": role, "content": text_content(message)}
+        if role == "assistant":
+            reasoning = message.get("reasoning_content", message.get("reasoning", ""))
+            if not isinstance(reasoning, str):
+                raise APIError(
+                    400,
+                    "assistant reasoning_content must be text",
+                    param=f"messages[{index}].reasoning_content",
+                )
+            normalized["reasoning_content"] = reasoning
+        result.append(normalized)
     if not any(message["role"] == "user" for message in result):
         raise APIError(400, "messages must contain a user message", param="messages")
     return result
@@ -287,18 +298,43 @@ def parse_request(body, config: Config, tokenizer):
     if body.get("logprobs") not in (None, False):
         raise APIError(400, "logprobs are not implemented", param="logprobs")
 
+    template_options = body.get("chat_template_kwargs") or {}
+    if not isinstance(template_options, dict):
+        raise APIError(400, "chat_template_kwargs must be an object",
+                       param="chat_template_kwargs")
+    unknown_template_options = set(template_options) - {
+        "enable_thinking", "preserve_thinking"
+    }
+    if unknown_template_options:
+        name = sorted(unknown_template_options)[0]
+        raise APIError(400, f"unsupported chat template option: {name}",
+                       param=f"chat_template_kwargs.{name}")
+    enable_thinking = template_options.get("enable_thinking", False)
+    preserve_thinking = template_options.get("preserve_thinking", True)
+    if not isinstance(enable_thinking, bool):
+        raise APIError(400, "enable_thinking must be boolean",
+                       param="chat_template_kwargs.enable_thinking")
+    if not isinstance(preserve_thinking, bool):
+        raise APIError(400, "preserve_thinking must be boolean",
+                       param="chat_template_kwargs.preserve_thinking")
+
     messages = normalize_messages(body.get("messages"))
     try:
         stable_ids = tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=False, return_dict=False
+            messages, tokenize=True, add_generation_prompt=False, return_dict=False,
+            enable_thinking=enable_thinking,
+            preserve_thinking=preserve_thinking,
         )
         prompt_ids = tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True, return_dict=False
+            messages, tokenize=True, add_generation_prompt=True, return_dict=False,
+            enable_thinking=enable_thinking,
+            preserve_thinking=preserve_thinking,
         )
     except Exception as error:
         raise APIError(400, f"chat template rejected messages: {error}", param="messages") from error
     stable_ids = [int(token) for token in stable_ids]
     prompt_ids = [int(token) for token in prompt_ids]
+    think_end_token = int(tokenizer.convert_tokens_to_ids("</think>"))
     if not stable_ids or prompt_ids[:len(stable_ids)] != stable_ids:
         raise APIError(
             500,
@@ -337,6 +373,9 @@ def parse_request(body, config: Config, tokenizer):
         "temperature": float(temperature),
         "top_p": float(top_p),
         "rng": seed if seed is not None else secrets.randbits(64),
+        "enable_thinking": enable_thinking,
+        "preserve_thinking": preserve_thinking,
+        "think_end_token": think_end_token,
     }
 
 
@@ -349,6 +388,30 @@ def stop_view(text: str, stops: list[str], *, final=False):
         return text, False
     hold = max(len(stop) for stop in stops) - 1
     return text[:-hold] if hold else text, False
+
+
+def split_generated_ids(output_ids, enable_thinking, think_end_token):
+    if not enable_thinking:
+        return [], output_ids
+    try:
+        boundary = output_ids.index(think_end_token)
+    except ValueError:
+        return output_ids, []
+    return output_ids[:boundary], output_ids[boundary + 1:]
+
+
+def decode_generated(tokenizer, output_ids, enable_thinking, think_end_token):
+    reasoning_ids, content_ids = split_generated_ids(
+        output_ids, enable_thinking, think_end_token
+    )
+    reasoning = tokenizer.decode(reasoning_ids, skip_special_tokens=True)
+    content = tokenizer.decode(content_ids, skip_special_tokens=True)
+    if enable_thinking:
+        # The template owns the newlines around </think>; they are not part of
+        # reasoning_content or visible content, but remain in Session tokens.
+        reasoning = reasoning.rstrip()
+        content = content.lstrip()
+    return reasoning, content
 
 
 def sse(data) -> str:
@@ -390,6 +453,7 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
             tokenizer = await asyncio.to_thread(
                 AutoTokenizer.from_pretrained, config.tokenizer_path
             )
+        tokenizer.chat_template = CHAT_TEMPLATE
         if manager is None:
             await asyncio.to_thread(
                 set_log_callback, config.library_path, native_log, config.native_log_level
@@ -477,9 +541,11 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
         created = int(time.time())
         started = time.monotonic()
         timing = GenerationTiming(REQUEST_STARTED_CONTEXT.get() or started)
-        LOG.info("generation started completion_id=%s prompt_tokens=%d max_tokens=%d stream=%s",
+        LOG.info("generation started completion_id=%s prompt_tokens=%d max_tokens=%d "
+                 "stream=%s enable_thinking=%s preserve_thinking=%s",
                  completion_id, len(parsed["prompt_ids"]), parsed["max_tokens"],
-                 parsed["stream"])
+                 parsed["stream"], parsed["enable_thinking"],
+                 parsed["preserve_thinking"])
 
         async def release(error=None):
             await asyncio.to_thread(app.state.manager.release, session, keep=error is None)
@@ -547,8 +613,11 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                     finish_reason = "stop"
                     break
                 output_ids.append(token)
-                decoded = app.state.tokenizer.decode(output_ids, skip_special_tokens=True)
-                _visible, stopped = stop_view(decoded, parsed["stops"])
+                _reasoning, content = decode_generated(
+                    app.state.tokenizer, output_ids, parsed["enable_thinking"],
+                    parsed["think_end_token"]
+                )
+                _visible, stopped = stop_view(content, parsed["stops"])
                 if stopped:
                     finish_reason = "stop"
                     break
@@ -562,18 +631,23 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
         async def non_streaming():
             try:
                 output_ids, finish_reason, cached_tokens = await generate_tokens()
-                decoded = app.state.tokenizer.decode(output_ids, skip_special_tokens=True)
-                text, stopped = stop_view(decoded, parsed["stops"], final=True)
+                reasoning, content = decode_generated(
+                    app.state.tokenizer, output_ids, parsed["enable_thinking"],
+                    parsed["think_end_token"]
+                )
+                text, stopped = stop_view(content, parsed["stops"], final=True)
                 if stopped:
                     finish_reason = "stop"
                 usage = log_decode_completed(output_ids, finish_reason, cached_tokens)
+                message = {"role": "assistant", "content": text, "refusal": None}
+                if parsed["enable_thinking"]:
+                    message["reasoning_content"] = reasoning
                 return {
                     "id": completion_id,
                     "object": "chat.completion",
                     "created": created,
                     "model": config.served_model_name,
-                    "choices": [{"index": 0, "message": {"role": "assistant", "content": text,
-                                                               "refusal": None},
+                    "choices": [{"index": 0, "message": message,
                                  "logprobs": None, "finish_reason": finish_reason}],
                     "usage": usage,
                 }
@@ -585,7 +659,8 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
 
         async def streaming():
             failure = None
-            output_ids, published = [], ""
+            output_ids = []
+            published_reasoning, published_content = "", ""
             finish_reason = "length"
             cached_tokens = 0
             try:
@@ -612,15 +687,27 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                         finish_reason = "stop"
                         break
                     output_ids.append(token)
-                    decoded = app.state.tokenizer.decode(output_ids, skip_special_tokens=True)
-                    visible, stopped = stop_view(decoded, parsed["stops"])
-                    if not visible.startswith(published):
-                        raise EngineError("tokenizer rewrote already streamed text")
-                    delta = visible[len(published):]
-                    if delta:
+                    reasoning, content = decode_generated(
+                        app.state.tokenizer, output_ids, parsed["enable_thinking"],
+                        parsed["think_end_token"]
+                    )
+                    visible_content, stopped = stop_view(content, parsed["stops"])
+                    if not reasoning.startswith(published_reasoning):
+                        raise EngineError("tokenizer rewrote streamed reasoning")
+                    if not visible_content.startswith(published_content):
+                        raise EngineError("tokenizer rewrote streamed content")
+                    reasoning_delta = reasoning[len(published_reasoning):]
+                    content_delta = visible_content[len(published_content):]
+                    if reasoning_delta:
+                        yield sse(stream_chunk(
+                            completion_id, created, config.served_model_name,
+                            {"reasoning_content": reasoning_delta},
+                        ))
+                        published_reasoning = reasoning
+                    if content_delta:
                         yield sse(stream_chunk(completion_id, created, config.served_model_name,
-                                               {"content": delta}))
-                        published = visible
+                                               {"content": content_delta}))
+                        published_content = visible_content
                     if stopped:
                         finish_reason = "stop"
                         break
@@ -630,15 +717,27 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                         session, parsed["temperature"], parsed["top_p"], rng, token
                     )
 
-                decoded = app.state.tokenizer.decode(output_ids, skip_special_tokens=True)
-                visible, stopped = stop_view(decoded, parsed["stops"], final=True)
+                reasoning, content = decode_generated(
+                    app.state.tokenizer, output_ids, parsed["enable_thinking"],
+                    parsed["think_end_token"]
+                )
+                visible_content, stopped = stop_view(
+                    content, parsed["stops"], final=True
+                )
                 if stopped:
                     finish_reason = "stop"
-                if not visible.startswith(published):
-                    raise EngineError("tokenizer rewrote already streamed text")
-                if visible != published:
+                if not reasoning.startswith(published_reasoning):
+                    raise EngineError("tokenizer rewrote streamed reasoning")
+                if not visible_content.startswith(published_content):
+                    raise EngineError("tokenizer rewrote streamed content")
+                if reasoning != published_reasoning:
+                    yield sse(stream_chunk(
+                        completion_id, created, config.served_model_name,
+                        {"reasoning_content": reasoning[len(published_reasoning):]},
+                    ))
+                if visible_content != published_content:
                     yield sse(stream_chunk(completion_id, created, config.served_model_name,
-                                           {"content": visible[len(published):]}))
+                                           {"content": visible_content[len(published_content):]}))
                 yield sse(stream_chunk(completion_id, created, config.served_model_name,
                                        {}, finish_reason=finish_reason))
                 if parsed["include_usage"]:

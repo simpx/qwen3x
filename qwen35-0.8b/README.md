@@ -80,7 +80,8 @@ Mock 仍加载并校验真实 packed weights，也使用真实 tokenizer、Sessi
 完整 `logits[V]`、argmax/sample、stop token 和流式返回。区别仅在于单 token forward 轻量更新
 State，并按当前输入 token 从启动时准备好的 logits bank 中选择一行；它不区分 prefill 和
 decode。任意非数字 token 按 `position % 10` 映射到数字，随后稳定执行
-`0 -> 1 -> ... -> 9 -> stop`。
+`0 -> 1 -> ... -> 9 -> stop`；thinking prompt 则先执行
+`<think> -> think -> </think>`，再进入数字序列。
 
 另开一个终端发送最小流式请求：
 
@@ -99,6 +100,7 @@ make chat
 
 ```sh
 ./client -n 64 -t 0.7 -p 0.9 "你好" "继续"
+./client --thinking "你好" "继续"
 ./client --help
 ```
 
@@ -125,6 +127,14 @@ Session/cache 日志中的 `session` 始终指一个持有 State/token timeline 
 checkpoint restore/save 和 prefill 等实际动作。一次请求的 Session 主生命周期固定为
 `session acquire -> session sync -> session release`：`acquire` 说明 SessionManager 为什么选择
 这个 slot，`sync` 说明 Engine 如何复用和推进，`release` 说明请求结束后保留的两个 State。
+
+Runtime 使用仓库内的 `chat_template.jinja`，而不是直接使用 tokenizer 目录里的模板。它基于
+Qwen3.5-0.8B 模型模板，并采用 Qwen3.8 的 `preserve_thinking` 语义：默认保留历史 assistant
+实际生成的 `reasoning_content` 和 `<think>...</think>` 包装，从而让下一轮 prompt 可以完整命中
+上一轮 live state。0.8B 默认仍是 non-thinking；请求传入
+`"chat_template_kwargs":{"enable_thinking":true}` 或使用 `client --thinking` 才会开启 thinking。
+服务端将 thinking 输出放在 `reasoning_content`，正文仍放在 `content`；client 会在下一轮把两者
+一并传回。可显式传 `preserve_thinking=false`（client 使用 `--no-preserve-thinking`）关闭历史保留。
 
 默认不启用鉴权。需要 Bearer 鉴权时，显式设置 `QWEN_API_KEY` 再启动：
 

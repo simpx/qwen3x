@@ -4,18 +4,30 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from qwen35 import SessionBusy
-from server import Config, LogHighlighter, create_app
+from server import CHAT_TEMPLATE, Config, LogHighlighter, create_app
 
 
 class FakeTokenizer:
-    texts = {20: "你", 21: "你好", 22: "你好！"}
+    pieces = {20: "你", 21: "好", 22: "！", 99: ""}
 
-    def apply_chat_template(self, messages, *, add_generation_prompt, **_kwargs):
+    def __init__(self):
+        self.chat_template = None
+        self.template_options = []
+
+    def apply_chat_template(self, messages, *, add_generation_prompt, **kwargs):
         assert messages[-1]["role"] == "user"
+        self.template_options.append({
+            "enable_thinking": kwargs.get("enable_thinking"),
+            "preserve_thinking": kwargs.get("preserve_thinking"),
+        })
         return [10, 11] if add_generation_prompt else [10]
 
     def decode(self, ids, **_kwargs):
-        return self.texts[ids[-1]] if ids else ""
+        return "".join(self.pieces[token] for token in ids)
+
+    def convert_tokens_to_ids(self, token):
+        assert token == "</think>"
+        return 99
 
 
 class FakeSession:
@@ -25,6 +37,7 @@ class FakeSession:
         self.sync_count = 0
         self.cached_tokens = 0
         self.checkpoint_at = None
+        self.output_tokens = [20, 21, 22]
 
     def sync(self, tokens, checkpoint_at):
         assert tokens == [10, 11]
@@ -35,13 +48,13 @@ class FakeSession:
         return self.cached_tokens
 
     def argmax(self):
-        return [20, 21, 22][self.step]
+        return self.output_tokens[self.step]
 
     def sample(self, _temperature, _top_p, rng):
         return self.argmax(), rng + 1
 
     def eval(self, token):
-        assert token == [20, 21, 22][self.step]
+        assert token == self.output_tokens[self.step]
         self.step += 1
 
     def reset(self):
@@ -92,8 +105,9 @@ class ServerTest(unittest.TestCase):
         self.manager = FakeManager(self.engine, 2)
         config = Config(Path("model"), Path("library"), Path("weights"), api_key="secret",
                         max_context_tokens=128)
+        self.tokenizer = FakeTokenizer()
         self.context = TestClient(
-            create_app(config, tokenizer=FakeTokenizer(), manager=self.manager)
+            create_app(config, tokenizer=self.tokenizer, manager=self.manager)
         )
         self.client = self.context.__enter__()
         self.headers = {"Authorization": "Bearer secret"}
@@ -123,6 +137,36 @@ class ServerTest(unittest.TestCase):
         self.assertIn(("qwen.number", "128"), highlighted)
         self.assertIn(("qwen.number", "0.125s"), highlighted)
         self.assertIn(("qwen.value", "append"), highlighted)
+
+    def test_chat_template_preserves_history_thinking_by_default(self):
+        from transformers.utils.chat_template_utils import render_jinja_template
+
+        messages = [[
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "reasoning_content": "secret",
+             "content": "world"},
+            {"role": "user", "content": "again"},
+        ]]
+        rendered, _generation_indices = render_jinja_template(
+            conversations=messages,
+            chat_template=CHAT_TEMPLATE,
+            add_generation_prompt=True,
+        )
+        self.assertIn(
+            "<|im_start|>assistant\n<think>\nsecret\n</think>\n\nworld<|im_end|>",
+            rendered[0],
+        )
+
+        without_thinking, _generation_indices = render_jinja_template(
+            conversations=messages,
+            chat_template=CHAT_TEMPLATE,
+            add_generation_prompt=True,
+            preserve_thinking=False,
+        )
+        self.assertNotIn("secret", without_thinking[0])
+        self.assertIn(
+            "<|im_start|>assistant\nworld<|im_end|>", without_thinking[0]
+        )
 
     def test_auth_health_and_models(self):
         first = self.client.get("/healthz")
@@ -168,6 +212,35 @@ class ServerTest(unittest.TestCase):
         second = self.manager.sessions[0]
         self.assertIs(first, second)
         self.assertEqual(first.sync_count, 2)
+        self.assertTrue(all(
+            options == {"enable_thinking": False, "preserve_thinking": True}
+            for options in self.tokenizer.template_options
+        ))
+
+    def test_non_streaming_separates_reasoning_and_content(self):
+        self.manager.sessions[0].output_tokens = [20, 99, 21, 22]
+        response = self.request(
+            max_completion_tokens=4,
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        message = response.json()["choices"][0]["message"]
+        self.assertEqual(message["reasoning_content"], "你")
+        self.assertEqual(message["content"], "好！")
+        self.assertEqual(response.json()["usage"]["completion_tokens"], 4)
+
+    def test_streaming_separates_reasoning_and_content(self):
+        self.manager.sessions[0].output_tokens = [20, 99, 21, 22]
+        response = self.request(
+            max_completion_tokens=4,
+            stream=True,
+            stream_options={"include_usage": True},
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn('"reasoning_content":"你"', response.text)
+        self.assertIn('"content":"好"', response.text)
+        self.assertIn('"content":"！"', response.text)
 
     def test_streaming_contract(self):
         with self.assertLogs("qwen35.runtime", level="INFO") as logs:

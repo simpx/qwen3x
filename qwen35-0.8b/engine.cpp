@@ -61,10 +61,14 @@ constexpr int DQK = KH * KD, DO = VH * VD, DQKV = 2 * DQK + DO;
 constexpr int MAX_CONTEXT = 262144;
 constexpr uint32_t MODEL_FORMAT_VERSION = 1;
 constexpr int END_OF_TEXT_TOKEN = 248044, IM_END_TOKEN = 248046;
-// Qwen token ids 15..24 decode as the digits 0..9. Each row predicts its digit;
-// the final row predicts stop after the input token 9.
-constexpr std::array<int, 11> MOCK_TARGET_TOKENS = {
+constexpr int THINK_START_TOKEN = 248068, THINK_END_TOKEN = 248069;
+constexpr int NEWLINE_TOKEN = 198;
+constexpr int MOCK_REASONING_TOKEN = 26003;  // "think"
+// Rows 0..9 predict digits 0..9; row 10 predicts stop after digit 9.
+// The final rows reproduce the exact separators emitted by the chat template.
+constexpr std::array<int, 15> MOCK_TARGET_TOKENS = {
     15, 16, 17, 18, 19, 20, 21, 22, 23, 24, IM_END_TOKEN,
+    MOCK_REASONING_TOKEN, NEWLINE_TOKEN, THINK_END_TOKEN, 271,
 };
 using FP32 = float;
 using BF16 = uint16_t;
@@ -472,7 +476,7 @@ void forward(const Model& model, State& state, int token, Work& work) {
 // math. It keeps State shapes and position valid, then selects one prebuilt
 // logits[V] row from the current input token. It neither knows nor needs to
 // know whether its caller is prefill (sync loop) or decode (one eval call).
-void mock_forward(State& state, int token, Work& work,
+void mock_forward(State& state, int previous_token, int token, Work& work,
                   const std::vector<std::vector<FP32>>& logits_bank) {
     if (state.position >= state.capacity) die("session context is full");
     if (logits_bank.empty()) die("mock logits bank is empty");
@@ -496,11 +500,19 @@ void mock_forward(State& state, int token, Work& work,
     }
 
     ++state.position;
-    // A non-digit selects only rows 0..9, so prefill can never directly
-    // produce stop. position is already part of State/checkpoint and needs no
-    // extra Mock cursor or hash.
+    // A normal non-digit selects only rows 0..9, so prefill cannot directly
+    // produce stop. Thinking control tokens form their own token bigram chain.
     size_t row = static_cast<size_t>(state.position % 10);
-    if (token >= MOCK_TARGET_TOKENS.front() && token <= MOCK_TARGET_TOKENS[9]) {
+    if (previous_token == THINK_START_TOKEN && token == NEWLINE_TOKEN) {
+        row = 11;  // <think>\n -> "think"
+    } else if (token == MOCK_REASONING_TOKEN) {
+        row = 12;  // "think" -> \n
+    } else if (previous_token == MOCK_REASONING_TOKEN && token == NEWLINE_TOKEN) {
+        row = 13;  // "think"\n -> </think>
+    } else if (token == THINK_END_TOKEN) {
+        row = 14;  // </think> -> \n\n
+    } else if (token >= MOCK_TARGET_TOKENS.front() &&
+               token <= MOCK_TARGET_TOKENS[9]) {
         // digit 0 -> row for 1, ..., digit 8 -> row for 9, digit 9 -> stop row.
         row = static_cast<size_t>(token - MOCK_TARGET_TOKENS.front() + 1);
     }
@@ -762,7 +774,9 @@ struct q35_session {
 
     void append(int token) {
         if (engine->mock) {
-            qwen35::mock_forward(state, token, work, engine->mock_logits);
+            const int previous_token = tokens.empty() ? -1 : tokens.back();
+            qwen35::mock_forward(state, previous_token, token, work,
+                                 engine->mock_logits);
         } else {
             qwen35::forward(engine->model->model, state, token, work);
         }

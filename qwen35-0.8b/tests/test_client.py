@@ -22,8 +22,13 @@ class Handler(BaseHTTPRequestHandler):
         self.requests.append(body)
         turn = len(self.requests)
         text = f"reply-{turn}"
-        chunks = [
-            {"choices": [{"delta": {"content": text}}]},
+        deltas = []
+        if body.get("chat_template_kwargs", {}).get("enable_thinking"):
+            deltas.append({"choices": [{"delta": {
+                "reasoning_content": f"thought-{turn}"
+            }}]})
+        deltas.append({"choices": [{"delta": {"content": text}}]})
+        chunks = deltas + [
             {"choices": [], "usage": {
                 "prompt_tokens": turn * 10,
                 "completion_tokens": 2,
@@ -77,6 +82,38 @@ class ClientTest(unittest.TestCase):
         self.assertNotIn("session_id", first)
         self.assertNotIn("session_id", second)
         self.assertTrue(first["stream_options"]["include_usage"])
+        self.assertEqual(first["chat_template_kwargs"], {
+            "enable_thinking": False,
+            "preserve_thinking": True,
+        })
+
+    def test_thinking_is_returned_to_the_next_turn(self):
+        Handler.requests = []
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = subprocess.run(
+                [sys.executable, CLIENT, "--no-color", "--thinking", "-u",
+                 f"http://127.0.0.1:{server.server_port}", "hello", "hello2"],
+                check=True, capture_output=True, text=True,
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+        self.assertIn("think: thought-1\nresp: reply-1", result.stdout)
+        self.assertEqual(Handler.requests[1]["messages"], [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "reply-1",
+             "reasoning_content": "thought-1"},
+            {"role": "user", "content": "hello2"},
+        ])
+        self.assertEqual(Handler.requests[0]["chat_template_kwargs"], {
+            "enable_thinking": True,
+            "preserve_thinking": True,
+        })
 
 
 if __name__ == "__main__":

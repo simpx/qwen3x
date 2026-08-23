@@ -50,6 +50,20 @@ def main():
         assert session.position == len(prompt)
         assert session.argmax() == first
 
+        # Thinking mode uses token-to-token rules too, without a separate
+        # prefill/decode branch in the mock Engine.
+        thinking = engine.create_session(64)
+        thinking.sync([248068, 198])  # <think>\n
+        assert thinking.argmax() == 26003  # "think"
+        thinking.eval(26003)
+        assert thinking.argmax() == 198  # \n
+        thinking.eval(198)
+        assert thinking.argmax() == 248069  # </think>
+        thinking.eval(248069)
+        assert thinking.argmax() == 271  # \n\n
+        thinking.eval(271)
+        assert 15 <= thinking.argmax() <= 24
+
     print("native mock Engine regression: passed")
 
 

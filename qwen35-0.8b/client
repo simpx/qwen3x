@@ -28,14 +28,15 @@ def error_message(error):
         return f"HTTP {error.code}: {error.reason}"
 
 
-def stream_chat(endpoint, api_key, body, on_text, timeout):
+def stream_chat(endpoint, api_key, body, on_reasoning, on_content, timeout):
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = "Bearer " + api_key
     request = urllib.request.Request(endpoint, data=data, headers=headers, method="POST")
 
-    parts = []
+    reasoning_parts = []
+    content_parts = []
     usage = None
     try:
         response = urllib.request.urlopen(request, timeout=timeout)
@@ -58,13 +59,18 @@ def stream_chat(endpoint, api_key, body, on_text, timeout):
             choices = item.get("choices") or []
             if not choices:
                 continue
-            text = choices[0].get("delta", {}).get("content")
-            if text:
-                parts.append(text)
-                on_text(text)
+            delta = choices[0].get("delta", {})
+            reasoning = delta.get("reasoning_content", delta.get("reasoning"))
+            content = delta.get("content")
+            if reasoning:
+                reasoning_parts.append(reasoning)
+                on_reasoning(reasoning)
+            if content:
+                content_parts.append(content)
+                on_content(content)
     if usage is None:
         raise ClientError("server stream ended without usage")
-    return "".join(parts), usage
+    return "".join(reasoning_parts), "".join(content_parts), usage
 
 
 def usage_text(usage):
@@ -91,6 +97,12 @@ def parse_args():
     parser.add_argument("-S", "--system", default=None, help="optional system message")
     parser.add_argument("-k", "--api-key", default=os.environ.get("QWEN_API_KEY"))
     parser.add_argument("--timeout", type=float, default=3600.0)
+    parser.add_argument("--thinking", action="store_true",
+                        help="enable Qwen thinking mode")
+    parser.add_argument("--no-preserve-thinking", dest="preserve_thinking",
+                        action="store_false",
+                        help="omit thinking from historical assistant messages")
+    parser.set_defaults(preserve_thinking=True)
     parser.add_argument("--no-color", action="store_true")
     return parser.parse_args()
 
@@ -104,13 +116,23 @@ def main():
 
     color = sys.stdout.isatty() and not args.no_color and "NO_COLOR" not in os.environ
     req_label = colored("req", "1;36", color)
+    think_label = colored("think", "1;35", color)
     resp_label = colored("resp", "1;32", color)
     usage_label = colored("usage", "1;33", color)
 
     for prompt in args.prompts:
         messages.append({"role": "user", "content": prompt})
         print(f"{req_label}: {prompt}")
-        print(f"{resp_label}: ", end="", flush=True)
+        active_output = {"kind": None}
+
+        def print_stream(kind, label, text):
+            if active_output["kind"] != kind:
+                if active_output["kind"] is not None:
+                    print()
+                print(f"{label}: ", end="", flush=True)
+                active_output["kind"] = kind
+            print(text, end="", flush=True)
+
         body = {
             "model": args.model,
             "messages": messages,
@@ -119,21 +141,31 @@ def main():
             "max_completion_tokens": args.max_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
+            "chat_template_kwargs": {
+                "enable_thinking": args.thinking,
+                "preserve_thinking": args.preserve_thinking,
+            },
         }
         try:
-            response, usage = stream_chat(
+            reasoning, response, usage = stream_chat(
                 endpoint, args.api_key, body,
-                lambda text: print(text, end="", flush=True),
+                lambda text: print_stream("reasoning", think_label, text),
+                lambda text: print_stream("content", resp_label, text),
                 args.timeout,
             )
         except ClientError as error:
             print()
             print(colored(f"error: {error}", "1;31", color), file=sys.stderr)
             return 1
+        if active_output["kind"] is None:
+            print(f"{resp_label}: ", end="")
         print()
         print(f"{usage_label}: {usage_text(usage)}")
         print()
-        messages.append({"role": "assistant", "content": response})
+        assistant = {"role": "assistant", "content": response}
+        if args.thinking:
+            assistant["reasoning_content"] = reasoning
+        messages.append(assistant)
     return 0
 
 

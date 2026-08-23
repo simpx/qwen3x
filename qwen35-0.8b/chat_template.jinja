@@ -1,3 +1,8 @@
+{#-
+Based on the Qwen3.5-0.8B model template, with Qwen3.8-compatible
+preserve_thinking behavior so a multi-turn prompt can remain a token prefix of
+the live Session.
+-#}
 {%- set image_count = namespace(value=0) %}
 {%- set video_count = namespace(value=0) %}
 {%- macro render_content(content, do_vision_count, is_system_content=false) %}
@@ -97,7 +102,7 @@
             {%- endif %}
         {%- endif %}
         {%- set reasoning_content = reasoning_content|trim %}
-        {%- if loop.index0 > ns.last_query_index %}
+        {%- if preserve_thinking is undefined or preserve_thinking is true or loop.index0 > ns.last_query_index %}
             {{- '<|im_start|>' + message.role + '\n<think>\n' + reasoning_content + '\n</think>\n\n' + content }}
         {%- else %}
             {{- '<|im_start|>' + message.role + '\n' + content }}
