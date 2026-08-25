@@ -169,6 +169,10 @@ QWEN_API_KEY='换成随机长字符串' make run
 }
 ```
 
+采样支持 `temperature`、`top_p`、`top_k`、`presence_penalty` 和 `seed`。
+`presence_penalty` 与 vLLM 语义一致：只统计当前请求已经生成过的 token，每个不同 token
+最多减一次。`min_p=0` 和 `repetition_penalty=1` 作为显式 no-op 接受；其他值会返回 400。
+
 多轮请求仍需像标准 Chat Completions 一样携带完整 `messages`。Runtime tokenize 后，在所有空闲
 Session 的 live/checkpoint 中选择最长 token prefix；没有命中时才使用 FREE/LRU Session 并 rebuild。
 每个 Session 当前有两个可命中点：`live` 是当前 State，`checkpoint` 是额外保存在内存中的 State。

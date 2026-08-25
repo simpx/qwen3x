@@ -292,6 +292,26 @@ def parse_request(body, config: Config, tokenizer):
     if (isinstance(top_p, bool) or not isinstance(top_p, (int, float))
             or not 0 < top_p <= 1):
         raise APIError(400, "top_p must be in (0, 1]", param="top_p")
+    top_k = body.get("top_k", 0)
+    if (isinstance(top_k, bool) or not isinstance(top_k, int)
+            or top_k < 0):
+        raise APIError(400, "top_k must be zero or a positive integer", param="top_k")
+    presence_penalty = body.get("presence_penalty", 0.0)
+    if (isinstance(presence_penalty, bool)
+            or not isinstance(presence_penalty, (int, float))
+            or not -2 <= presence_penalty <= 2):
+        raise APIError(400, "presence_penalty must be between -2 and 2",
+                       param="presence_penalty")
+    min_p = body.get("min_p", 0.0)
+    if (isinstance(min_p, bool) or not isinstance(min_p, (int, float))
+            or min_p != 0):
+        raise APIError(400, "only min_p=0 is currently supported", param="min_p")
+    repetition_penalty = body.get("repetition_penalty", 1.0)
+    if (isinstance(repetition_penalty, bool)
+            or not isinstance(repetition_penalty, (int, float))
+            or repetition_penalty != 1):
+        raise APIError(400, "only repetition_penalty=1 is currently supported",
+                       param="repetition_penalty")
     seed = body.get("seed")
     if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
         raise APIError(400, "seed must be an integer", param="seed")
@@ -365,6 +385,8 @@ def parse_request(body, config: Config, tokenizer):
         "include_usage": bool(stream_options.get("include_usage", False)),
         "temperature": float(temperature),
         "top_p": float(top_p),
+        "top_k": top_k,
+        "presence_penalty": float(presence_penalty),
         "rng": seed if seed is not None else secrets.randbits(64),
         "enable_thinking": enable_thinking,
         "preserve_thinking": preserve_thinking,
@@ -435,12 +457,21 @@ def stream_chunk(completion_id, created, model, delta,
     return result
 
 
-async def next_token(session, temperature, top_p, rng, input_token=None):
+async def next_token(session, sampling, rng, penalty_tokens, input_token=None):
     if input_token is not None:
         await asyncio.to_thread(session.eval, input_token)
-    if temperature == 0:
+    if sampling["temperature"] == 0 and sampling["presence_penalty"] == 0:
         return await asyncio.to_thread(session.argmax), rng
-    return await asyncio.to_thread(session.sample, temperature, top_p, rng)
+    return await asyncio.to_thread(
+        session.sample,
+        sampling["temperature"],
+        sampling["top_p"],
+        rng,
+        top_k=sampling["top_k"],
+        presence_penalty=sampling["presence_penalty"],
+        # Presence is binary, so duplicate generated ids carry no information.
+        generated_tokens=tuple(penalty_tokens),
+    )
 
 
 def create_app(config: Config, *, tokenizer=None, manager=None):
@@ -544,9 +575,11 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
         started = time.monotonic()
         timing = GenerationTiming(REQUEST_STARTED_CONTEXT.get() or started)
         LOG.info("generation started completion_id=%s prompt_tokens=%d max_tokens=%d "
-                 "stream=%s enable_thinking=%s preserve_thinking=%s",
+                 "stream=%s temperature=%.3f top_p=%.3f top_k=%d "
+                 "presence_penalty=%.3f enable_thinking=%s preserve_thinking=%s",
                  completion_id, len(parsed["prompt_ids"]), parsed["max_tokens"],
-                 parsed["stream"], parsed["enable_thinking"],
+                 parsed["stream"], parsed["temperature"], parsed["top_p"],
+                 parsed["top_k"], parsed["presence_penalty"], parsed["enable_thinking"],
                  parsed["preserve_thinking"])
 
         async def release(error=None):
@@ -601,9 +634,11 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
             LOG.info("decode started completion_id=%s max_tokens=%d",
                      completion_id, parsed["max_tokens"])
             output_ids = []
+            penalty_tokens = []
+            penalty_seen = set()
             finish_reason = "length"
             token, rng = await next_token(
-                session, parsed["temperature"], parsed["top_p"], parsed["rng"]
+                session, parsed, parsed["rng"], penalty_tokens
             )
             timing.first_token_at = time.monotonic()
             while len(output_ids) < parsed["max_tokens"]:
@@ -615,6 +650,9 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                     finish_reason = "stop"
                     break
                 output_ids.append(token)
+                if token not in penalty_seen:
+                    penalty_seen.add(token)
+                    penalty_tokens.append(token)
                 _reasoning, content = decode_generated(
                     app.state.tokenizer, output_ids, parsed["enable_thinking"],
                     parsed["think_end_token"]
@@ -626,7 +664,7 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                 if len(output_ids) == parsed["max_tokens"]:
                     break
                 token, rng = await next_token(
-                    session, parsed["temperature"], parsed["top_p"], rng, token
+                    session, parsed, rng, penalty_tokens, token
                 )
             return output_ids, finish_reason, cached_tokens
 
@@ -662,6 +700,8 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
         async def streaming():
             failure = None
             output_ids = []
+            penalty_tokens = []
+            penalty_seen = set()
             published_reasoning, published_content = "", ""
             finish_reason = "length"
             cached_tokens = 0
@@ -677,7 +717,7 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                 LOG.info("decode started completion_id=%s max_tokens=%d",
                          completion_id, parsed["max_tokens"])
                 token, rng = await next_token(
-                    session, parsed["temperature"], parsed["top_p"], parsed["rng"]
+                    session, parsed, parsed["rng"], penalty_tokens
                 )
                 timing.first_token_at = time.monotonic()
                 while len(output_ids) < parsed["max_tokens"]:
@@ -689,6 +729,9 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                         finish_reason = "stop"
                         break
                     output_ids.append(token)
+                    if token not in penalty_seen:
+                        penalty_seen.add(token)
+                        penalty_tokens.append(token)
                     reasoning, content = decode_generated(
                         app.state.tokenizer, output_ids, parsed["enable_thinking"],
                         parsed["think_end_token"]
@@ -718,7 +761,7 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
                     if len(output_ids) == parsed["max_tokens"]:
                         break
                     token, rng = await next_token(
-                        session, parsed["temperature"], parsed["top_p"], rng, token
+                        session, parsed, rng, penalty_tokens, token
                     )
 
                 reasoning, content = decode_generated(

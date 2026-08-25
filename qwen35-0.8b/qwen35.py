@@ -88,6 +88,9 @@ def _configure(library: ctypes.CDLL) -> None:
         ctypes.c_float,
         ctypes.c_int,
         ctypes.c_float,
+        ctypes.c_float,
+        int_p,
+        ctypes.c_int,
         ctypes.POINTER(ctypes.c_uint64),
     ]
     library.q35_session_sample.restype = ctypes.c_int
@@ -303,11 +306,15 @@ class Session:
             return token
 
     def sample(self, temperature: float, top_p: float, rng: int,
-               *, top_k: int = 0) -> tuple[int, int]:
+               *, top_k: int = 0, presence_penalty: float = 0.0,
+               generated_tokens: Iterable[int] = ()) -> tuple[int, int]:
         if temperature < 0:
             raise EngineError("temperature must be non-negative")
         if not 0 < top_p <= 1:
             raise EngineError("top_p must be in (0, 1]")
+        generated = [int(token) for token in generated_tokens]
+        native_generated = ((ctypes.c_int * len(generated))(*generated)
+                            if generated else None)
         native_rng = ctypes.c_uint64(rng)
         with self._lock:
             self._require_open()
@@ -316,6 +323,9 @@ class Session:
                 float(temperature),
                 int(top_k),
                 float(top_p),
+                float(presence_penalty),
+                native_generated,
+                len(generated),
                 ctypes.byref(native_rng),
             ))
             if token < 0:

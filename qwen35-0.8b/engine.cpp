@@ -699,29 +699,57 @@ double random_unit(uint64_t& state) {
 }
 
 int sample(const std::vector<FP32>& logits, FP32 temperature, int top_k, FP32 top_p,
-           uint64_t& rng, std::vector<int>& order) {
-    if (temperature == 0.0f) return argmax(logits);
+           FP32 presence_penalty, const int* generated_tokens, int generated_count,
+           uint64_t& rng, std::vector<int>& order, std::vector<FP32>& adjusted,
+           std::vector<uint8_t>& penalty_marks, std::vector<int>& penalty_touched) {
     if (!std::isfinite(temperature) || temperature < 0.0f ||
-        !std::isfinite(top_p) || top_p <= 0.0f || top_p > 1.0f) {
+        !std::isfinite(top_p) || top_p <= 0.0f || top_p > 1.0f ||
+        !std::isfinite(presence_penalty) || presence_penalty < -2.0f ||
+        presence_penalty > 2.0f || generated_count < 0 ||
+        (generated_count > 0 && !generated_tokens)) {
         return -1;
     }
+
+    const std::vector<FP32>* values = &logits;
+    if (presence_penalty != 0.0f && generated_count > 0) {
+        adjusted = logits;
+        penalty_touched.clear();
+        for (int index = 0; index < generated_count; ++index) {
+            const int token = generated_tokens[index];
+            if (token < 0 || token >= V) return -1;
+        }
+        for (int index = 0; index < generated_count; ++index) {
+            const int token = generated_tokens[index];
+            if (!penalty_marks[token]) {
+                penalty_marks[token] = 1;
+                penalty_touched.push_back(token);
+                adjusted[token] -= presence_penalty;
+            }
+        }
+        for (int token : penalty_touched) penalty_marks[token] = 0;
+        values = &adjusted;
+    }
+
+    if (temperature == 0.0f) return argmax(*values);
 
     const int limit = top_k <= 0 ? V : std::min(top_k, V);
     order.resize(V);
     for (int token = 0; token < V; ++token) order[token] = token;
     if (limit < V || top_p < 1.0f) {
         std::partial_sort(order.begin(), order.begin() + limit, order.end(),
-                          [&](int left, int right) { return logits[left] > logits[right]; });
+                          [&](int left, int right) {
+                              return (*values)[left] > (*values)[right];
+                          });
     }
 
     FP32 maximum = -std::numeric_limits<FP32>::infinity();
     for (int index = 0; index < limit; ++index) {
-        maximum = std::max(maximum, logits[order[index]]);
+        maximum = std::max(maximum, (*values)[order[index]]);
     }
 
     double total = 0.0;
     for (int index = 0; index < limit; ++index) {
-        total += std::exp((logits[order[index]] - maximum) / temperature);
+        total += std::exp(((*values)[order[index]] - maximum) / temperature);
     }
     if (!(total > 0.0) || !std::isfinite(total)) return -1;
 
@@ -729,14 +757,14 @@ int sample(const std::vector<FP32>& logits, FP32 temperature, int top_k, FP32 to
     double kept = 0.0;
     int count = 0;
     do {
-        kept += std::exp((logits[order[count]] - maximum) / temperature);
+        kept += std::exp(((*values)[order[count]] - maximum) / temperature);
         ++count;
     } while (count < limit && kept < nucleus);
 
     const double target = random_unit(rng) * kept;
     double cumulative = 0.0;
     for (int index = 0; index < count; ++index) {
-        cumulative += std::exp((logits[order[index]] - maximum) / temperature);
+        cumulative += std::exp(((*values)[order[index]] - maximum) / temperature);
         if (target < cumulative) return order[index];
     }
     return order[count - 1];
@@ -789,6 +817,9 @@ struct q35_session {
     qwen35::Work work;
     std::vector<int> tokens;
     std::vector<int> sample_order;
+    std::vector<qwen35::FP32> sample_logits;
+    std::vector<uint8_t> penalty_marks;
+    std::vector<int> penalty_touched;
     // live State 是当前点；checkpoint 是唯一额外保存在内存中的点。
     Checkpoint checkpoint;
     bool logits_valid = false;
@@ -797,6 +828,9 @@ struct q35_session {
         : engine(owner), state(context_size), work(context_size) {
         tokens.reserve(static_cast<size_t>(context_size));
         sample_order.reserve(qwen35::V);
+        sample_logits.reserve(qwen35::V);
+        penalty_marks.assign(qwen35::V, 0);
+        penalty_touched.reserve(static_cast<size_t>(context_size));
     }
 
     void reset() {
@@ -953,7 +987,9 @@ int q35_engine_create(const q35_engine_options* options, q35_engine** out,
             for (size_t row = 0; row < engine->mock_logits.size(); ++row) {
                 auto& logits = engine->mock_logits[row];
                 logits.assign(qwen35::V, -1000.0f);
-                logits[qwen35::MOCK_TARGET_TOKENS[row]] = 1000.0f;
+                const int target = qwen35::MOCK_TARGET_TOKENS[row];
+                logits[target] = 1000.0f;
+                logits[(target + 1) % qwen35::V] = 999.0f;
             }
             LOG_INFO("mock compute enabled logits_rows=%zu", engine->mock_logits.size());
         }
@@ -1104,12 +1140,18 @@ int q35_session_argmax(const q35_session* session) {
 }
 
 int q35_session_sample(q35_session* session, float temperature, int top_k,
-                                   float top_p, uint64_t* rng) {
+                       float top_p, float presence_penalty,
+                       const int* generated_tokens, int generated_count,
+                       uint64_t* rng) {
     if (!session || !session->logits_valid || !rng) return -1;
-    const int token = qwen35::sample(session->work.logits, temperature, top_k, top_p,
-                                     *rng, session->sample_order);
-    LOG_DEBUG("sample selected token=%d position=%d temperature=%.3f top_k=%d top_p=%.3f",
-              token, session->state.position, temperature, top_k, top_p);
+    const int token = qwen35::sample(
+        session->work.logits, temperature, top_k, top_p, presence_penalty,
+        generated_tokens, generated_count, *rng, session->sample_order,
+        session->sample_logits, session->penalty_marks, session->penalty_touched);
+    LOG_DEBUG("sample selected token=%d position=%d temperature=%.3f top_k=%d "
+              "top_p=%.3f presence_penalty=%.3f generated_tokens=%d",
+              token, session->state.position, temperature, top_k, top_p,
+              presence_penalty, generated_count);
     return token;
 }
 

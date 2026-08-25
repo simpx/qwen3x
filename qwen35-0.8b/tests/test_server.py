@@ -44,6 +44,7 @@ class FakeSession:
         self.cached_tokens = 0
         self.checkpoint_at = None
         self.output_tokens = [20, 21, 22]
+        self.sample_calls = []
 
     def sync(self, tokens, checkpoint_at):
         assert tokens == [10, 11]
@@ -56,7 +57,8 @@ class FakeSession:
     def argmax(self):
         return self.output_tokens[self.step]
 
-    def sample(self, _temperature, _top_p, rng):
+    def sample(self, temperature, top_p, rng, **options):
+        self.sample_calls.append((temperature, top_p, dict(options)))
         return self.argmax(), rng + 1
 
     def eval(self, token):
@@ -298,10 +300,43 @@ class ServerTest(unittest.TestCase):
         )
 
     def test_sampling_options(self):
-        response = self.request(temperature=0.8, top_p=0.9, seed=123,
-                                max_completion_tokens=1)
+        response = self.request(temperature=1.0, top_p=0.95, seed=123,
+                                top_k=20, presence_penalty=1.5,
+                                min_p=0, repetition_penalty=1,
+                                max_completion_tokens=2)
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["choices"][0]["message"]["content"], "你")
+        self.assertEqual(response.json()["choices"][0]["message"]["content"], "你好")
+        calls = self.manager.sessions[0].sample_calls
+        self.assertEqual(calls[0], (1.0, 0.95, {
+            "top_k": 20,
+            "presence_penalty": 1.5,
+            "generated_tokens": (),
+        }))
+        self.assertEqual(calls[1][2]["generated_tokens"], (20,))
+
+    def test_presence_penalty_passes_distinct_generated_tokens(self):
+        self.manager.sessions[0].output_tokens = [20, 20, 21]
+        response = self.request(
+            temperature=1.0,
+            presence_penalty=1.5,
+            max_completion_tokens=3,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        calls = self.manager.sessions[0].sample_calls
+        self.assertEqual(calls[0][2]["generated_tokens"], ())
+        self.assertEqual(calls[1][2]["generated_tokens"], (20,))
+        self.assertEqual(calls[2][2]["generated_tokens"], (20,))
+
+    def test_invalid_sampling_options(self):
+        for name, value in (
+            ("top_k", -1),
+            ("presence_penalty", 2.1),
+            ("min_p", 0.1),
+            ("repetition_penalty", 1.1),
+        ):
+            response = self.request(**{name: value})
+            self.assertEqual(response.status_code, 400, (name, response.text))
+            self.assertEqual(response.json()["error"]["param"], name)
 
     def test_response_has_no_session_extension(self):
         response = self.request(max_completion_tokens=1)

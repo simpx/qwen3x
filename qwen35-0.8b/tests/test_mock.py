@@ -23,8 +23,42 @@ def main():
         # The last prompt token is not a digit token id. position=4 therefore
         # selects digit 4 (Qwen token id 19), never the stop row.
         assert first == 19
-        sampled, _rng = session.sample(1.0, 0.9, 123)
+        sampled, _rng = session.sample(1.0, 0.9, 123, top_k=1)
         assert sampled == first
+        nucleus, _rng = session.sample(1.0, 0.5, 999)
+        assert nucleus == first
+        repeat_a = session.sample(1.0, 1.0, 123)
+        repeat_b = session.sample(1.0, 1.0, 123)
+        assert repeat_a == repeat_b
+
+        # Replaying a whole request with the same seed must reproduce every
+        # sampled token and every intermediate RNG state, not only step zero.
+        def sampled_sequence(seed):
+            replay = engine.create_session(64)
+            try:
+                replay.sync(prompt)
+                rng = seed
+                result = []
+                for _ in range(8):
+                    token, rng = replay.sample(1.0, 1.0, rng)
+                    result.append((token, rng))
+                    if engine.token_is_stop(token):
+                        break
+                    replay.eval(token)
+                return result
+            finally:
+                replay.close()
+
+        assert sampled_sequence(123) == sampled_sequence(123)
+
+        # Presence penalty looks only at generated tokens and subtracts once,
+        # even if the same token appears repeatedly.
+        penalized, _rng = session.sample(
+            0.0, 1.0, 123,
+            presence_penalty=2.0,
+            generated_tokens=[first, first],
+        )
+        assert penalized == first + 1
 
         logits = session.copy_logits()
         assert logits[first] == max(logits)

@@ -92,9 +92,15 @@ int q35_session_eval(q35_session* session, int token,
 int q35_session_position(const q35_session* session);
 int q35_session_argmax(const q35_session* session);
 
-/* Sample one token from logits. top_k <= 0 disables top-k filtering. */
+/*
+ * Sample one token from logits. top_k <= 0 disables top-k filtering.
+ * presence_penalty is applied once to each distinct generated token; prompt
+ * tokens are deliberately excluded, matching vLLM/OpenAI semantics.
+ */
 int q35_session_sample(q35_session* session, float temperature, int top_k,
-                       float top_p, uint64_t* rng);
+                       float top_p, float presence_penalty,
+                       const int* generated_tokens, int generated_count,
+                       uint64_t* rng);
 
 bool q35_token_is_stop(int token);
 int q35_vocab_size(void);
