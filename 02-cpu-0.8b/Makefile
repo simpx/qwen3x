@@ -1,7 +1,7 @@
 # 独立 CPU 目录：打包、C++ engine、固定回归和文字 e2e 都在这里。
 PYTHON ?= python3
 MODEL ?= ../models/Qwen3.5-0.8B
-VECTORS ?= ../01-hf-reference/build/cpu
+VECTORS ?= ../reference/build/cpu
 BUILD ?= build
 WEIGHTS ?= $(BUILD)/qwen35-0.8b.bin
 REFERENCE ?= reference.json
@@ -31,7 +31,7 @@ e2e-test: qwen35 weights
 
 # 可选重型裁判：重新调用官方 Transformers，并比较每一步完整词表 logits。
 vectors:
-	$(MAKE) -C ../01-hf-reference cpu MODEL=$(abspath $(MODEL))
+	$(MAKE) -C ../reference cpu MODEL=$(abspath $(MODEL))
 
 oracle-test: qwen35 weights vectors
 	$(PYTHON) test_oracle.py --engine ./qwen35 --weights "$(WEIGHTS)" --vectors "$(VECTORS)"

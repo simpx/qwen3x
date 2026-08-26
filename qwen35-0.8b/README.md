@@ -63,6 +63,20 @@ make e2e
 append-only sync、编辑/缩短后的 rebuild 和完整词表 logit；`e2e` 走真实 tokenizer、HTTP、
 SessionManager 和 C++ forward。
 
+数值正确性使用官方 Transformers FP32 forward 生成 reference，再逐 token 比较 SIMD Engine
+的完整 `logits[V]`、argmax、top-10、greedy continuation 和 cache/checkpoint 路径：
+
+```sh
+# 已有 reference 时只运行对比
+make reference-test
+
+# 模型、Transformers 或模板变化后重新生成并对比
+make reference
+```
+
+参考服务、vectors dump、对比工具及其 uv 环境都在仓库顶层的 `reference/`。验收结果写入
+`build/reference-report.json`，其中记录模型与模板 fingerprint、Engine 构建信息、最大误差和阈值。
+
 ## CPU 性能基线
 
 优化前先记录只包含真实 C++ Engine 的 baseline：

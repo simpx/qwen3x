@@ -59,7 +59,7 @@ single GPU。顺序始终是：
 | 区域 | 当前证据 |
 | --- | --- |
 | `00-lessons/` | 第 0 章：lesson 00--08 解释各个小数学部件；lesson 09 能运行固定 Qwen3.5-0.8B 的完整 CPU forward。 |
-| `01-hf-reference/` | 本地官方 Hugging Face checkpoint 以 eager FP32、逐 token 方式运行；CPU 与 CUDA oracle vectors 分开生成。 |
+| `reference/` | 本地官方 Hugging Face checkpoint 以 eager FP32、逐 token 方式运行；CPU 与 CUDA oracle vectors 分开生成。 |
 | `02-cpu-0.8b/` | 独立 plain C++ `Model + State + Work`；具备权重打包、prefill、decode、DeltaNet/KV state、greedy decode、固定本地回归与官方 tokenizer 文字 e2e。正常运行和 `make test` 不依赖其他 stage。 |
 | CPU regression | 每一步都将完整 248,320 词表 logits 与官方 CPU oracle 对比。版本化最大绝对误差为 `5e-4`，另检查 argmax、greedy ids 与 API state。 |
 | `03-cuda-0.8b/` | non-linear/state 操作由直接 CUDA kernel 实现；所有 linear projection 由 cuBLAS GEMV 实现；模型 state 常驻 GPU。 |

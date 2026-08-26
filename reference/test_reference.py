@@ -58,8 +58,13 @@ def main() -> None:
         raise SystemExit(
             f"vector device {metadata.get('device')!r} differs from requested official device {str(device)!r}"
         )
-    if metadata.get("fingerprint") != fingerprint:
-        raise SystemExit("checkpoint/tokenizer fingerprint differs from the vector bundle")
+    saved_fingerprint = metadata.get("fingerprint", {})
+    for name, actual in fingerprint.items():
+        if saved_fingerprint.get(name) != actual:
+            raise SystemExit(
+                f"checkpoint/tokenizer fingerprint differs at {name}: "
+                f"saved={saved_fingerprint.get(name)!r}, actual={actual!r}"
+            )
     if metadata.get("vocab_size") != VOCAB_SIZE:
         raise SystemExit("vector vocabulary does not match this fixed Qwen3.5 engine")
 
@@ -96,7 +101,7 @@ def main() -> None:
         print(f"rerun {cases[0]['name']}: max_abs_error={maximum:.9g}")
         if maximum != 0.0:
             raise SystemExit("official FP32 vector is not reproducible on this checkpoint/device")
-    print("Stage 1 official reference: passed")
+    print("official reference: passed")
 
 
 if __name__ == "__main__":

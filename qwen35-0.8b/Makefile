@@ -12,10 +12,12 @@ MOCK ?= 0
 MOCK_ARG := $(if $(filter 1 true yes,$(MOCK)),--mock,)
 BENCH_PREFILL ?= 8
 BENCH_DECODE ?= 4
+REFERENCE ?= ../reference/build/cpu
+REFERENCE_REPORT ?= $(BUILD)/reference-report.json
 
 CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic -march=native
 
-.PHONY: all sync sync-prod weights unit-test mock-test native-test test e2e run chat bench clean
+.PHONY: all sync sync-prod weights unit-test mock-test native-test reference-generate reference-test reference test e2e run chat bench clean
 
 all: $(LIBRARY)
 
@@ -43,6 +45,26 @@ native-test: $(LIBRARY) $(BIN)
 
 mock-test: $(LIBRARY) $(BIN)
 	PYTHONPATH=. $(PYTHON) tests/test_mock.py --library "$(LIBRARY)" --bin "$(BIN)"
+
+reference-generate:
+	$(MAKE) -C ../reference dump \
+		MODEL="$(abspath $(TOKENIZER))" \
+		OUT="$(abspath $(REFERENCE))" \
+		DEVICE=cpu \
+		CHAT_TEMPLATE="$(abspath chat_template.jinja)"
+
+reference-test: $(LIBRARY) $(BIN)
+	$(MAKE) -C ../reference compare \
+		ENGINE_DIR="$(CURDIR)" \
+		LIBRARY="$(abspath $(LIBRARY))" \
+		BIN="$(abspath $(BIN))" \
+		VECTORS="$(abspath $(REFERENCE))" \
+		MODEL="$(abspath $(TOKENIZER))" \
+		CHAT_TEMPLATE="$(abspath chat_template.jinja)" \
+		REPORT="$(abspath $(REFERENCE_REPORT))" \
+		CXXFLAGS="$(CXXFLAGS)"
+
+reference: reference-generate reference-test
 
 test: unit-test mock-test native-test
 

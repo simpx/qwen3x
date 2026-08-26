@@ -3,7 +3,7 @@ NVCC ?= nvcc
 PYTHON ?= python3
 CUDA_ARCH ?= 89
 MODEL ?= ../models/Qwen3.5-0.8B
-VECTORS ?= ../01-hf-reference/build/cuda
+VECTORS ?= ../reference/build/cuda
 BUILD ?= build
 WEIGHTS ?= $(BUILD)/qwen35-0.8b.bin
 CUDA_RUN ?= LD_LIBRARY_PATH=/usr/lib/wsl/lib:$$LD_LIBRARY_PATH
@@ -16,7 +16,7 @@ qwen35_cuda: qwen35_cuda.cu qwen35_cpu.cpp
 	$(NVCC) -O3 -std=c++17 -arch=sm_$(CUDA_ARCH) qwen35_cuda.cu -lcublas -o qwen35_cuda
 
 vectors:
-	$(MAKE) -C ../01-hf-reference cuda MODEL=$(abspath $(MODEL))
+	$(MAKE) -C ../reference cuda MODEL=$(abspath $(MODEL))
 
 weights: $(WEIGHTS)
 

@@ -48,7 +48,7 @@ correct → simple → readable → usable → fast
 ~~~text
 00-lessons/              第 0 章：toy math + 已有的 0.8B CPU capstone；尽量冻结
 
-01-hf-reference/         Stage 1：官方 Qwen3.5-0.8B 的 PyTorch / Transformers oracle
+reference/               官方 Qwen3.5-0.8B 的 PyTorch / Transformers oracle
 02-cpu-0.8b/             Stage 2：真实 0.8B 的可读 C++ CPU forward + state + 文字 e2e
 03-cuda-0.8b/            Stage 3：同一 0.8B 的 CUDA first-correct version
 04-runtime/              Stage 4：Python OpenAI-compatible API + 常驻 CPU/CUDA engine
@@ -143,14 +143,14 @@ void decode(const Model&, State&, int token, Work&);
 `decode()` 也只是有名字的循环，内部仍直接调用 `forward()`。不同请求一律 `State{}` 重建；跨请求
 的最长前缀复用只在 Stage 6 用明确的 snapshot cache 实现。
 
-### Stage 1 — `01-hf-reference/`：官方 0.8B oracle
+### Stage 1 — `reference/`：官方 0.8B oracle
 
 这里使用 **PyTorch + Transformers**，因为目的不是再写一份模型，而是调用官方 checkpoint 作为
 裁判。当前仓库已经有本地 `models/Qwen3.5-0.8B`，所以默认命令不需要下载模型。CPU FP32 和 CUDA
 FP32 的 vectors 分别保存到 `build/cpu/` 与 `build/cuda/`；测试会拒绝混用它们。
 
 ~~~text
-01-hf-reference/
+reference/
   README.md
   Makefile
   dump_vectors.py    # 直接调用官方 model；固定 FP32 / token ids；输出 versioned logits 与 greedy ids
@@ -161,7 +161,7 @@ FP32 的 vectors 分别保存到 `build/cpu/` 与 `build/cuda/`；测试会拒�
 真实官方 chat-template prompt。metadata 记录 checkpoint/tokenizer fingerprint、device、dtype、input
 ids、chat messages 与允许误差；不能把“目前本机跑出来的数”变成无来源 golden file。
 
-**验收：** `make -C 01-hf-reference cpu MODEL=../models/Qwen3.5-0.8B` 和同样的 `cuda` target
+**验收：** `make -C reference cpu MODEL=../models/Qwen3.5-0.8B` 和同样的 `cuda` target
 各生成一份可复现 vectors；第二次运行得到同一 config/input 和同一 greedy ids。默认只比较官方
 输出，不做 performance benchmark。
 
@@ -211,7 +211,7 @@ bundle，但门槛必须写在 metadata/README 中，不能临时放宽。
 
 | 顺序 | 自动任务 | 绿灯命令 | 禁止提前做的事 |
 | --- | --- | --- | --- |
-| 1 | Stage 1：生成官方 CPU/CUDA test vectors | `make -C 01-hf-reference cpu` / `make -C 01-hf-reference cuda` | 不改第 0 章数学 |
+| 1 | Stage 1：生成官方 CPU/CUDA test vectors | `make -C reference cpu` / `make -C reference cuda` | 不改第 0 章数学 |
 | 2 | Stage 2：从 lesson 09 建真实 CPU `Model/State/Work` API 与文字 e2e | `make -C 02-cpu-0.8b test MODEL=...` | 不优化 linear、不把 tokenizer 混进 C++ forward |
 | 3 | Stage 3：CUDA + cuBLAS correctness path | `make -C 03-cuda-0.8b cuda-test` + `make test` | 不写新 fused kernel |
 | 4 | Stage 4：Python runtime + 常驻 engine | `make -C 04-runtime test` + `make e2e` | 不做多并发 scheduler |
@@ -231,7 +231,7 @@ HF reference 要支持固定 token ids 的 prefill、decode 和 greedy continuat
 logits 与 token ids，并在需要定位误差时以 hooks/官方输出暴露 layer boundary tensors。它还验证
 config、tokenizer revision 与权重文件，避免不同 checkpoint 生成的 vector 混用。
 
-**验收：** 任意 Stage 2/3 regression 都能回溯到一个 versioned 的 `01-hf-reference` vector
+**验收：** 任意 Stage 2/3 regression 都能回溯到一个 versioned 的 `reference` vector
 及其官方模型来源。
 
 ## 6. Stage 2 — Qwen3.5-0.8B CPU reference

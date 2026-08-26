@@ -11,7 +11,7 @@
 /00-lessons/09_qwen35_0_8b
 /qwen35-0.8b/build/
 /qwen35-0.8b/logs/
-/01-hf-reference/build/
+/reference/build/
 /02-cpu-0.8b/build/
 /02-cpu-0.8b/qwen35
 /03-cuda-0.8b/build/

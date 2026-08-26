@@ -98,5 +98,5 @@ make test MODEL=../models/Qwen3.5-0.8B
 make oracle-test MODEL=../models/Qwen3.5-0.8B
 ```
 
-这个重型 target 会显式调用 `../01-hf-reference`；它是额外数值裁判，不是本目录正常运行
+这个重型 target 会显式调用 `../reference`；它是额外数值裁判，不是本目录正常运行
 或日常测试的依赖。

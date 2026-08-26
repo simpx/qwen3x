@@ -126,6 +126,6 @@ multi-head 不会让固定总宽度 `D` 下的基本 QK 点积计算量自动减
 2. 用真实 shape 走一遍 16-head DeltaNet：每个 head 的 `S[128,128]` 如何更新、读取并拼回 `[2048]`。
 3. 把 `State` 的 conv history、DeltaNet memory、KV cache 与 `Work` 的临时数组逐项对应。
 
-如果用户确认 `00-lessons/` 已结束，下一站按仓库顺序进入 `01-hf-reference/`：重点不是再学模型
+如果用户确认 `00-lessons/` 已结束，下一站按仓库顺序进入 `reference/`：重点不是再学模型
 公式，而是理解“官方实现作为 oracle、为什么保存每一步 full logits、C++ 怎么证明自己算对”。
 之后才进入 `02-cpu-0.8b/` 阅读可演进的 plain C++ runtime。
