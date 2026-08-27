@@ -1,12 +1,18 @@
-// runtime.cpp -- resident Session selection, prefix reuse and LRU.
+// runtime.cpp -- shared Engine/Session runtime and resident Session selection.
 //
-// This file deliberately knows nothing about Model, State, Work or forward.
-// It owns a fixed number of opaque q35_session objects and coordinates which
-// request has exclusive access to each one.
+// This file owns token timelines, prefix/checkpoint policy, sampling,
+// SessionManager, FREE/IDLE/BUSY and LRU. It only sees opaque backend Model/State
+// handles; model math and the physical State snapshot live in engine.cpp.
 
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -15,6 +21,17 @@
 #include "internal.h"
 
 namespace {
+
+constexpr int IM_END_TOKEN = 248046;
+constexpr int THINK_START_TOKEN = 248068;
+constexpr int THINK_END_TOKEN = 248069;
+constexpr int NEWLINE_TOKEN = 198;
+constexpr int DOUBLE_NEWLINE_TOKEN = 271;
+constexpr int MOCK_REASONING_TOKEN = 26003;
+constexpr std::array<int, 15> MOCK_TARGET_TOKENS = {
+    15, 16, 17, 18, 19, 20, 21, 22, 23, 24, IM_END_TOKEN,
+    MOCK_REASONING_TOKEN, NEWLINE_TOKEN, THINK_END_TOKEN, DOUBLE_NEWLINE_TOKEN,
+};
 
 enum class EntryState {
     FREE,
@@ -28,6 +45,12 @@ struct SessionEntry {
     uint64_t last_used = 0;
 };
 
+struct PrefixMatch {
+    int common = 0;
+    int reused = 0;
+    bool use_checkpoint = false;
+};
+
 void write_error(char* output, size_t capacity, const char* message) {
     if (!output || capacity == 0) return;
     std::snprintf(output, capacity, "%s", message ? message : "unknown error");
@@ -37,7 +60,509 @@ void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 
+template <typename Function>
+int guard(char* err, size_t errlen, Function&& function) {
+    try {
+        function();
+        write_error(err, errlen, "");
+        return Q35_OK;
+    } catch (const std::exception& exception) {
+        write_error(err, errlen, exception.what());
+        return Q35_ERROR;
+    } catch (...) {
+        write_error(err, errlen, "unknown C++ exception");
+        return Q35_ERROR;
+    }
+}
+
+int common_token_prefix(const std::vector<int>& saved,
+                        const int* tokens, int count) {
+    int common = 0;
+    while (common < static_cast<int>(saved.size()) && common < count &&
+           saved[common] == tokens[common]) {
+        ++common;
+    }
+    return common;
+}
+
+int argmax_host(const std::vector<float>& values) {
+    return static_cast<int>(
+        std::max_element(values.begin(), values.end()) - values.begin());
+}
+
+uint64_t random_u64(uint64_t& state) {
+    if (state == 0) state = 0x9e3779b97f4a7c15ULL;
+    state ^= state >> 12;
+    state ^= state << 25;
+    state ^= state >> 27;
+    return state * 0x2545f4914f6cdd1dULL;
+}
+
+double random_unit(uint64_t& state) {
+    return (random_u64(state) >> 11) * 0x1.0p-53;
+}
+
+int sample_host(const std::vector<float>& logits, float temperature, int top_k,
+                float top_p, float presence_penalty,
+                const int* generated_tokens, int generated_count,
+                uint64_t& rng, std::vector<int>& order,
+                std::vector<float>& adjusted,
+                std::vector<uint8_t>& penalty_marks,
+                std::vector<int>& penalty_touched) {
+    const int vocab = q35_backend::vocab_size();
+    if (!std::isfinite(temperature) || temperature < 0.0f ||
+        !std::isfinite(top_p) || top_p <= 0.0f || top_p > 1.0f ||
+        !std::isfinite(presence_penalty) || presence_penalty < -2.0f ||
+        presence_penalty > 2.0f || generated_count < 0 ||
+        (generated_count > 0 && !generated_tokens)) {
+        return -1;
+    }
+
+    const std::vector<float>* values = &logits;
+    if (presence_penalty != 0.0f && generated_count > 0) {
+        adjusted = logits;
+        penalty_touched.clear();
+        for (int index = 0; index < generated_count; ++index) {
+            const int token = generated_tokens[index];
+            if (token < 0 || token >= vocab) return -1;
+        }
+        for (int index = 0; index < generated_count; ++index) {
+            const int token = generated_tokens[index];
+            if (!penalty_marks[token]) {
+                penalty_marks[token] = 1;
+                penalty_touched.push_back(token);
+                adjusted[token] -= presence_penalty;
+            }
+        }
+        for (int token : penalty_touched) penalty_marks[token] = 0;
+        values = &adjusted;
+    }
+
+    if (temperature == 0.0f) return argmax_host(*values);
+
+    const int limit = top_k <= 0 ? vocab : std::min(top_k, vocab);
+    order.resize(vocab);
+    for (int token = 0; token < vocab; ++token) order[token] = token;
+    if (limit < vocab || top_p < 1.0f) {
+        std::partial_sort(order.begin(), order.begin() + limit, order.end(),
+                          [&](int left, int right) {
+                              return (*values)[left] > (*values)[right];
+                          });
+    }
+
+    float maximum = -std::numeric_limits<float>::infinity();
+    for (int index = 0; index < limit; ++index) {
+        maximum = std::max(maximum, (*values)[order[index]]);
+    }
+
+    double total = 0.0;
+    for (int index = 0; index < limit; ++index) {
+        total += std::exp(((*values)[order[index]] - maximum) / temperature);
+    }
+    if (!(total > 0.0) || !std::isfinite(total)) return -1;
+
+    const double nucleus = total * top_p;
+    double kept = 0.0;
+    int count = 0;
+    do {
+        kept += std::exp(((*values)[order[count]] - maximum) / temperature);
+        ++count;
+    } while (count < limit && kept < nucleus);
+
+    const double target = random_unit(rng) * kept;
+    double cumulative = 0.0;
+    for (int index = 0; index < count; ++index) {
+        cumulative += std::exp(((*values)[order[index]] - maximum) / temperature);
+        if (target < cumulative) return order[index];
+    }
+    return order[count - 1];
+}
+
 }  // namespace
+
+struct q35_engine {
+    q35_backend::Model* model = nullptr;
+    bool mock = false;
+    std::vector<std::vector<float>> mock_logits;
+
+    ~q35_engine() {
+        q35_backend::model_destroy(model);
+    }
+};
+
+struct q35_session {
+    q35_engine* engine;
+    q35_backend::State* state = nullptr;
+    int capacity;
+    std::vector<int> tokens;
+    std::vector<float> logits;
+    std::vector<int> sample_order;
+    std::vector<float> adjusted_logits;
+    std::vector<uint8_t> penalty_marks;
+    std::vector<int> penalty_touched;
+    std::vector<float> mock_checkpoint_logits;
+    bool checkpoint_valid = false;
+    int checkpoint_position = 0;
+    bool logits_valid = false;
+
+    q35_session(q35_engine* owner, int context_size)
+        : engine(owner), capacity(context_size),
+          logits(static_cast<size_t>(q35_backend::vocab_size())) {
+        tokens.reserve(static_cast<size_t>(context_size));
+        sample_order.reserve(static_cast<size_t>(q35_backend::vocab_size()));
+        adjusted_logits.reserve(static_cast<size_t>(q35_backend::vocab_size()));
+        penalty_marks.assign(static_cast<size_t>(q35_backend::vocab_size()), 0);
+        penalty_touched.reserve(static_cast<size_t>(context_size));
+        state = q35_backend::state_create(engine->model, context_size);
+    }
+
+    ~q35_session() {
+        q35_backend::state_destroy(state);
+    }
+
+    int position() const {
+        return static_cast<int>(tokens.size());
+    }
+
+    void reset() {
+        q35_backend::state_reset(state);
+        tokens.clear();
+        checkpoint_valid = false;
+        checkpoint_position = 0;
+        logits_valid = false;
+    }
+
+    void append(int token, bool compute_logits = true) {
+        if (engine->mock) {
+            const int previous_token = tokens.empty() ? -1 : tokens.back();
+            const int next_position = position() + 1;
+            size_t row = static_cast<size_t>(next_position % 10);
+            if (previous_token == THINK_START_TOKEN && token == NEWLINE_TOKEN) {
+                row = 11;
+            } else if (token == MOCK_REASONING_TOKEN) {
+                row = 12;
+            } else if (previous_token == MOCK_REASONING_TOKEN &&
+                       token == NEWLINE_TOKEN) {
+                row = 13;
+            } else if (token == THINK_END_TOKEN) {
+                row = 14;
+            } else if (token >= MOCK_TARGET_TOKENS.front() &&
+                       token <= MOCK_TARGET_TOKENS[9]) {
+                row = static_cast<size_t>(
+                    token - MOCK_TARGET_TOKENS.front() + 1);
+            }
+            logits = engine->mock_logits[row];
+            LOG_DEBUG("mock forward token=%d position=%d logits_row=%zu target=%d",
+                      token, next_position, row, MOCK_TARGET_TOKENS[row]);
+        } else {
+            q35_backend::state_forward(engine->model, state, token,
+                                       compute_logits);
+        }
+        tokens.push_back(token);
+        logits_valid = compute_logits || engine->mock;
+    }
+
+    PrefixMatch match_prefix(const int* request, int count) const {
+        PrefixMatch match;
+        match.common = common_token_prefix(tokens, request, count);
+        const int live = position();
+        if (live > 0 && match.common == live) {
+            match.reused = live;
+        } else if (checkpoint_valid && match.common >= checkpoint_position) {
+            match.reused = checkpoint_position;
+            match.use_checkpoint = true;
+        }
+        return match;
+    }
+
+    void save_checkpoint() {
+        checkpoint_valid = false;
+        if (engine->mock) {
+            mock_checkpoint_logits = logits;
+        } else {
+            q35_backend::state_checkpoint_save(state);
+        }
+        checkpoint_position = position();
+        checkpoint_valid = true;
+        LOG_INFO("session checkpoint saved checkpoint_state_tokens=%d",
+                 checkpoint_position);
+    }
+
+    void restore_checkpoint() {
+        if (!checkpoint_valid) throw std::runtime_error("checkpoint is invalid");
+        const int live_position = position();
+        if (engine->mock) {
+            logits = mock_checkpoint_logits;
+        } else {
+            q35_backend::state_checkpoint_restore(state);
+        }
+        if (tokens.size() < static_cast<size_t>(checkpoint_position)) {
+            throw std::runtime_error("token history is shorter than checkpoint");
+        }
+        tokens.resize(static_cast<size_t>(checkpoint_position));
+        logits_valid = true;
+        LOG_INFO("session checkpoint restored live_state_tokens=%d "
+                 "checkpoint_state_tokens=%d discarded_tokens=%d",
+                 checkpoint_position, checkpoint_position,
+                 live_position - checkpoint_position);
+    }
+
+    void copy_logits_to_host() {
+        if (!engine->mock) {
+            q35_backend::state_copy_logits(state, logits.data());
+        }
+    }
+};
+
+namespace q35_internal {
+
+int session_checkpoint_state_tokens(const q35_session* session) {
+    if (!session || !session->checkpoint_valid) return 0;
+    return session->checkpoint_position;
+}
+
+int session_cache_hit_tokens(const q35_session* session,
+                             const int* tokens, int count) {
+    if (!session || !tokens || count <= 0) return 0;
+    return session->match_prefix(tokens, count).reused;
+}
+
+}  // namespace q35_internal
+
+int q35_engine_create(const q35_engine_options* options, q35_engine** out,
+                      char* err, size_t errlen) {
+    return guard(err, errlen, [&] {
+        require(options, "engine options are null");
+        require(options->bin_path && options->bin_path[0], "bin_path is empty");
+        require(out, "engine output pointer is null");
+        *out = nullptr;
+
+        auto engine = std::make_unique<q35_engine>();
+        LOG_INFO("model load started bin=%s", options->bin_path);
+        const auto started = std::chrono::steady_clock::now();
+        engine->model = q35_backend::model_create(options->bin_path);
+        const double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count();
+        LOG_INFO("model load completed elapsed=%.3fs", elapsed);
+
+        engine->mock = options->mock;
+        if (engine->mock) {
+            const int vocab = q35_backend::vocab_size();
+            engine->mock_logits.resize(MOCK_TARGET_TOKENS.size());
+            for (size_t row = 0; row < engine->mock_logits.size(); ++row) {
+                auto& logits = engine->mock_logits[row];
+                logits.assign(static_cast<size_t>(vocab), -1000.0f);
+                const int target = MOCK_TARGET_TOKENS[row];
+                logits[target] = 1000.0f;
+                logits[(target + 1) % vocab] = 999.0f;
+            }
+            LOG_INFO("mock compute enabled logits_rows=%zu",
+                     engine->mock_logits.size());
+        }
+        LOG_DEBUG("model ready vocab=%d", q35_backend::vocab_size());
+        *out = engine.release();
+    });
+}
+
+void q35_engine_destroy(q35_engine* engine) {
+    LOG_INFO("engine closing");
+    delete engine;
+}
+
+int q35_session_create(q35_engine* engine, int context_size, q35_session** out,
+                       char* err, size_t errlen) {
+    return guard(err, errlen, [&] {
+        require(engine, "engine is null");
+        require(out, "session output pointer is null");
+        *out = nullptr;
+        require(context_size > 0 &&
+                context_size <= q35_backend::max_context(),
+                "context_size is outside 1..262144");
+        *out = new q35_session(engine, context_size);
+        LOG_DEBUG("session created context_size=%d", context_size);
+    });
+}
+
+void q35_session_destroy(q35_session* session) {
+    if (session) LOG_DEBUG("session closing position=%d", session->position());
+    delete session;
+}
+
+int q35_session_reset(q35_session* session, char* err, size_t errlen) {
+    return guard(err, errlen, [&] {
+        require(session, "session is null");
+        const int old_position = session->position();
+        session->reset();
+        LOG_DEBUG("session reset old_position=%d", old_position);
+    });
+}
+
+int q35_session_sync(q35_session* session, const int* tokens, int count,
+                     int checkpoint_at, int* cached_tokens,
+                     char* err, size_t errlen) {
+    if (cached_tokens) *cached_tokens = 0;
+    return guard(err, errlen, [&] {
+        require(session, "session is null");
+        require(tokens, "tokens pointer is null");
+        require(count > 0, "token sequence is empty");
+        require(count <= session->capacity,
+                "token sequence exceeds session context");
+        require(checkpoint_at == -1 ||
+                (checkpoint_at > 0 && checkpoint_at <= count),
+                "checkpoint_at must be -1 or in [1,count]");
+        const int vocab = q35_backend::vocab_size();
+        for (int index = 0; index < count; ++index) {
+            require(tokens[index] >= 0 && tokens[index] < vocab,
+                    "token is outside vocabulary");
+        }
+
+        const int live = session->position();
+        PrefixMatch match = session->match_prefix(tokens, count);
+        int reused = match.reused;
+        const bool checkpoint_already_saved =
+            checkpoint_at > 0 && session->checkpoint_valid &&
+            session->checkpoint_position == checkpoint_at &&
+            match.common >= checkpoint_at;
+        if (checkpoint_at >= 0 && checkpoint_at < reused &&
+            !checkpoint_already_saved) {
+            reused = 0;
+            match.use_checkpoint = false;
+        }
+
+        const int tokens_to_prefill = count - reused;
+        const char* cache_result =
+            reused > 0 ? (match.use_checkpoint ? "hit_checkpoint" : "hit_live")
+                       : (live == 0 ? "new" : "rebuild");
+        const char* mode =
+            tokens_to_prefill == 0 ? "cache_only" : "append_suffix";
+        const int checkpoint_position =
+            session->checkpoint_valid ? session->checkpoint_position : 0;
+        if (cached_tokens) *cached_tokens = reused;
+        LOG_INFO("session sync prompt_tokens=%d live_state_tokens=%d "
+                 "checkpoint_state_tokens=%d checkpoint_at=%d "
+                 "cache_result=%s cache_hit_tokens=%d to_prefill_tokens=%d",
+                 count, live, checkpoint_position, checkpoint_at,
+                 cache_result, reused, tokens_to_prefill);
+
+        const auto started = std::chrono::steady_clock::now();
+        if (match.use_checkpoint) {
+            session->restore_checkpoint();
+        } else if (reused == 0) {
+            session->reset();
+        }
+
+        bool checkpoint_saved = checkpoint_already_saved;
+        if (checkpoint_at == reused && checkpoint_at > 0 &&
+            !checkpoint_saved) {
+            session->save_checkpoint();
+            checkpoint_saved = true;
+        }
+        LOG_INFO("session prefill started mode=%s prompt_tokens=%d "
+                 "cache_hit_tokens=%d to_prefill_tokens=%d",
+                 mode, count, reused, tokens_to_prefill);
+        for (int index = reused; index < count; ++index) {
+            const bool need_logits =
+                index + 1 == checkpoint_at || index + 1 == count;
+            session->append(tokens[index], need_logits);
+            if (session->position() == checkpoint_at) {
+                session->save_checkpoint();
+                checkpoint_saved = true;
+            }
+        }
+        if (checkpoint_at > 0 && !checkpoint_saved) {
+            throw std::runtime_error("checkpoint position was not evaluated");
+        }
+
+        const double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count();
+        const int final_checkpoint =
+            session->checkpoint_valid ? session->checkpoint_position : 0;
+        LOG_INFO("session prefill completed prompt_tokens=%d "
+                 "live_state_tokens=%d checkpoint_state_tokens=%d "
+                 "cache_hit_tokens=%d to_prefill_tokens=%d elapsed=%.3fs",
+                 count, count, final_checkpoint, reused, tokens_to_prefill,
+                 elapsed);
+    });
+}
+
+int q35_session_eval(q35_session* session, int token,
+                     char* err, size_t errlen) {
+    return guard(err, errlen, [&] {
+        require(session, "session is null");
+        require(token >= 0 && token < q35_backend::vocab_size(),
+                "token is outside vocabulary");
+        require(session->position() < session->capacity,
+                "session context is full");
+        const auto started = std::chrono::steady_clock::now();
+        session->append(token);
+        const double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count();
+        LOG_DEBUG("session evaluated token=%d position=%d elapsed=%.3fs",
+                  token, session->position(), elapsed);
+    });
+}
+
+int q35_session_position(const q35_session* session) {
+    return session ? session->position() : -1;
+}
+
+int q35_session_argmax(const q35_session* session) {
+    if (!session || !session->logits_valid) return -1;
+    const int token = session->engine->mock
+        ? argmax_host(session->logits)
+        : q35_backend::state_argmax(session->state);
+    LOG_DEBUG("argmax selected token=%d position=%d",
+              token, session->position());
+    return token;
+}
+
+int q35_session_sample(q35_session* session, float temperature, int top_k,
+                       float top_p, float presence_penalty,
+                       const int* generated_tokens, int generated_count,
+                       uint64_t* rng) {
+    if (!session || !session->logits_valid || !rng) return -1;
+    session->copy_logits_to_host();
+    const int token = sample_host(
+        session->logits, temperature, top_k, top_p, presence_penalty,
+        generated_tokens, generated_count, *rng, session->sample_order,
+        session->adjusted_logits, session->penalty_marks,
+        session->penalty_touched);
+    LOG_DEBUG("sample selected token=%d position=%d temperature=%.3f top_k=%d "
+              "top_p=%.3f presence_penalty=%.3f generated_tokens=%d",
+              token, session->position(), temperature, top_k, top_p,
+              presence_penalty, generated_count);
+    return token;
+}
+
+bool q35_token_is_stop(int token) {
+    const bool stop = q35_backend::token_is_stop(token);
+    if (stop) LOG_DEBUG("stop token detected token=%d", token);
+    return stop;
+}
+
+int q35_vocab_size(void) {
+    return q35_backend::vocab_size();
+}
+
+int q35_session_copy_logits(const q35_session* session, float* output,
+                            int capacity, char* err, size_t errlen) {
+    return guard(err, errlen, [&] {
+        require(session, "session is null");
+        require(session->logits_valid,
+                "session has no logits; sync or eval tokens first");
+        require(output, "logits output pointer is null");
+        require(capacity >= q35_backend::vocab_size(),
+                "logits output is smaller than vocabulary");
+        if (session->engine->mock) {
+            std::memcpy(output, session->logits.data(),
+                        sizeof(float) * q35_backend::vocab_size());
+        } else {
+            q35_backend::state_copy_logits(session->state, output);
+        }
+        LOG_DEBUG("logits copied count=%d position=%d",
+                  q35_backend::vocab_size(), session->position());
+    });
+}
 
 struct q35_session_manager {
     std::mutex mutex;

@@ -34,10 +34,10 @@ SessionManager
 
 ```text
 qwen35.h                 Engine、Session、SessionManager 的公共 C ABI
-engine.cpp               CPU Model/State/Work/forward + Engine/Session
-runtime.cpp              SessionManager、ID/prefix、BUSY 和 LRU
+engine.cpp               单文件 CPU Model/State/Work/forward + State snapshot
+runtime.cpp              Engine/Session、token timeline、prefix/checkpoint 策略、sampling 和 LRU
 log.cpp                  Engine/Runtime 共用的进程级日志回调
-internal.h               Engine 向 Runtime 提供只读 token timeline 的私有接口
+internal.h               Runtime 与一个计算后端之间的窄私有接口
 qwen35.py                上述 C ABI 的薄 ctypes 包装
 server.py                OpenAI chat completions、SSE、鉴权和 tokenizer
 client                   默认连接本机的极简多轮命令行客户端
@@ -46,7 +46,14 @@ pyproject.toml / uv.lock Python 直接依赖和完整锁定环境
 tests/                   HTTP、真实权重 ABI/SessionManager 和真实 HTTP e2e
 ```
 
-模型计算仍然是固定 Qwen3.5-0.8B，不引入 Tensor abstraction、backend hierarchy 或 JSON parser。
+阅读 CPU 模型只需打开 `engine.cpp`；它没有 Session、prefix 或 sampling。`runtime.cpp` 不知道
+Model、State、Work 的具体布局，只通过 `internal.h` 创建后端 State、执行单 token forward，
+以及要求后端保存/恢复 State。checkpoint 的位置和复用策略属于 Runtime，CPU vector 的实际复制
+与 Attention KV 截断属于 Engine。
+
+构建时只链接一个后端实现，不引入 Tensor abstraction、backend hierarchy、运行时注册或
+JSON parser。未来 x86/CUDA/Metal 实现可分别放在 `arch/` 下，实现同一组窄操作；不要求它们
+共享 CPU 的 weights、State 或 kernel 代码。
 错误在 C ABI 边界转换为错误码，C++ library 不会因为请求错误结束 Python 进程。
 
 ## 构建与验证
@@ -223,5 +230,5 @@ make eval EVAL_DATASET=mmlu_pro EVAL_LIMIT=100 EVAL_SEED=42
 - 没有跨 Session 共享的 prefix block、disk cache、batching、vision、tools 或 MTP；当前 prefix
   命中是把一个完整 Session 重新交给请求，而不是让多个 Session 同时共享一份 State。
 
-下一步可以在不改变 C ABI 基本关系的前提下加入 disk checkpoint 和 CUDA Engine。公共前缀以后可
+下一步可以在不改变 Runtime 和公共 C ABI 的前提下加入独立 CUDA/Metal Engine。公共前缀以后可
 作为 pinned prefix 优化：Attention block 可共享，DeltaNet 起点 State 仍需复制给各 Session。

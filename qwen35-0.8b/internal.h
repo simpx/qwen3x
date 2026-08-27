@@ -3,12 +3,32 @@
 
 #include "qwen35.h"
 
-namespace q35_internal {
+// runtime.cpp 只通过这组不透明操作访问一个计算后端。构建时由根目录
+// engine.cpp、arch/x86/engine.cpp、arch/cuda/engine.cu 或 Metal 实现其中一个。
+namespace q35_backend {
 
-// Internal cache facts used by SessionManager when selecting a Session.
-int session_checkpoint_state_tokens(const q35_session* session);
-int session_cache_hit_tokens(const q35_session* session,
-                             const int* tokens, int count);
+struct Model;
+struct State;
+
+Model* model_create(const char* path);
+void model_destroy(Model* model);
+
+State* state_create(Model* model, int context_size);
+void state_destroy(State* state);
+void state_reset(State* state);
+void state_forward(Model* model, State* state, int token, bool compute_logits);
+void state_checkpoint_save(State* state);
+void state_checkpoint_restore(State* state);
+int state_argmax(const State* state);
+void state_copy_logits(const State* state, float* output);
+
+int vocab_size();
+int max_context();
+bool token_is_stop(int token);
+
+}  // namespace q35_backend
+
+namespace q35_internal {
 
 // Format one log message and synchronously pass it to the host callback.
 void logf(q35_log_level level, const char* file, int line,

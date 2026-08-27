@@ -5,7 +5,8 @@
 //   2. State / Work：跨 token 历史与单次 forward 临时量；
 //   3. deltanet / attention / ffn：三个已经学过的 branch；
 //   4. forward：完整主干。
-// File/Reader 只负责 mmap 权重；文件末尾用窄 C ABI 暴露 Engine/Session。
+// File/Reader 只负责 mmap 权重；文件末尾用 internal.h 的窄接口暴露 Model/State。
+// Session、token timeline、prefix、checkpoint 策略和 sampling 全部位于 runtime.cpp。
 //
 //   token id
 //     -> embedding                              -> hidden[H]
@@ -21,15 +22,11 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <immintrin.h>
-#include <iostream>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -62,15 +59,6 @@ constexpr int DQK = KH * KD, DO = VH * VD, DQKV = 2 * DQK + DO;
 constexpr int MAX_CONTEXT = 262144;
 constexpr uint32_t MODEL_FORMAT_VERSION = 1;
 constexpr int END_OF_TEXT_TOKEN = 248044, IM_END_TOKEN = 248046;
-constexpr int THINK_START_TOKEN = 248068, THINK_END_TOKEN = 248069;
-constexpr int NEWLINE_TOKEN = 198, DOUBLE_NEWLINE_TOKEN = 271;
-constexpr int MOCK_REASONING_TOKEN = 26003;  // "think"
-// Rows 0..9 predict digits 0..9; row 10 predicts stop after digit 9.
-// The final rows reproduce the exact separators emitted by the chat template.
-constexpr std::array<int, 15> MOCK_TARGET_TOKENS = {
-    15, 16, 17, 18, 19, 20, 21, 22, 23, 24, IM_END_TOKEN,
-    MOCK_REASONING_TOKEN, NEWLINE_TOKEN, THINK_END_TOKEN, DOUBLE_NEWLINE_TOKEN,
-};
 using FP32 = float;
 using BF16 = uint16_t;
 static_assert(sizeof(FP32) == 4 && std::numeric_limits<FP32>::is_iec559);
@@ -504,55 +492,6 @@ void forward(const Model& model, State& state, int token, Work& work,
     LOG_DEBUG("forward completed token=%d position=%d", token, state.position);
 }
 
-// Mock forward has the same one-token contract as forward(), but does no model
-// math. It keeps State shapes and position valid, then selects one prebuilt
-// logits[V] row from the current input token. It neither knows nor needs to
-// know whether its caller is prefill (sync loop) or decode (one eval call).
-void mock_forward(State& state, int previous_token, int token, Work& work,
-                  const std::vector<std::vector<FP32>>& logits_bank) {
-    if (state.position >= state.capacity) die("session context is full");
-    if (logits_bank.empty()) die("mock logits bank is empty");
-
-    for (int layer = 0; layer < N; ++layer) {
-        if (layer % 4 != 3) {
-            // Touch one deterministic element in each fixed DeltaNet State.
-            // Checkpoint save/restore therefore still moves meaningful data,
-            // without running the expensive DeltaNet equations.
-            auto& conv = state.conv_history[layer];
-            auto& memory = state.delta_memory[layer];
-            const size_t marker = static_cast<size_t>(state.position) +
-                                  static_cast<size_t>(token);
-            conv[marker % conv.size()] = static_cast<FP32>(token);
-            memory[marker % memory.size()] = static_cast<FP32>(token);
-        } else {
-            // Preserve the real attention cache shape [T,KVH,AD].
-            state.key_cache[layer].resize(state.key_cache[layer].size() + KV_WIDTH);
-            state.value_cache[layer].resize(state.value_cache[layer].size() + KV_WIDTH);
-        }
-    }
-
-    ++state.position;
-    // A normal non-digit selects only rows 0..9, so prefill cannot directly
-    // produce stop. Thinking control tokens form their own token bigram chain.
-    size_t row = static_cast<size_t>(state.position % 10);
-    if (previous_token == THINK_START_TOKEN && token == NEWLINE_TOKEN) {
-        row = 11;  // <think>\n -> "think"
-    } else if (token == MOCK_REASONING_TOKEN) {
-        row = 12;  // "think" -> \n
-    } else if (previous_token == MOCK_REASONING_TOKEN && token == NEWLINE_TOKEN) {
-        row = 13;  // "think"\n -> </think>
-    } else if (token == THINK_END_TOKEN) {
-        row = 14;  // </think> -> \n\n
-    } else if (token >= MOCK_TARGET_TOKENS.front() &&
-               token <= MOCK_TARGET_TOKENS[9]) {
-        // digit 0 -> row for 1, ..., digit 8 -> row for 9, digit 9 -> stop row.
-        row = static_cast<size_t>(token - MOCK_TARGET_TOKENS.front() + 1);
-    }
-    std::copy(logits_bank[row].begin(), logits_bank[row].end(), work.logits.begin());
-    LOG_DEBUG("mock forward token=%d position=%d logits_row=%zu target=%d",
-              token, state.position, row, MOCK_TARGET_TOKENS[row]);
-}
-
 // 到这里模型数学已经结束。以下 File/Reader 只把 packed 文件绑定成上面的 Model 指针。
 // packed 格式是 [magic 8][version u32][reserved u32]，随后每个 tensor 从 64-byte 边界开始。
 struct File {
@@ -663,517 +602,122 @@ struct LoadedModel {
     }
 };
 
-// prefill 不是另一套模型算法：它只是把 prompt 的每一个 id 依次喂入同一个 forward。
-// 每次 forward 都会 append attention KV、更新 DeltaNet recurrent/conv state；结束时
-// work.logits 预测最后一个 prompt token 后的下一个 token。
-void prefill(const Model& model, State& state, const std::vector<int>& tokens, Work& work) {
-    if (tokens.empty()) die("prefill prompt is empty");
-    for (size_t i = 0; i < tokens.size(); ++i) {
-        forward(model, state, tokens[i], work, i + 1 == tokens.size());
-    }
-}
-
-// decode 同样只是一个有语义的名字：token 是上一步采样得到、重新喂给模型的 id。
-// 它保留传入的 State，因此绝不会重新计算 prompt。
-void decode(const Model& model, State& state, int token, Work& work) {
-    forward(model, state, token, work);
-}
-
-int argmax(const std::vector<FP32>& values) {
-    // Greedy sampling：直接选择 logit 最大的 token。
-    return static_cast<int>(std::max_element(values.begin(), values.end()) - values.begin());
-}
-
-uint64_t random_u64(uint64_t& state) {
-    // xorshift64*：调用方持有 state，因此每个请求可以有独立、可复现的随机序列。
-    if (state == 0) state = 0x9e3779b97f4a7c15ULL;
-    state ^= state >> 12;
-    state ^= state << 25;
-    state ^= state >> 27;
-    return state * 0x2545f4914f6cdd1dULL;
-}
-
-double random_unit(uint64_t& state) {
-    // 取最高 53 bit，得到 [0,1) 的均匀随机数。
-    return (random_u64(state) >> 11) * 0x1.0p-53;
-}
-
-int sample(const std::vector<FP32>& logits, FP32 temperature, int top_k, FP32 top_p,
-           FP32 presence_penalty, const int* generated_tokens, int generated_count,
-           uint64_t& rng, std::vector<int>& order, std::vector<FP32>& adjusted,
-           std::vector<uint8_t>& penalty_marks, std::vector<int>& penalty_touched) {
-    if (!std::isfinite(temperature) || temperature < 0.0f ||
-        !std::isfinite(top_p) || top_p <= 0.0f || top_p > 1.0f ||
-        !std::isfinite(presence_penalty) || presence_penalty < -2.0f ||
-        presence_penalty > 2.0f || generated_count < 0 ||
-        (generated_count > 0 && !generated_tokens)) {
-        return -1;
-    }
-
-    const std::vector<FP32>* values = &logits;
-    if (presence_penalty != 0.0f && generated_count > 0) {
-        adjusted = logits;
-        penalty_touched.clear();
-        for (int index = 0; index < generated_count; ++index) {
-            const int token = generated_tokens[index];
-            if (token < 0 || token >= V) return -1;
-        }
-        for (int index = 0; index < generated_count; ++index) {
-            const int token = generated_tokens[index];
-            if (!penalty_marks[token]) {
-                penalty_marks[token] = 1;
-                penalty_touched.push_back(token);
-                adjusted[token] -= presence_penalty;
-            }
-        }
-        for (int token : penalty_touched) penalty_marks[token] = 0;
-        values = &adjusted;
-    }
-
-    if (temperature == 0.0f) return argmax(*values);
-
-    const int limit = top_k <= 0 ? V : std::min(top_k, V);
-    order.resize(V);
-    for (int token = 0; token < V; ++token) order[token] = token;
-    if (limit < V || top_p < 1.0f) {
-        std::partial_sort(order.begin(), order.begin() + limit, order.end(),
-                          [&](int left, int right) {
-                              return (*values)[left] > (*values)[right];
-                          });
-    }
-
-    FP32 maximum = -std::numeric_limits<FP32>::infinity();
-    for (int index = 0; index < limit; ++index) {
-        maximum = std::max(maximum, (*values)[order[index]]);
-    }
-
-    double total = 0.0;
-    for (int index = 0; index < limit; ++index) {
-        total += std::exp(((*values)[order[index]] - maximum) / temperature);
-    }
-    if (!(total > 0.0) || !std::isfinite(total)) return -1;
-
-    const double nucleus = total * top_p;
-    double kept = 0.0;
-    int count = 0;
-    do {
-        kept += std::exp(((*values)[order[count]] - maximum) / temperature);
-        ++count;
-    } while (count < limit && kept < nucleus);
-
-    const double target = random_unit(rng) * kept;
-    double cumulative = 0.0;
-    for (int index = 0; index < count; ++index) {
-        cumulative += std::exp(((*values)[order[index]] - maximum) / temperature);
-        if (target < cumulative) return order[index];
-    }
-    return order[count - 1];
-}
-
 }  // namespace qwen35
 
-struct q35_engine {
-    std::unique_ptr<qwen35::LoadedModel> model;
-    bool mock = false;
-    std::vector<std::vector<qwen35::FP32>> mock_logits;
-};
-
-namespace {
-
-int common_token_prefix(const std::vector<int>& saved,
-                        const int* tokens, int count) {
-    int common = 0;
-    while (common < static_cast<int>(saved.size()) && common < count &&
-           saved[common] == tokens[common]) {
-        ++common;
-    }
-    return common;
-}
+// 以下只是 runtime.cpp 与 plain CPU 实现之间的窄连接。Session 和 prefix
+// 在 runtime；这里的 checkpoint 只描述 CPU State 实际怎样复制和恢复。
+namespace q35_backend {
 
 struct Checkpoint {
-    bool valid = false;
     int position = 0;
     std::array<std::vector<qwen35::FP32>, qwen35::N> conv_history;
     std::array<std::vector<qwen35::FP32>, qwen35::N> delta_memory;
     std::vector<qwen35::FP32> logits;
-
-    void clear() {
-        valid = false;
-        position = 0;
-    }
 };
 
-struct PrefixMatch {
-    int common = 0;
-    int reused = 0;
-    bool use_checkpoint = false;
+struct Model {
+    qwen35::LoadedModel loaded;
+
+    explicit Model(const char* path) : loaded(path) {}
 };
 
-}  // namespace
-
-struct q35_session {
-    q35_engine* engine;
-    qwen35::State state;
+struct State {
+    qwen35::State live;
     qwen35::Work work;
-    std::vector<int> tokens;
-    std::vector<int> sample_order;
-    std::vector<qwen35::FP32> sample_logits;
-    std::vector<uint8_t> penalty_marks;
-    std::vector<int> penalty_touched;
-    // live State 是当前点；checkpoint 是唯一额外保存在内存中的点。
     Checkpoint checkpoint;
-    bool logits_valid = false;
 
-    q35_session(q35_engine* owner, int context_size)
-        : engine(owner), state(context_size), work(context_size) {
-        tokens.reserve(static_cast<size_t>(context_size));
-        sample_order.reserve(qwen35::V);
-        sample_logits.reserve(qwen35::V);
-        penalty_marks.assign(qwen35::V, 0);
-        penalty_touched.reserve(static_cast<size_t>(context_size));
-    }
-
-    void reset() {
-        state.reset();
-        tokens.clear();
-        checkpoint.clear();
-        logits_valid = false;
-    }
-
-    void append(int token, bool compute_logits = true) {
-        if (engine->mock) {
-            const int previous_token = tokens.empty() ? -1 : tokens.back();
-            qwen35::mock_forward(state, previous_token, token, work,
-                                 engine->mock_logits);
-        } else {
-            qwen35::forward(engine->model->model, state, token, work, compute_logits);
-        }
-        tokens.push_back(token);
-        logits_valid = compute_logits || engine->mock;
-    }
-
-    PrefixMatch match_prefix(const int* request, int count) const {
-        PrefixMatch match;
-        match.common = common_token_prefix(tokens, request, count);
-
-        const int live = static_cast<int>(tokens.size());
-        if (live > 0 && match.common == live) {
-            match.reused = live;
-        } else if (checkpoint.valid && match.common >= checkpoint.position) {
-            // checkpoint 对应 live 的前 checkpoint.position 个 token。
-            match.reused = checkpoint.position;
-            match.use_checkpoint = true;
-        } else {
-            // live 和 checkpoint 都不是 request 的完整前缀。
-            match.reused = 0;
-            match.use_checkpoint = false;
-        }
-        return match;
-    }
-
-    void save_checkpoint() {
-        checkpoint.valid = false;
-        checkpoint.position = state.position;
-        for (int layer = 0; layer < qwen35::N; ++layer) {
-            if (layer % 4 == 3) continue;
-            checkpoint.conv_history[layer] = state.conv_history[layer];
-            checkpoint.delta_memory[layer] = state.delta_memory[layer];
-        }
-        checkpoint.logits = work.logits;
-        checkpoint.valid = true;
-        LOG_INFO("session checkpoint saved checkpoint_state_tokens=%d",
-                 checkpoint.position);
-    }
-
-    void restore_checkpoint() {
-        if (!checkpoint.valid) throw std::runtime_error("checkpoint is invalid");
-        const int live_position = state.position;
-        for (int layer = 0; layer < qwen35::N; ++layer) {
-            if (layer % 4 != 3) {
-                std::copy(checkpoint.conv_history[layer].begin(),
-                          checkpoint.conv_history[layer].end(),
-                          state.conv_history[layer].begin());
-                std::copy(checkpoint.delta_memory[layer].begin(),
-                          checkpoint.delta_memory[layer].end(),
-                          state.delta_memory[layer].begin());
-                continue;
-            }
-            // checkpoint 是 live 时间线的祖先，Attention KV 已位于 vector 前缀。
-            // position 是 token 数；扁平 KV vector 的 shape 是 [T,KVH,AD]，
-            // resize() 需要的是 FP32 元素数，因此是 T * (KVH*AD)。
-            const size_t kv_elements =
-                static_cast<size_t>(checkpoint.position) * qwen35::KV_WIDTH;
-            if (state.key_cache[layer].size() < kv_elements ||
-                state.value_cache[layer].size() < kv_elements) {
-                throw std::runtime_error("attention cache is shorter than checkpoint");
-            }
-            state.key_cache[layer].resize(kv_elements);
-            state.value_cache[layer].resize(kv_elements);
-        }
-        state.position = checkpoint.position;
-        if (tokens.size() < static_cast<size_t>(checkpoint.position)) {
-            throw std::runtime_error("token history is shorter than checkpoint");
-        }
-        tokens.resize(static_cast<size_t>(checkpoint.position));
-        std::copy(checkpoint.logits.begin(), checkpoint.logits.end(), work.logits.begin());
-        logits_valid = true;
-        LOG_INFO("session checkpoint restored live_state_tokens=%d "
-                 "checkpoint_state_tokens=%d discarded_tokens=%d",
-                 checkpoint.position, checkpoint.position,
-                 live_position - checkpoint.position);
-    }
+    explicit State(int context_size) : live(context_size), work(context_size) {}
 };
 
-namespace q35_internal {
-
-int session_checkpoint_state_tokens(const q35_session* session) {
-    if (!session || !session->checkpoint.valid) return 0;
-    return session->checkpoint.position;
+Model* model_create(const char* path) {
+    return new Model(path);
 }
 
-int session_cache_hit_tokens(const q35_session* session,
-                             const int* tokens, int count) {
-    if (!session || !tokens || count <= 0) return 0;
-    return session->match_prefix(tokens, count).reused;
+void model_destroy(Model* model) {
+    delete model;
 }
 
-}  // namespace q35_internal
-
-namespace {
-
-void write_error(char* output, size_t capacity, const char* message) {
-    if (!output || capacity == 0) return;
-    std::snprintf(output, capacity, "%s", message ? message : "unknown error");
+State* state_create(Model* model, int context_size) {
+    if (!model) throw std::runtime_error("backend model is null");
+    return new State(context_size);
 }
 
-template <typename Function>
-int guard(char* err, size_t errlen, Function&& function) {
-    try {
-        function();
-        write_error(err, errlen, "");
-        return Q35_OK;
-    } catch (const std::exception& exception) {
-        write_error(err, errlen, exception.what());
-        return Q35_ERROR;
-    } catch (...) {
-        write_error(err, errlen, "unknown C++ exception");
-        return Q35_ERROR;
+void state_destroy(State* state) {
+    delete state;
+}
+
+void state_reset(State* state) {
+    if (!state) throw std::runtime_error("backend state is null");
+    state->live.reset();
+}
+
+void state_forward(Model* model, State* state, int token, bool compute_logits) {
+    if (!model || !state) throw std::runtime_error("backend model/state is null");
+    qwen35::forward(model->loaded.model, state->live, token, state->work,
+                    compute_logits);
+}
+
+void state_checkpoint_save(State* state) {
+    if (!state) throw std::runtime_error("backend state is null");
+    Checkpoint& checkpoint = state->checkpoint;
+    checkpoint.position = state->live.position;
+    for (int layer = 0; layer < qwen35::N; ++layer) {
+        if (layer % 4 == 3) continue;
+        checkpoint.conv_history[layer] = state->live.conv_history[layer];
+        checkpoint.delta_memory[layer] = state->live.delta_memory[layer];
     }
+    checkpoint.logits = state->work.logits;
 }
 
-void require(bool condition, const char* message) {
-    if (!condition) throw std::runtime_error(message);
-}
-
-}  // namespace
-
-int q35_engine_create(const q35_engine_options* options, q35_engine** out,
-                                  char* err, size_t errlen) {
-    return guard(err, errlen, [&] {
-        require(options, "engine options are null");
-        require(options->bin_path && options->bin_path[0], "bin_path is empty");
-        require(out, "engine output pointer is null");
-        *out = nullptr;
-        auto engine = std::make_unique<q35_engine>();
-        LOG_INFO("model load started bin=%s", options->bin_path);
-        const auto started = std::chrono::steady_clock::now();
-        engine->model = std::make_unique<qwen35::LoadedModel>(options->bin_path);
-        const double elapsed = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - started).count();
-        LOG_INFO("model load completed elapsed=%.3fs", elapsed);
-        engine->mock = options->mock;
-        if (engine->mock) {
-            engine->mock_logits.resize(qwen35::MOCK_TARGET_TOKENS.size());
-            for (size_t row = 0; row < engine->mock_logits.size(); ++row) {
-                auto& logits = engine->mock_logits[row];
-                logits.assign(qwen35::V, -1000.0f);
-                const int target = qwen35::MOCK_TARGET_TOKENS[row];
-                logits[target] = 1000.0f;
-                logits[(target + 1) % qwen35::V] = 999.0f;
-            }
-            LOG_INFO("mock compute enabled logits_rows=%zu", engine->mock_logits.size());
+void state_checkpoint_restore(State* state) {
+    if (!state) throw std::runtime_error("backend state is null");
+    Checkpoint& checkpoint = state->checkpoint;
+    const size_t kv_elements =
+        static_cast<size_t>(checkpoint.position) * qwen35::KV_WIDTH;
+    for (int layer = 0; layer < qwen35::N; ++layer) {
+        if (layer % 4 != 3) {
+            std::copy(checkpoint.conv_history[layer].begin(),
+                      checkpoint.conv_history[layer].end(),
+                      state->live.conv_history[layer].begin());
+            std::copy(checkpoint.delta_memory[layer].begin(),
+                      checkpoint.delta_memory[layer].end(),
+                      state->live.delta_memory[layer].begin());
+            continue;
         }
-        LOG_DEBUG("model ready layers=%d hidden=%d vocab=%d", qwen35::N, qwen35::H,
-                  qwen35::V);
-        *out = engine.release();
-    });
-}
-
-void q35_engine_destroy(q35_engine* engine) {
-    LOG_INFO("engine closing");
-    delete engine;
-}
-
-int q35_session_create(q35_engine* engine, int context_size, q35_session** out,
-                                   char* err, size_t errlen) {
-    return guard(err, errlen, [&] {
-        require(engine, "engine is null");
-        require(out, "session output pointer is null");
-        *out = nullptr;
-        require(context_size > 0 && context_size <= qwen35::MAX_CONTEXT,
-                "context_size is outside 1..262144");
-        *out = new q35_session(engine, context_size);
-        LOG_DEBUG("session created context_size=%d", context_size);
-    });
-}
-
-void q35_session_destroy(q35_session* session) {
-    if (session) LOG_DEBUG("session closing position=%d", session->state.position);
-    delete session;
-}
-
-int q35_session_reset(q35_session* session,
-                                  char* err, size_t errlen) {
-    return guard(err, errlen, [&] {
-        require(session, "session is null");
-        const int old_position = session->state.position;
-        session->reset();
-        LOG_DEBUG("session reset old_position=%d", old_position);
-    });
-}
-
-int q35_session_sync(q35_session* session, const int* tokens, int count,
-                     int checkpoint_at, int* cached_tokens,
-                     char* err, size_t errlen) {
-    if (cached_tokens) *cached_tokens = 0;
-    return guard(err, errlen, [&] {
-        require(session, "session is null");
-        require(tokens, "tokens pointer is null");
-        require(count > 0, "token sequence is empty");
-        require(count <= session->state.capacity, "token sequence exceeds session context");
-        require(checkpoint_at == -1 || (checkpoint_at > 0 && checkpoint_at <= count),
-                "checkpoint_at must be -1 or in [1,count]");
-        for (int index = 0; index < count; ++index) {
-            require(tokens[index] >= 0 && tokens[index] < qwen35::V,
-                    "token is outside vocabulary");
+        if (state->live.key_cache[layer].size() < kv_elements ||
+            state->live.value_cache[layer].size() < kv_elements) {
+            throw std::runtime_error("attention cache is shorter than checkpoint");
         }
-
-        const int live = static_cast<int>(session->tokens.size());
-        PrefixMatch match = session->match_prefix(tokens, count);
-        int reused = match.reused;
-        // 如果要保存的位置已经被 live 跨过，只有现成的同位置
-        // checkpoint 还能使用。否则必须从 0 forward，才能拿到那一刻的 State。
-        const bool checkpoint_already_saved =
-            checkpoint_at > 0 && session->checkpoint.valid &&
-            session->checkpoint.position == checkpoint_at &&
-            match.common >= checkpoint_at;
-        if (checkpoint_at >= 0 && checkpoint_at < reused && !checkpoint_already_saved) {
-            reused = 0;
-            match.use_checkpoint = false;
-        }
-        const int tokens_to_prefill = count - reused;
-        const char* cache_result = reused > 0 ?
-                                   (match.use_checkpoint ? "hit_checkpoint" : "hit_live") :
-                                   (live == 0 ? "new" : "rebuild");
-        const char* mode = tokens_to_prefill == 0 ? "cache_only" : "append_suffix";
-        const int checkpoint_position =
-            session->checkpoint.valid ? session->checkpoint.position : 0;
-        if (cached_tokens) *cached_tokens = reused;
-        LOG_INFO("session sync prompt_tokens=%d live_state_tokens=%d "
-                 "checkpoint_state_tokens=%d checkpoint_at=%d "
-                 "cache_result=%s cache_hit_tokens=%d to_prefill_tokens=%d",
-                 count, live, checkpoint_position, checkpoint_at,
-                 cache_result, reused, tokens_to_prefill);
-        const auto started = std::chrono::steady_clock::now();
-        if (match.use_checkpoint) {
-            session->restore_checkpoint();
-        } else if (reused == 0) {
-            session->reset();
-        }
-        bool checkpoint_saved = checkpoint_already_saved;
-        if (checkpoint_at == reused && checkpoint_at > 0 && !checkpoint_saved) {
-            session->save_checkpoint();
-            checkpoint_saved = true;
-        }
-        LOG_INFO("session prefill started mode=%s prompt_tokens=%d "
-                 "cache_hit_tokens=%d to_prefill_tokens=%d",
-                 mode, count, reused, tokens_to_prefill);
-        for (int index = reused; index < count; ++index) {
-            // Intermediate prompt tokens update State but do not need a full V-sized
-            // lm_head. A checkpoint and the final prompt position do need logits.
-            const bool need_logits = index + 1 == checkpoint_at || index + 1 == count;
-            session->append(tokens[index], need_logits);
-            if (session->state.position == checkpoint_at) {
-                session->save_checkpoint();
-                checkpoint_saved = true;
-            }
-        }
-        // 到这里 prompt 中缺少的 token 已全部 forward，prefill 已完成，decode 尚未开始。
-        if (checkpoint_at > 0 && !checkpoint_saved) {
-            throw std::runtime_error("checkpoint position was not evaluated");
-        }
-        const double elapsed = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - started).count();
-        const int final_checkpoint =
-            session->checkpoint.valid ? session->checkpoint.position : 0;
-        LOG_INFO("session prefill completed prompt_tokens=%d "
-                 "live_state_tokens=%d checkpoint_state_tokens=%d "
-                 "cache_hit_tokens=%d to_prefill_tokens=%d elapsed=%.3fs",
-                 count, count, final_checkpoint, reused, tokens_to_prefill, elapsed);
-    });
+        state->live.key_cache[layer].resize(kv_elements);
+        state->live.value_cache[layer].resize(kv_elements);
+    }
+    state->live.position = checkpoint.position;
+    std::copy(checkpoint.logits.begin(), checkpoint.logits.end(),
+              state->work.logits.begin());
 }
 
-int q35_session_eval(q35_session* session, int token,
-                                 char* err, size_t errlen) {
-    return guard(err, errlen, [&] {
-        require(session, "session is null");
-        require(token >= 0 && token < qwen35::V, "token is outside vocabulary");
-        require(session->state.position < session->state.capacity, "session context is full");
-        const auto started = std::chrono::steady_clock::now();
-        session->append(token);
-        const double elapsed = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - started).count();
-        LOG_DEBUG("session evaluated token=%d position=%d elapsed=%.3fs",
-                  token, session->state.position, elapsed);
-    });
+int state_argmax(const State* state) {
+    if (!state) return -1;
+    return static_cast<int>(
+        std::max_element(state->work.logits.begin(), state->work.logits.end()) -
+        state->work.logits.begin());
 }
 
-int q35_session_position(const q35_session* session) {
-    return session ? session->state.position : -1;
+void state_copy_logits(const State* state, float* output) {
+    if (!state || !output) throw std::runtime_error("backend state/output is null");
+    std::memcpy(output, state->work.logits.data(), sizeof(float) * qwen35::V);
 }
 
-int q35_session_argmax(const q35_session* session) {
-    if (!session || !session->logits_valid) return -1;
-    const int token = qwen35::argmax(session->work.logits);
-    LOG_DEBUG("argmax selected token=%d position=%d", token, session->state.position);
-    return token;
-}
-
-int q35_session_sample(q35_session* session, float temperature, int top_k,
-                       float top_p, float presence_penalty,
-                       const int* generated_tokens, int generated_count,
-                       uint64_t* rng) {
-    if (!session || !session->logits_valid || !rng) return -1;
-    const int token = qwen35::sample(
-        session->work.logits, temperature, top_k, top_p, presence_penalty,
-        generated_tokens, generated_count, *rng, session->sample_order,
-        session->sample_logits, session->penalty_marks, session->penalty_touched);
-    LOG_DEBUG("sample selected token=%d position=%d temperature=%.3f top_k=%d "
-              "top_p=%.3f presence_penalty=%.3f generated_tokens=%d",
-              token, session->state.position, temperature, top_k, top_p,
-              presence_penalty, generated_count);
-    return token;
-}
-
-bool q35_token_is_stop(int token) {
-    const bool stop = token == qwen35::END_OF_TEXT_TOKEN || token == qwen35::IM_END_TOKEN;
-    if (stop) LOG_DEBUG("stop token detected token=%d", token);
-    return stop;
-}
-
-int q35_vocab_size(void) {
+int vocab_size() {
     return qwen35::V;
 }
 
-int q35_session_copy_logits(const q35_session* session, float* output, int capacity,
-                                        char* err, size_t errlen) {
-    return guard(err, errlen, [&] {
-        require(session, "session is null");
-        require(session->logits_valid, "session has no logits; sync or eval tokens first");
-        require(output, "logits output pointer is null");
-        require(capacity >= qwen35::V, "logits output is smaller than vocabulary");
-        std::memcpy(output, session->work.logits.data(), sizeof(float) * qwen35::V);
-        LOG_DEBUG("logits copied count=%d position=%d", qwen35::V,
-                  session->state.position);
-    });
+int max_context() {
+    return qwen35::MAX_CONTEXT;
 }
+
+bool token_is_stop(int token) {
+    return token == qwen35::END_OF_TEXT_TOKEN || token == qwen35::IM_END_TOKEN;
+}
+
+}  // namespace q35_backend
