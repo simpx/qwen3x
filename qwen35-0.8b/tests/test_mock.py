@@ -98,6 +98,14 @@ def main():
         thinking.eval(271)
         assert 15 <= thinking.argmax() <= 24
 
+        # Leave one idle manager owned only by Engine. Engine.close() must be
+        # able to clear it without its __del__ re-entering engine._lock.
+        manager = engine.create_session_manager(1, 64)
+        managed = manager.acquire(prompt)
+        managed.sync(prompt)
+        manager.release(managed, keep=True)
+        manager = None
+
     print("native mock Engine regression: passed")
 
 

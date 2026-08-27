@@ -370,7 +370,10 @@ class Session:
 
     def __del__(self):
         try:
-            if self._owns_native:
+            # Engine.close() closes every native handle before clearing its
+            # owning set.  Do not re-enter engine._lock from __del__ after the
+            # handle is already null.
+            if self._owns_native and self._handle:
                 self.close()
         except Exception:
             pass
@@ -447,6 +450,9 @@ class SessionManager:
 
     def __del__(self):
         try:
-            self.close()
+            # See Session.__del__: Engine.close() may drop the final Python
+            # reference while it already owns engine._lock.
+            if self._handle:
+                self.close()
         except Exception:
             pass
