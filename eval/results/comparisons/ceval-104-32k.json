@@ -1,0 +1,171 @@
+{
+  "dataset": "ceval",
+  "matched_samples": 104,
+  "prediction_input_sha256": "755b951ac583ed9e5b81b2d7d3398b882007babd2ba99ebc7541d42c2abb93cf",
+  "exact_outputs": 3,
+  "exact_output_rate": 0.028846153846153848,
+  "different_output_samples": [
+    {
+      "prediction_file": "ceval_accountant.jsonl",
+      "index": 0
+    },
+    {
+      "prediction_file": "ceval_accountant.jsonl",
+      "index": 1
+    },
+    {
+      "prediction_file": "ceval_advanced_mathematics.jsonl",
+      "index": 0
+    },
+    {
+      "prediction_file": "ceval_advanced_mathematics.jsonl",
+      "index": 1
+    },
+    {
+      "prediction_file": "ceval_art_studies.jsonl",
+      "index": 0
+    },
+    {
+      "prediction_file": "ceval_art_studies.jsonl",
+      "index": 1
+    },
+    {
+      "prediction_file": "ceval_basic_medicine.jsonl",
+      "index": 0
+    },
+    {
+      "prediction_file": "ceval_basic_medicine.jsonl",
+      "index": 1
+    },
+    {
+      "prediction_file": "ceval_business_administration.jsonl",
+      "index": 0
+    },
+    {
+      "prediction_file": "ceval_business_administration.jsonl",
+      "index": 1
+    },
+    {
+      "prediction_file": "ceval_chinese_language_and_literature.jsonl",
+      "index": 0
+    },
+    {
+      "prediction_file": "ceval_chinese_language_and_literature.jsonl",
+      "index": 1
+    },
+    {
+      "prediction_file": "ceval_civil_servant.jsonl",
+      "index": 0
+    },
+    {
+      "prediction_file": "ceval_civil_servant.jsonl",
+      "index": 1
+    },
+    {
+      "prediction_file": "ceval_clinical_medicine.jsonl",
+      "index": 0
+    },
+    {
+      "prediction_file": "ceval_clinical_medicine.jsonl",
+      "index": 1
+    },
+    {
+      "prediction_file": "ceval_college_chemistry.jsonl",
+      "index": 0
+    },
+    {
+      "prediction_file": "ceval_college_chemistry.jsonl",
+      "index": 1
+    },
+    {
+      "prediction_file": "ceval_college_economics.jsonl",
+      "index": 0
+    },
+    {
+      "prediction_file": "ceval_college_economics.jsonl",
+      "index": 1
+    }
+  ],
+  "different_output_samples_truncated": true,
+  "engine": {
+    "backend": "qwen35",
+    "server": {
+      "compute": "real",
+      "context_size": 40960
+    },
+    "score": 0.3846,
+    "metrics": {
+      "mean_acc": 0.3846
+    },
+    "prediction_summary": {
+      "samples": 104,
+      "failed_samples": 0,
+      "input_tokens": 110124,
+      "cached_tokens": 0,
+      "output_tokens": 69993,
+      "max_output_tokens": 14312,
+      "length_limited_samples": 0,
+      "finish_reasons": {
+        "stop": 104
+      },
+      "latency_seconds": 19794.156114638317,
+      "cache_hit_rate": 0.0
+    },
+    "review_summary": {
+      "samples": 104,
+      "scored_samples": 104,
+      "unscored_samples": 0
+    }
+  },
+  "reference": {
+    "backend": "transformers",
+    "server": {
+      "device": "cuda",
+      "dtype": "float32",
+      "max_context_tokens": 40960
+    },
+    "score": 0.3461,
+    "metrics": {
+      "mean_acc": 0.3461
+    },
+    "prediction_summary": {
+      "samples": 104,
+      "failed_samples": 0,
+      "input_tokens": 110124,
+      "cached_tokens": 0,
+      "output_tokens": 94027,
+      "max_output_tokens": 15128,
+      "length_limited_samples": 0,
+      "finish_reasons": {
+        "stop": 104
+      },
+      "latency_seconds": 4761.139268122497,
+      "cache_hit_rate": 0.0
+    },
+    "review_summary": {
+      "samples": 104,
+      "scored_samples": 104,
+      "unscored_samples": 0
+    }
+  },
+  "score_delta": 0.03849999999999998,
+  "paired_primary": {
+    "metric": "acc",
+    "samples": 104,
+    "both_correct": 14,
+    "engine_only_correct": 26,
+    "reference_only_correct": 22,
+    "both_wrong": 42,
+    "score_delta": 0.038461538461538464,
+    "paired_standard_error": 0.06651049451587676,
+    "mcnemar_exact_p": 0.6654658120766186
+  },
+  "official_model_card": {
+    "source": "https://huggingface.co/Qwen/Qwen3.5-0.8B#benchmark-results",
+    "mode": "non-thinking",
+    "score": 0.464,
+    "engine_delta": -0.07940000000000003,
+    "reference_delta": -0.1179,
+    "note": "Model-card delta may include eval recipe and sampling variance."
+  }
+}

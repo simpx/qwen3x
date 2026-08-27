@@ -1,0 +1,171 @@
+{
+  "dataset": "mmlu_pro",
+  "matched_samples": 504,
+  "prediction_input_sha256": "bd0c3072270ca7dff720ff1a0f836a871e311071dbda0e5e0145d1e62d9c5f75",
+  "exact_outputs": 0,
+  "exact_output_rate": 0.0,
+  "different_output_samples": [
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 0
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 1
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 2
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 3
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 4
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 5
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 6
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 7
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 8
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 9
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 10
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 11
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 12
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 13
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 14
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 15
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 16
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 17
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 18
+    },
+    {
+      "prediction_file": "mmlu_pro_biology.jsonl",
+      "index": 19
+    }
+  ],
+  "different_output_samples_truncated": true,
+  "engine": {
+    "backend": "qwen35",
+    "server": {
+      "compute": "real",
+      "context_size": 40960
+    },
+    "score": 0.3294,
+    "metrics": {
+      "mean_acc": 0.3294
+    },
+    "prediction_summary": {
+      "samples": 504,
+      "failed_samples": 0,
+      "input_tokens": 714830,
+      "cached_tokens": 0,
+      "output_tokens": 1270098,
+      "max_output_tokens": 18442,
+      "length_limited_samples": 0,
+      "finish_reasons": {
+        "stop": 504
+      },
+      "latency_seconds": 237812.27033406688,
+      "cache_hit_rate": 0.0
+    },
+    "review_summary": {
+      "samples": 504,
+      "scored_samples": 504,
+      "unscored_samples": 0
+    }
+  },
+  "reference": {
+    "backend": "transformers",
+    "server": {
+      "device": "cuda",
+      "dtype": "float32",
+      "max_context_tokens": 40960
+    },
+    "score": 0.3036,
+    "metrics": {
+      "mean_acc": 0.3036
+    },
+    "prediction_summary": {
+      "samples": 504,
+      "failed_samples": 0,
+      "input_tokens": 714830,
+      "cached_tokens": 0,
+      "output_tokens": 1193217,
+      "max_output_tokens": 20558,
+      "length_limited_samples": 0,
+      "finish_reasons": {
+        "stop": 504
+      },
+      "latency_seconds": 58096.49287760479,
+      "cache_hit_rate": 0.0
+    },
+    "review_summary": {
+      "samples": 504,
+      "scored_samples": 504,
+      "unscored_samples": 0
+    }
+  },
+  "score_delta": 0.025800000000000045,
+  "paired_primary": {
+    "metric": "acc",
+    "samples": 504,
+    "both_correct": 89,
+    "engine_only_correct": 77,
+    "reference_only_correct": 64,
+    "both_wrong": 274,
+    "score_delta": 0.025793650793650792,
+    "paired_standard_error": 0.023532171171418762,
+    "mcnemar_exact_p": 0.31221293165699454
+  },
+  "official_model_card": {
+    "source": "https://huggingface.co/Qwen/Qwen3.5-0.8B#benchmark-results",
+    "mode": "non-thinking",
+    "score": 0.297,
+    "engine_delta": 0.03240000000000004,
+    "reference_delta": 0.006599999999999995,
+    "note": "Model-card delta may include eval recipe and sampling variance."
+  }
+}

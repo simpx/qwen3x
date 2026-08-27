@@ -196,9 +196,28 @@ Runtime 当前把完整 prompt 的 token 数作为 `checkpoint_at`；Engine 在 
 保存 checkpoint 时只额外复制 DeltaNet 的 recurrent/conv state；Attention KV 本来就是按 token
 append 的，所以恢复时只截断到 checkpoint position，不额外复制一整份 KV。
 
+## EvalScope 评测
+
+评测工具与生产 Server 的 Python 环境隔离，完整说明和结果见
+[../eval/README.md](../eval/README.md)：
+
+```sh
+# 终端 1：为长输出和并发评测启动 Engine
+SLOTS=4 CONTEXT=40960 REQUEST_TIMEOUT=7200 make run LOG_LEVEL=info
+
+# 终端 2：先跑 smoke，再选择数据集与样本数
+make eval-smoke
+make eval EVAL_DATASET=mmlu_pro EVAL_LIMIT=100 EVAL_SEED=42
+```
+
+`make reference-serve` 可启动 `reference/` 中的 FP32 Transformers 服务；随后
+`make eval-reference` 和 `make eval-compare` 对同一批样本做配对比较。提交到仓库的精简结果在
+[../eval/results/](../eval/results/)，本机完整 prediction/review/report 默认被 Git 忽略。
+
 ## 当前边界
 
-- CPU BF16-weight / FP32-compute，支持 greedy、temperature 和 top-p sampling，text-only。
+- CPU BF16-weight / FP32-compute，支持 greedy、temperature、top-p、top-k、presence penalty
+  和固定 seed sampling，text-only。
 - 固定 Session 数量；全部 BUSY 时返回 429，IDLE Session 按最长 prefix 或 LRU 重新绑定。
 - 中断只能在 token 边界发现；一次 CPU forward 尚不能抢占。
 - 没有跨 Session 共享的 prefix block、disk cache、batching、vision、tools 或 MTP；当前 prefix

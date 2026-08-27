@@ -182,7 +182,11 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertTrue(first.headers["x-request-id"].startswith("req-"))
         self.assertNotEqual(first.headers["x-request-id"], second.headers["x-request-id"])
-        self.assertEqual(self.client.get("/readyz").json()["slots"], 2)
+        ready = self.client.get("/readyz").json()
+        self.assertEqual(ready["slots"], 2)
+        self.assertEqual(ready["context_size"], 128)
+        self.assertEqual(ready["request_timeout"], 600.0)
+        self.assertEqual(ready["compute"], "real")
         self.assertEqual(self.client.get("/v1/models").status_code, 401)
         self.assertEqual(self.client.get("/v1/models", headers=self.headers).status_code, 200)
 

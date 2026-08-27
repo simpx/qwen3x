@@ -64,6 +64,7 @@ make test
 | 目录 | 做什么 | 主要验收命令 |
 | --- | --- | --- |
 | [reference/](reference/README.md) | 官方 PyTorch/Transformers 的 CPU/CUDA FP32 logits oracle | `make -C reference cpu` / `cuda` |
+| [eval/](eval/README.md) | EvalScope 复现工具、独立 uv 环境和精简评测结果 | `make -C qwen35-0.8b eval-smoke` |
 | [02-cpu-0.8b/](02-cpu-0.8b/README.md) | 独立 plain C++ CPU forward + 文字/chat e2e | `make -C 02-cpu-0.8b test` |
 | [03-cuda-0.8b/](03-cuda-0.8b/README.md) | 直接 CUDA kernels + cuBLAS，state 留在 GPU | `make -C 03-cuda-0.8b test` |
 | [04-runtime/](04-runtime/README.md) | Python OpenAI-compatible server + 常驻 CPU/CUDA engine | `make -C 04-runtime test` / `e2e` |

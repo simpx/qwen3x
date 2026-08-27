@@ -1,0 +1,175 @@
+{
+  "dataset": "ifeval",
+  "matched_samples": 100,
+  "prediction_input_sha256": "08916b36aac5a0ba5e9a46121605522152f991942f7cfac52bccf95d2b0ee380",
+  "exact_outputs": 0,
+  "exact_output_rate": 0.0,
+  "different_output_samples": [
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 0
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 1
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 2
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 3
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 4
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 5
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 6
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 7
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 8
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 9
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 10
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 11
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 12
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 13
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 14
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 15
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 16
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 17
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 18
+    },
+    {
+      "prediction_file": "ifeval_default.jsonl",
+      "index": 19
+    }
+  ],
+  "different_output_samples_truncated": true,
+  "engine": {
+    "backend": "qwen35",
+    "server": null,
+    "score": 0.52,
+    "metrics": {
+      "mean_prompt_level_strict": 0.52,
+      "mean_inst_level_strict": 0.6683,
+      "mean_prompt_level_loose": 0.53,
+      "mean_inst_level_loose": 0.68
+    },
+    "prediction_summary": {
+      "samples": 100,
+      "failed_samples": 0,
+      "input_tokens": 5731,
+      "cached_tokens": 0,
+      "output_tokens": 32377,
+      "max_output_tokens": 2319,
+      "length_limited_samples": 0,
+      "finish_reasons": {
+        "stop": 100
+      },
+      "latency_seconds": 3896.8246399720083,
+      "cache_hit_rate": 0.0
+    },
+    "review_summary": {
+      "samples": 100,
+      "scored_samples": 100,
+      "unscored_samples": 0
+    }
+  },
+  "reference": {
+    "backend": "transformers",
+    "server": {
+      "device": "cuda",
+      "dtype": "float32",
+      "max_context_tokens": 40960
+    },
+    "score": 0.52,
+    "metrics": {
+      "mean_prompt_level_strict": 0.52,
+      "mean_inst_level_strict": 0.6667,
+      "mean_prompt_level_loose": 0.56,
+      "mean_inst_level_loose": 0.6917
+    },
+    "prediction_summary": {
+      "samples": 100,
+      "failed_samples": 0,
+      "input_tokens": 5731,
+      "cached_tokens": 0,
+      "output_tokens": 62029,
+      "max_output_tokens": 32768,
+      "length_limited_samples": 1,
+      "finish_reasons": {
+        "stop": 99,
+        "max_tokens": 1
+      },
+      "latency_seconds": 2959.5101645338,
+      "cache_hit_rate": 0.0
+    },
+    "review_summary": {
+      "samples": 100,
+      "scored_samples": 100,
+      "unscored_samples": 0
+    }
+  },
+  "score_delta": 0.0,
+  "paired_primary": {
+    "metric": "prompt_level_strict",
+    "samples": 100,
+    "both_correct": 40,
+    "engine_only_correct": 12,
+    "reference_only_correct": 12,
+    "both_wrong": 36,
+    "score_delta": 0.0,
+    "paired_standard_error": 0.04898979485566356,
+    "mcnemar_exact_p": 1.0
+  },
+  "official_model_card": {
+    "source": "https://huggingface.co/Qwen/Qwen3.5-0.8B#benchmark-results",
+    "mode": "non-thinking",
+    "score": 0.521,
+    "engine_delta": -0.0010000000000000009,
+    "reference_delta": -0.0010000000000000009,
+    "note": "Model-card delta may include eval recipe and sampling variance."
+  }
+}

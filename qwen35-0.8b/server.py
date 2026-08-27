@@ -550,7 +550,13 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
 
     @app.get("/readyz")
     async def ready():
-        return {"status": "ready", "slots": app.state.manager.session_count}
+        return {
+            "status": "ready",
+            "slots": app.state.manager.session_count,
+            "context_size": config.max_context_tokens,
+            "request_timeout": config.request_timeout,
+            "compute": "mock" if config.mock else "real",
+        }
 
     @app.get("/v1/models")
     async def models(request: Request):

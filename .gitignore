@@ -11,6 +11,13 @@
 /00-lessons/09_qwen35_0_8b
 /qwen35-0.8b/build/
 /qwen35-0.8b/logs/
+/eval/results/*
+!/eval/results/README.md
+!/eval/results/comparisons/
+/eval/results/comparisons/*
+!/eval/results/comparisons/ceval-104-32k.json
+!/eval/results/comparisons/ifeval-100-32k.json
+!/eval/results/comparisons/mmlu-pro-504-seed42-32k.json
 /reference/build/
 /02-cpu-0.8b/build/
 /02-cpu-0.8b/qwen35

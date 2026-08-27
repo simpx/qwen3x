@@ -8,16 +8,21 @@ LIBRARY ?= $(BUILD)/libqwen35.so
 BIN ?= $(BUILD)/qwen35-0.8b.bin
 SERVER ?= http://127.0.0.1:8000
 LOG_LEVEL ?= debug
+SLOTS ?= 2
+CONTEXT ?= 40960
+REQUEST_TIMEOUT ?= 600
 MOCK ?= 0
 MOCK_ARG := $(if $(filter 1 true yes,$(MOCK)),--mock,)
 BENCH_PREFILL ?= 8
 BENCH_DECODE ?= 4
 REFERENCE ?= ../reference/build/cpu
 REFERENCE_REPORT ?= $(BUILD)/reference-report.json
+REFERENCE_DTYPE ?= float32
+REFERENCE_CACHE ?= static
 
 CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic -march=native
 
-.PHONY: all sync sync-prod weights unit-test mock-test native-test reference-generate reference-test reference test e2e run chat bench clean
+.PHONY: all sync sync-prod weights unit-test eval-test mock-test native-test reference-generate reference-test reference test e2e run chat bench eval eval-smoke reference-serve eval-reference eval-compare clean
 
 all: $(LIBRARY)
 
@@ -39,6 +44,9 @@ $(BIN): pack_weights.py
 
 unit-test:
 	$(PYTHON) -m unittest -v tests.test_server tests.test_client
+
+eval-test:
+	$(MAKE) -C ../eval test PROJECT="$(CURDIR)"
 
 native-test: $(LIBRARY) $(BIN)
 	PYTHONPATH=. $(PYTHON) tests/test_native.py --library "$(LIBRARY)" --bin "$(BIN)"
@@ -72,7 +80,7 @@ e2e: $(LIBRARY) $(BIN)
 	PYTHONPATH=. $(PYTHON) tests/test_e2e.py --tokenizer "$(TOKENIZER)" --library "$(LIBRARY)" --bin "$(BIN)"
 
 run: $(LIBRARY) $(BIN)
-	$(PYTHON_PROD) server.py --tokenizer "$(TOKENIZER)" --library "$(LIBRARY)" --bin "$(BIN)" --log-level "$(LOG_LEVEL)" $(MOCK_ARG)
+	$(PYTHON_PROD) server.py --tokenizer "$(TOKENIZER)" --library "$(LIBRARY)" --bin "$(BIN)" --log-level "$(LOG_LEVEL)" --slots "$(SLOTS)" --max-context-tokens "$(CONTEXT)" --request-timeout "$(REQUEST_TIMEOUT)" $(MOCK_ARG)
 
 chat:
 	curl --silent --show-error --no-buffer "$(SERVER)/v1/chat/completions" \
@@ -85,6 +93,28 @@ bench: $(LIBRARY) $(BIN)
 		--bin "$(BIN)" \
 		--prefill-tokens "$(BENCH_PREFILL)" \
 		--decode-tokens "$(BENCH_DECODE)"
+
+eval: $(BIN)
+	$(MAKE) -C ../eval run PROJECT="$(CURDIR)" SERVER="$(SERVER)" \
+		TOKENIZER="$(abspath $(TOKENIZER))" BIN="$(abspath $(BIN))"
+
+eval-smoke:
+	$(MAKE) -C ../eval smoke PROJECT="$(CURDIR)" SERVER="$(SERVER)" \
+		TOKENIZER="$(abspath $(TOKENIZER))" BIN="$(abspath $(BIN))"
+
+reference-serve:
+	$(MAKE) -C ../reference serve \
+		MODEL="$(abspath $(TOKENIZER))" \
+		CHAT_TEMPLATE="$(abspath chat_template.jinja)" \
+		DEVICE=cuda DTYPE="$(REFERENCE_DTYPE)" CACHE="$(REFERENCE_CACHE)" \
+		MAX_CONTEXT="$(CONTEXT)" PORT=8002
+
+eval-reference:
+	$(MAKE) -C ../eval reference PROJECT="$(CURDIR)" \
+		TOKENIZER="$(abspath $(TOKENIZER))"
+
+eval-compare:
+	$(MAKE) -C ../eval compare PROJECT="$(CURDIR)"
 
 clean:
 	rm -rf $(BUILD)
