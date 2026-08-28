@@ -1,10 +1,8 @@
-# 00-lessons 学习导师记忆
+# from-scratch 学习导师记忆
 
-本文件只补充根目录 `AGENTS.md`，适用于 `00-lessons/`。这里记录的是用户在实际交流中形成的
-心智模型和当前断点；项目事实仍看根目录 `status.md`，用户自己的原始理解仍以 `note.md` 为准。
-
-`status.md` 中“lesson 06--09 尚未正式学习”的进度已经过期。当前学习状态以本文件为准，
-不要让用户重新学习已经完成的内容。
+本文件只补充根目录 `AGENTS.md`，适用于 `from-scratch/`。这里记录的是用户在实际交流中形成的
+心智模型和当前断点；项目结构和方向看根目录 `README.md`，用户自己的原始理解仍以
+`note.md` 为准。
 
 ## 当前断点
 
@@ -18,7 +16,7 @@ token id -> embedding -> N * {
 ```
 
 `forward()` 到 logits 为止；greedy `argmax` 在外层 generation 循环里。用户认为
-`00-lessons/` 已经接近完成，目前正在阅读 `09_qwen35_0_8b.cpp` 的真实拼装细节，最近刚理清
+`from-scratch/` 已经接近完成，目前正在阅读 `09_qwen35_0_8b.cpp` 的真实拼装细节，最近刚理清
 multi-head 不会让固定总宽度 `D` 下的基本 QK 点积计算量自动减少。
 
 ## 已经建立的概念
@@ -126,6 +124,7 @@ multi-head 不会让固定总宽度 `D` 下的基本 QK 点积计算量自动减
 2. 用真实 shape 走一遍 16-head DeltaNet：每个 head 的 `S[128,128]` 如何更新、读取并拼回 `[2048]`。
 3. 把 `State` 的 conv history、DeltaNet memory、KV cache 与 `Work` 的临时数组逐项对应。
 
-如果用户确认 `00-lessons/` 已结束，下一站按仓库顺序进入 `reference/`：重点不是再学模型
+如果用户确认 `from-scratch/` 已结束，下一站进入 `reference/`：重点不是再学模型
 公式，而是理解“官方实现作为 oracle、为什么保存每一步 full logits、C++ 怎么证明自己算对”。
-之后才进入 `02-cpu-0.8b/` 阅读可演进的 plain C++ runtime。
+之后回到仓库根目录，按 `qwen35.h -> engine.cpp -> runtime.cpp -> qwen35.py -> scripts/server.py`
+阅读正式实现。

@@ -80,7 +80,7 @@ def add_arguments() -> argparse.Namespace:
 def main() -> None:
     args = add_arguments()
     # 默认 binary 相对本脚本定位，而非相对 shell 当前目录；README 里的 `cd` 只是让
-    # 命令更短，用户从仓库根目录执行 `python 00-lessons/09_chat.py ...` 也应当可用。
+    # 命令更短，用户从仓库根目录执行 `python from-scratch/09_chat.py ...` 也应当可用。
     default_engine = Path(__file__).with_name("09_qwen35_0_8b")
     engine = args.engine or str(default_engine)
     tokenizer = AutoTokenizer.from_pretrained(args.model)

@@ -1,2 +1,0 @@
-# 仅 chat.py 的文字/tokenizer 薄层需要；C++ engine 和 pack_weights.py 不依赖这些包。
-transformers>=5.0.0

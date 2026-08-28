@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from transformers import AutoTokenizer
 
 from qwen35 import Engine
-from server import Config, create_app
+from scripts.server import Config, create_app
 
 
 def main():

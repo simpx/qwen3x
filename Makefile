@@ -2,7 +2,7 @@ CXX ?= c++
 UV ?= uv
 PYTHON ?= $(UV) run --locked python
 PYTHON_PROD ?= $(UV) run --locked --no-dev python
-TOKENIZER ?= ../models/Qwen3.5-0.8B
+TOKENIZER ?= models/Qwen3.5-0.8B
 BUILD ?= build
 LIBRARY ?= $(BUILD)/libqwen35.so
 BIN ?= $(BUILD)/qwen35-0.8b.bin
@@ -15,7 +15,7 @@ MOCK ?= 0
 MOCK_ARG := $(if $(filter 1 true yes,$(MOCK)),--mock,)
 BENCH_PREFILL ?= 8
 BENCH_DECODE ?= 4
-REFERENCE ?= ../reference/build/cpu
+REFERENCE ?= reference/build/cpu
 REFERENCE_REPORT ?= $(BUILD)/reference-report.json
 REFERENCE_DTYPE ?= float32
 REFERENCE_CACHE ?= static
@@ -38,15 +38,15 @@ $(LIBRARY): engine.cpp runtime.cpp log.cpp qwen35.h internal.h
 
 weights: $(BIN)
 
-$(BIN): pack_weights.py
+$(BIN): scripts/pack_weights.py
 	mkdir -p $(BUILD)
-	$(PYTHON_PROD) pack_weights.py "$(TOKENIZER)" "$@"
+	$(PYTHON_PROD) -m scripts.pack_weights "$(TOKENIZER)" "$@"
 
 unit-test:
 	$(PYTHON) -m unittest -v tests.test_server tests.test_client
 
 eval-test:
-	$(MAKE) -C ../eval test PROJECT="$(CURDIR)"
+	$(MAKE) -C eval test PROJECT="$(CURDIR)"
 
 native-test: $(LIBRARY) $(BIN)
 	PYTHONPATH=. $(PYTHON) tests/test_native.py --library "$(LIBRARY)" --bin "$(BIN)"
@@ -55,14 +55,14 @@ mock-test: $(LIBRARY) $(BIN)
 	PYTHONPATH=. $(PYTHON) tests/test_mock.py --library "$(LIBRARY)" --bin "$(BIN)"
 
 reference-generate:
-	$(MAKE) -C ../reference dump \
+	$(MAKE) -C reference dump \
 		MODEL="$(abspath $(TOKENIZER))" \
 		OUT="$(abspath $(REFERENCE))" \
 		DEVICE=cpu \
 		CHAT_TEMPLATE="$(abspath chat_template.jinja)"
 
 reference-test: $(LIBRARY) $(BIN)
-	$(MAKE) -C ../reference compare \
+	$(MAKE) -C reference compare \
 		ENGINE_DIR="$(CURDIR)" \
 		LIBRARY="$(abspath $(LIBRARY))" \
 		BIN="$(abspath $(BIN))" \
@@ -80,7 +80,7 @@ e2e: $(LIBRARY) $(BIN)
 	PYTHONPATH=. $(PYTHON) tests/test_e2e.py --tokenizer "$(TOKENIZER)" --library "$(LIBRARY)" --bin "$(BIN)"
 
 run: $(LIBRARY) $(BIN)
-	$(PYTHON_PROD) server.py --tokenizer "$(TOKENIZER)" --library "$(LIBRARY)" --bin "$(BIN)" --log-level "$(LOG_LEVEL)" --slots "$(SLOTS)" --max-context-tokens "$(CONTEXT)" --request-timeout "$(REQUEST_TIMEOUT)" $(MOCK_ARG)
+	$(PYTHON_PROD) -m scripts.server --tokenizer "$(TOKENIZER)" --library "$(LIBRARY)" --bin "$(BIN)" --log-level "$(LOG_LEVEL)" --slots "$(SLOTS)" --max-context-tokens "$(CONTEXT)" --request-timeout "$(REQUEST_TIMEOUT)" $(MOCK_ARG)
 
 chat:
 	curl --silent --show-error --no-buffer "$(SERVER)/v1/chat/completions" \
@@ -88,33 +88,33 @@ chat:
 		-d '{"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"你好，请用一句话介绍自己。"}],"temperature":0,"max_completion_tokens":1024,"stream":true,"stream_options":{"include_usage":true}}'
 
 bench: $(LIBRARY) $(BIN)
-	PYTHONPATH=. $(PYTHON_PROD) bench.py \
+	$(PYTHON_PROD) -m scripts.bench \
 		--library "$(LIBRARY)" \
 		--bin "$(BIN)" \
 		--prefill-tokens "$(BENCH_PREFILL)" \
 		--decode-tokens "$(BENCH_DECODE)"
 
 eval: $(BIN)
-	$(MAKE) -C ../eval run PROJECT="$(CURDIR)" SERVER="$(SERVER)" \
+	$(MAKE) -C eval run PROJECT="$(CURDIR)" SERVER="$(SERVER)" \
 		TOKENIZER="$(abspath $(TOKENIZER))" BIN="$(abspath $(BIN))"
 
 eval-smoke:
-	$(MAKE) -C ../eval smoke PROJECT="$(CURDIR)" SERVER="$(SERVER)" \
+	$(MAKE) -C eval smoke PROJECT="$(CURDIR)" SERVER="$(SERVER)" \
 		TOKENIZER="$(abspath $(TOKENIZER))" BIN="$(abspath $(BIN))"
 
 reference-serve:
-	$(MAKE) -C ../reference serve \
+	$(MAKE) -C reference serve \
 		MODEL="$(abspath $(TOKENIZER))" \
 		CHAT_TEMPLATE="$(abspath chat_template.jinja)" \
 		DEVICE=cuda DTYPE="$(REFERENCE_DTYPE)" CACHE="$(REFERENCE_CACHE)" \
 		MAX_CONTEXT="$(CONTEXT)" PORT=8002
 
 eval-reference:
-	$(MAKE) -C ../eval reference PROJECT="$(CURDIR)" \
+	$(MAKE) -C eval reference PROJECT="$(CURDIR)" \
 		TOKENIZER="$(abspath $(TOKENIZER))"
 
 eval-compare:
-	$(MAKE) -C ../eval compare PROJECT="$(CURDIR)"
+	$(MAKE) -C eval compare PROJECT="$(CURDIR)"
 
 clean:
 	rm -rf $(BUILD)

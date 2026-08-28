@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/qwen3x/qwen35-0.8b
+WorkingDirectory=/opt/qwen3x
 EnvironmentFile=-/etc/qwen35-runtime.env
-ExecStart=/usr/local/bin/uv run --locked --no-dev --no-sync python server.py --host 127.0.0.1 --port 8000 --slots 2
+ExecStart=/usr/local/bin/uv run --locked --no-dev --no-sync python -m scripts.server --host 127.0.0.1 --port 8000 --slots 2
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true

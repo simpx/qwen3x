@@ -57,8 +57,8 @@ make eval EVAL_DATASET=ifeval EVAL_LIMIT=100 EVAL_SEED=42
 make reference-serve
 make eval-reference EVAL_DATASET=mmlu_pro EVAL_LIMIT=100
 make eval-compare \
-  ENGINE_RUN=../eval/results/<engine目录> \
-  REFERENCE_RUN=../eval/results/<reference目录>
+  ENGINE_RUN=eval/results/<engine目录> \
+  REFERENCE_RUN=eval/results/<reference目录>
 ```
 
 更完整的配置、数据 provenance、配对统计和历史诊断见 [plan.md](plan.md)。

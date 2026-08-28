@@ -15,7 +15,7 @@ CHAT_TEMPLATE_ARG := $(if $(CHAT_TEMPLATE),--chat-template "$(CHAT_TEMPLATE)",)
 PORT ?= 8002
 SERVED_MODEL ?= qwen3.5-0.8b-reference
 
-ENGINE_DIR ?= ../qwen35-0.8b
+ENGINE_DIR ?= ..
 LIBRARY ?= $(ENGINE_DIR)/build/libqwen35.so
 BIN ?= $(ENGINE_DIR)/build/qwen35-0.8b.bin
 VECTORS ?= build/cpu

@@ -1,17 +1,18 @@
 # Qwen 架构学习导师约定
 
 本文件适用于整个仓库。协助当前用户学习时，优先把自己当作 mentor，而不是代写代码的
-实现者。项目事实和学习断点见 `status.md`，用户自己的笔记见 `00-lessons/note.md`。
+实现者。项目结构和方向见 `README.md`，学习断点见 `from-scratch/AGENTS.md`，
+用户自己的笔记见 `from-scratch/note.md`。
 
 ## 操作边界
 
 - 除非用户明确要求修改，否则只解读，不修改代码、课程或笔记。
-- `00-lessons/note.md` 是用户自己的学习笔记；review 时指出问题，不直接替用户重写，
+- `from-scratch/note.md` 是用户自己的学习笔记；review 时指出问题，不直接替用户重写，
   除非用户明确要求。
 - 用户明确要求修改课程时，可以改代码和注释，但必须沿用前面课程已经学过的概念，避免
   突然引入 Tensor 框架、模板元编程或隐藏 helper。
 - 修改后运行与风险相称的测试。课程改动至少运行对应 lesson；影响公共学习链或 capstone
-  时运行 `cd 00-lessons && make test`。改动真实 0.8B 数值路径时，如本地 checkpoint 存在，
+  时运行 `cd from-scratch && make test`。改动真实 0.8B 数值路径时，如本地 checkpoint 存在，
   还要运行 `make model-test MODEL=../models/Qwen3.5-0.8B`。
 - 只有用户明确要求时才创建 commit。
 - 用户明确要求“直接 push main”时，先在已验证的 feature branch 上准备并检查提交，再将
@@ -67,5 +68,5 @@
 
 ## 续学入口
 
-每次新 session 先读 `status.md` 的“当前学习进度”小节，再从其中的“下一次继续”开始，
-不要让用户重复解释已经学到哪里。
+每次新的学习 session 先读 `from-scratch/AGENTS.md` 的“当前断点”，不要让用户重复解释
+已经学到哪里。

@@ -1,21 +1,76 @@
 #!/usr/bin/env python3
-"""把固定的 Qwen3.5-0.8B text backbone 转为 Engine 使用的顺序二进制文件。
+"""把固定的 Qwen3.5-0.8B text backbone 转为课程使用的顺序二进制文件。
 
-这不是通用模型转换器。它只做一件事：以同目录 engine.cpp 前向执行所需的
+这不是通用模型转换器。它只做一件事：以同目录 09_qwen35_0_8b.cpp 前向执行所需的
 顺序写出原始 BF16/F32 tensor 字节。这样 C++ 代码不必包含 JSON parser、
 safetensors schema 或多模型分发器。
 
+输入 checkpoint 目录里的文件格式：
+
+1. config.json：模型结构说明。本脚本只读其中的 text_config，确认
+   model_type、hidden_size 和 num_hidden_layers 确实是本课固定的 0.8B。
+
+2. model.safetensors.index.json：外部目录，只记录 tensor 在哪个 shard 文件：
+
+       {
+         "weight_map": {
+           "tensor.name": "model.safetensors-00001-of-00001.safetensors"
+         }
+       }
+
+   它不记录 tensor 在 shard 内的字节位置。
+
+3. 每个 .safetensors shard：一个二进制文件，布局是：
+
+       [8-byte 小端 u64: JSON header 长度]
+       [JSON header]
+       [所有 tensor 的原始连续字节，也就是 data section]
+
+   JSON header 按 tensor name 记录类型、shape 和位置：
+
+       "tensor.name": {
+         "dtype": "BF16",
+         "shape": [1024, 3584],
+         "data_offsets": [start, end]
+       }
+
+   data_offsets 是相对 data section 开头的半开区间 [start,end)，不是整个
+   shard 的绝对 offset。所以 tensor 的文件绝对起点是：
+
+       8 + header_size + start
+
+一个 tensor 的两层查找过程：
+
+    tensor name
+      -> index.json 的 weight_map 找到 shard filename
+      -> shard 内部 JSON header 找到 dtype / shape / data_offsets
+      -> seek(8 + header_size + start)
+      -> 原样复制 end-start 个字节
+
+输出 qwen35-0.8b.bin 的格式：
+
+    [16-byte: magic + format version + reserved]
+    [0 padding，使下一个 tensor 从 64-byte 边界开始]
+    [expected_tensors() 第 1 个 tensor 的原始字节]
+    [0 padding 到下一个 64-byte 边界]
+    [expected_tensors() 第 2 个 tensor 的原始字节]
+    ...
+
+输出 bin 不再保存 tensor name、dtype 或 shape；它只保存对齐后的原始字节。
+09_qwen35_0_8b.cpp 必须用完全相同的顺序和 shape 调用 Reader.take()。
+
 用法：
-    cd qwen35-0.8b
-    uv run --locked --no-dev python pack_weights.py \
-        ../models/Qwen3.5-0.8B build/qwen35-0.8b.bin
+    cd from-scratch
+    python3 09_pack_weights.py ../models/Qwen3.5-0.8B ../models/qwen35-0.8b.bin
 
 输入目录需要官方 config.json、model.safetensors.index.json 和对应 shard。
+本课的固定 0.8B checkpoint 只有一个 shard；脚本会明确检查所有需要的 text
+tensor 都指向这同一个文件，再在 main() 中按顺序直接复制。
 脚本只用 Python 标准库；它不会把 1.6 GiB 权重整体读入内存。
 
 阅读提示：expected_tensors() 是这个小格式的完整 schema。每次 yield 的 name、
 dtype、shape 和顺序同时是三份契约：官方 checkpoint 的 tensor 名、输出 bin 的
-字节布局，以及 engine.cpp 中 Model 构造函数下一次 Reader.take() 应读到的内容。
+字节布局，以及 09_qwen35_0_8b.cpp 中 Model 构造函数下一次 Reader.take() 应读到的内容。
 """
 
 import argparse
@@ -24,11 +79,10 @@ import struct
 from pathlib import Path
 
 ALIGNMENT = 64  # 每个 tensor 起点向上对齐，和 C++ Reader.align() 一一对应。
-MAGIC = b"Q35COUR\0"  # v1 格式与第 0 章的 00-lessons/09 共享。
-FORMAT_VERSION = 1
+MAGIC = b"Q35COUR\0"  # 防止把任意文件误当作本课程 model.bin。
 HEADER = struct.Struct("<8sII")  # magic、格式版本、保留字段，共固定 16 字节。
 
-# 以下常数与同目录 engine.cpp 完全重复，是刻意的“显式固定模型”，不是遗漏。
+# 以下常数与同目录 09_qwen35_0_8b.cpp 完全重复，是刻意的“显式固定模型”，不是遗漏。
 # 转换器首先用 config.json 检查一部分关键值，避免看似成功地转换了相近但不兼容的模型。
 V = 248320
 H = 1024
@@ -116,29 +170,9 @@ def main():
     if not index_path.exists():
         raise SystemExit(f"missing {index_path}")
     weight_map = json.loads(index_path.read_text())["weight_map"]
-    # 先检查所有会改变 C++ 数学或 shape 的结构字段。
+    # 先检查模型家族、hidden width 和层数。更细的矩阵 shape 在下面复制前逐个检查。
     config = json.loads((args.checkpoint_dir / "config.json").read_text())["text_config"]
-    contract = {
-        "model_type": "qwen3_5_text",
-        "vocab_size": V,
-        "hidden_size": H,
-        "intermediate_size": I,
-        "num_hidden_layers": LAYERS,
-        "full_attention_interval": ATN_INTERVAL,
-        "num_attention_heads": AH,
-        "num_key_value_heads": KVH,
-        "head_dim": AD,
-        "linear_num_key_heads": KH,
-        "linear_num_value_heads": VH,
-        "linear_key_head_dim": KD,
-        "linear_value_head_dim": VD,
-        "linear_conv_kernel_dim": CONV,
-        "tie_word_embeddings": True,
-        "dtype": "bfloat16",
-    }
-    wrong = {key: (config.get(key), expected) for key, expected in contract.items()
-             if config.get(key) != expected}
-    if wrong:
+    if config["model_type"] != "qwen3_5_text" or config["hidden_size"] != H or config["num_hidden_layers"] != LAYERS:
         raise SystemExit("this packer only accepts the official Qwen3.5-0.8B text configuration")
 
     # 先枚举完整 schema 并检查 names，避免写了一半大文件才发现 checkpoint 缺 tensor。
@@ -148,17 +182,20 @@ def main():
     if missing:
         raise SystemExit("checkpoint misses text tensors: " + ", ".join(sorted(missing)[:3]))
 
-    # 官方 0.8B 的全部 text tensor 位于同一个 shard。明确保持这一条直线，避免为了
-    # 当前用不到的分发能力重新引入 Shard class 和文件句柄 cache。
+    # 本课固定的官方 0.8B 是 00001-of-00001：所有需要的 text tensor 都在
+    # 同一个 safetensors 文件。明确拒绝多 shard，就能把下面的读取路径保持为
+    # 一条直线，而不需要 Shard class、文件句柄 cache 或分发逻辑。
     shard_filenames = {weight_map[name] for name in expected_names}
     if len(shard_filenames) != 1:
-        raise SystemExit("Qwen3.5-0.8B text tensors must be stored in one safetensors shard")
+        raise SystemExit("this lesson expects all Qwen3.5-0.8B text tensors in one shard")
     shard_path = args.checkpoint_dir / shard_filenames.pop()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     # 始终先写 sibling .tmp，完整成功后才 replace；中途失败不会留下可被 C++ 误读的 bin。
     temporary = args.output.with_suffix(args.output.suffix + ".tmp")
     try:
+        # safetensors = [8-byte header_size][JSON header][raw tensor data section]。
+        # 本课只打开这一个 shard，并在这里直接读出内部目录。
         with shard_path.open("rb") as shard, temporary.open("wb") as output:
             header_size_bytes = shard.read(8)
             if len(header_size_bytes) != 8:
@@ -170,11 +207,12 @@ def main():
             shard_header = json.loads(header_bytes)
             data_section_start = 8 + header_size
 
-            output.write(HEADER.pack(MAGIC, FORMAT_VERSION, 0))
+            output.write(HEADER.pack(MAGIC, 1, 0))
             for number, (name, dtype, shape) in enumerate(expected, 1):
                 # 每个 take<T>() 都从 64-byte 边界开始，顺序就是 tensor 的唯一索引。
                 pad_to_alignment(output)
 
+                # 名字 -> 内部 header 条目 -> dtype/shape/相对字节区间。
                 info = shard_header.get(name)
                 if info is None:
                     raise ValueError(f"{name}: absent from {shard_path.name}")
@@ -183,17 +221,14 @@ def main():
                         f"{name}: expected {dtype} {shape}, "
                         f"got {info['dtype']} {tuple(info['shape'])}"
                     )
-                start, end = info["data_offsets"]
-                item_size = 2 if dtype == "BF16" else 4
-                expected_bytes = item_size
-                for dimension in shape:
-                    expected_bytes *= dimension
-                if start < 0 or end < start or end - start != expected_bytes:
-                    raise ValueError(f"{name}: invalid safetensors data_offsets")
 
+                # data_offsets=[start,end) 相对 data section；加上 data_section_start
+                # 才是 shard 内的绝对文件位置。
+                start, end = info["data_offsets"]
                 shard.seek(data_section_start + start)
                 remaining = end - start
                 while remaining:
+                    # 每次最多复制 8 MiB，不把整个大 tensor 一次性放进内存。
                     block = shard.read(min(8 * 1024 * 1024, remaining))
                     if not block:
                         raise ValueError(f"{name}: truncated shard")

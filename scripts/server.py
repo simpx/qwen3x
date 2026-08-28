@@ -41,8 +41,8 @@ from qwen35 import (
 )
 
 
-HERE = Path(__file__).resolve().parent
-CHAT_TEMPLATE = (HERE / "chat_template.jinja").read_text(encoding="utf-8")
+PROJECT = Path(__file__).resolve().parent.parent
+CHAT_TEMPLATE = (PROJECT / "chat_template.jinja").read_text(encoding="utf-8")
 LOG = logging.getLogger("qwen35.runtime")
 REQUEST_ID_CONTEXT = ContextVar("request_id", default="-")
 REQUEST_STARTED_CONTEXT = ContextVar("request_started", default=None)
@@ -830,9 +830,9 @@ def create_app(config: Config, *, tokenizer=None, manager=None):
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tokenizer", type=Path,
-                        default=HERE.parent / "models/Qwen3.5-0.8B")
-    parser.add_argument("--library", type=Path, default=HERE / "build/libqwen35.so")
-    parser.add_argument("--bin", type=Path, default=HERE / "build/qwen35-0.8b.bin")
+                        default=PROJECT / "models/Qwen3.5-0.8B")
+    parser.add_argument("--library", type=Path, default=PROJECT / "build/libqwen35.so")
+    parser.add_argument("--bin", type=Path, default=PROJECT / "build/qwen35-0.8b.bin")
     parser.add_argument("--served-model-name", default="qwen3.5-0.8b")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
@@ -843,7 +843,7 @@ def parse_args():
     parser.add_argument("--mock", action="store_true",
                         help="replace model math with a fixed logits bank")
     parser.add_argument("--log-level", choices=PYTHON_LOG_LEVELS, default="debug")
-    parser.add_argument("--log-file", type=Path, default=HERE / "logs/qwen35.log")
+    parser.add_argument("--log-file", type=Path, default=PROJECT / "logs/qwen35.log")
     parser.add_argument("--log-max-mb", type=int, default=20)
     parser.add_argument("--log-backups", type=int, default=5)
     return parser.parse_args()

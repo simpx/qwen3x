@@ -4,7 +4,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from qwen35 import SessionBusy
-from server import CHAT_TEMPLATE, Config, LogHighlighter, create_app
+from scripts.server import CHAT_TEMPLATE, Config, LogHighlighter, create_app
 
 
 class FakeTokenizer:

@@ -17,7 +17,7 @@ from evalscope import TaskConfig, run_task
 
 
 HERE = Path(__file__).resolve().parent
-PROJECT = HERE.parent / "qwen35-0.8b"
+PROJECT = HERE.parent
 SUPPORTED_DATASETS = ("mmlu_pro", "ceval", "ifeval")
 DATASET_SOURCES = {
     "mmlu_pro": {"hub": "modelscope", "id": "TIGER-Lab/MMLU-Pro", "revision": "master"},

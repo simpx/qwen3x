@@ -1,4 +1,4 @@
-# 第 0 章目录是自包含的：进入 00-lessons/ 后运行 `make`，逐课得到 00 到 08 的 bin。
+# 教学目录是自包含的：进入 from-scratch/ 后运行 `make`，逐课得到 00 到 08 的 bin。
 
 .PHONY: all test model-test clean
 

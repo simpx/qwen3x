@@ -10,7 +10,7 @@ import threading
 import unittest
 
 
-CLIENT = Path(__file__).resolve().parents[1] / "client"
+CLIENT = Path(__file__).resolve().parents[1] / "scripts/client"
 
 
 class Handler(BaseHTTPRequestHandler):

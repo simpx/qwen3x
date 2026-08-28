@@ -3,7 +3,7 @@
 这一目录的任务只有一个：调用官方 Hugging Face checkpoint，产出带来源、可重复的
 **test vectors**。它不是另一套 C++ engine，也不是 production runtime。
 
-`00-lessons/` 已经用小尺寸解释了 RMSNorm、DeltaNet、attention、state 和完整 CPU forward；
+`from-scratch/` 已经用小尺寸解释了 RMSNorm、DeltaNet、attention、state 和完整 CPU forward；
 这里直接在真实 0.8B 上把“官方模型此时应输出什么”固定下来。参考服务、vectors dump、
 Engine 对比工具和完整 Python 环境都留在本目录，不污染实际 runtime。
 
@@ -55,7 +55,7 @@ build/cuda/...          # CUDA oracle 的同样两份文件
 ```
 
 `.npz` 是测试工具的交换格式，不是模型格式。Engine 使用的模型格式仍由
-`qwen35-0.8b/pack_weights.py` 决定。
+根目录的 `scripts/pack_weights.py` 决定。
 
 Engine 的比较门槛也记录在 `vectors.json`：官方 FP32 PyTorch GEMV 与“BF16 weights 展开为
 FP32、C++ scalar accumulation”的运算顺序不同，因此用实测的 `max_abs_error <= 5e-4`；每一步
@@ -80,11 +80,11 @@ CUDA oracle，但同样以紧的 `cuda_max_abs_error = 5e-4` 逐步比较。以�
 ```sh
 make compare \
   MODEL=../models/Qwen3.5-0.8B \
-  CHAT_TEMPLATE=../qwen35-0.8b/chat_template.jinja
+  CHAT_TEMPLATE=../chat_template.jinja
 ```
 
-也可以在 `qwen35-0.8b/` 中运行 `make reference`，一次完成生成和对比。报告默认写入
-`qwen35-0.8b/build/reference-report.json`。
+也可以在仓库根目录运行 `make reference`，一次完成生成和对比。报告默认写入
+`build/reference-report.json`。
 
 ## EvalScope reference server
 
@@ -93,13 +93,13 @@ OpenAI-compatible oracle：
 
 ```sh
 make serve MODEL=../models/Qwen3.5-0.8B \
-  CHAT_TEMPLATE=../qwen35-0.8b/chat_template.jinja DEVICE=cuda DTYPE=float32 \
+  CHAT_TEMPLATE=../chat_template.jinja DEVICE=cuda DTYPE=float32 \
   CACHE=static MAX_CONTEXT=40960 PORT=8002
 ```
 
 `server.py` 只实现 EvalScope 使用的 non-streaming chat completions；它不是生产 Server。
 它使用同一份 runtime 模板，并支持 temperature、top-p、top-k、generated-only presence penalty
-和 seed，因而可以用相同的 `qwen35-0.8b/evaluation/run.py` 生成 reference 分数。
+和 seed，因而可以用相同的 `eval/run.py` 生成 reference 分数。
 默认 `DTYPE=float32`，用于和 BF16-weight/FP32-compute 的 C++ Engine 做正确性比较。
 `DTYPE=bfloat16` 只适合追求速度的近似分数；它可能让 greedy 路径在接近的 logits 处分叉，
 不能据此判断 Engine 数值错误。
