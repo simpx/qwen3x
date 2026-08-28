@@ -1,6 +1,6 @@
 # Qwen token line protocol
 
-状态：设计稿，协议版本 0.1，尚未实现。
+状态：协议版本 0.1，C++ server/client 已实现，Python 尚未接入。
 
 这是 Python 与 C++ 推理引擎之间的本地协议。它借用 HTTP 的 request line、
 status line 和参数形式，但不是 HTTP/1.1：没有 `Host`、`Content-Type`、

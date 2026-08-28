@@ -4,27 +4,23 @@ PYTHON ?= $(UV) run --locked python
 PYTHON_PROD ?= $(UV) run --locked --no-dev python
 TOKENIZER ?= models/Qwen3.5-0.8B
 BUILD ?= build
-LIBRARY ?= $(BUILD)/libqwen35.so
+PROGRAM ?= $(BUILD)/qwen35
 BIN ?= $(BUILD)/qwen35-0.8b.bin
+SOCKET ?= /tmp/qwen35.sock
 SERVER ?= http://127.0.0.1:8000
-LOG_LEVEL ?= debug
 SLOTS ?= 2
 CONTEXT ?= 40960
-REQUEST_TIMEOUT ?= 600
 MOCK ?= 0
 MOCK_ARG := $(if $(filter 1 true yes,$(MOCK)),--mock,)
-BENCH_PREFILL ?= 8
-BENCH_DECODE ?= 4
 REFERENCE ?= reference/build/cpu
-REFERENCE_REPORT ?= $(BUILD)/reference-report.json
 REFERENCE_DTYPE ?= float32
 REFERENCE_CACHE ?= static
 
 CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic -march=native
 
-.PHONY: all sync sync-prod weights unit-test eval-test mock-test native-test reference-generate reference-test reference test e2e run chat bench eval eval-smoke reference-serve eval-reference eval-compare clean
+.PHONY: all sync sync-prod weights unit-test eval-test reference-generate test run chat eval eval-smoke reference-serve eval-reference eval-compare clean
 
-all: $(LIBRARY)
+all: $(PROGRAM)
 
 sync:
 	$(UV) sync --locked
@@ -32,9 +28,9 @@ sync:
 sync-prod:
 	$(UV) sync --locked --no-dev
 
-$(LIBRARY): engine.cpp runtime.cpp log.cpp qwen35.h internal.h
+$(PROGRAM): main.cpp engine.cpp runtime.cpp log.cpp qwen35.h internal.h
 	mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) -fPIC -shared engine.cpp runtime.cpp log.cpp -o $@
+	$(CXX) $(CXXFLAGS) main.cpp engine.cpp runtime.cpp log.cpp -pthread -o $@
 
 weights: $(BIN)
 
@@ -48,12 +44,6 @@ unit-test:
 eval-test:
 	$(MAKE) -C eval test PROJECT="$(CURDIR)"
 
-native-test: $(LIBRARY) $(BIN)
-	PYTHONPATH=. $(PYTHON) tests/test_native.py --library "$(LIBRARY)" --bin "$(BIN)"
-
-mock-test: $(LIBRARY) $(BIN)
-	PYTHONPATH=. $(PYTHON) tests/test_mock.py --library "$(LIBRARY)" --bin "$(BIN)"
-
 reference-generate:
 	$(MAKE) -C reference dump \
 		MODEL="$(abspath $(TOKENIZER))" \
@@ -61,38 +51,15 @@ reference-generate:
 		DEVICE=cpu \
 		CHAT_TEMPLATE="$(abspath chat_template.jinja)"
 
-reference-test: $(LIBRARY) $(BIN)
-	$(MAKE) -C reference compare \
-		ENGINE_DIR="$(CURDIR)" \
-		LIBRARY="$(abspath $(LIBRARY))" \
-		BIN="$(abspath $(BIN))" \
-		VECTORS="$(abspath $(REFERENCE))" \
-		MODEL="$(abspath $(TOKENIZER))" \
-		CHAT_TEMPLATE="$(abspath chat_template.jinja)" \
-		REPORT="$(abspath $(REFERENCE_REPORT))" \
-		CXXFLAGS="$(CXXFLAGS)"
+test: unit-test
 
-reference: reference-generate reference-test
-
-test: unit-test mock-test native-test
-
-e2e: $(LIBRARY) $(BIN)
-	PYTHONPATH=. $(PYTHON) tests/test_e2e.py --tokenizer "$(TOKENIZER)" --library "$(LIBRARY)" --bin "$(BIN)"
-
-run: $(LIBRARY) $(BIN)
-	$(PYTHON_PROD) -m scripts.server --tokenizer "$(TOKENIZER)" --library "$(LIBRARY)" --bin "$(BIN)" --log-level "$(LOG_LEVEL)" --slots "$(SLOTS)" --max-context-tokens "$(CONTEXT)" --request-timeout "$(REQUEST_TIMEOUT)" $(MOCK_ARG)
+run: $(PROGRAM) $(BIN)
+	$(PROGRAM) -l "$(SOCKET)" -m "$(BIN)" --parallel "$(SLOTS)" --context "$(CONTEXT)" $(MOCK_ARG)
 
 chat:
 	curl --silent --show-error --no-buffer "$(SERVER)/v1/chat/completions" \
 		-H 'Content-Type: application/json' \
 		-d '{"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"你好，请用一句话介绍自己。"}],"temperature":0,"max_completion_tokens":1024,"stream":true,"stream_options":{"include_usage":true}}'
-
-bench: $(LIBRARY) $(BIN)
-	$(PYTHON_PROD) -m scripts.bench \
-		--library "$(LIBRARY)" \
-		--bin "$(BIN)" \
-		--prefill-tokens "$(BENCH_PREFILL)" \
-		--decode-tokens "$(BENCH_DECODE)"
 
 eval: $(BIN)
 	$(MAKE) -C eval run PROJECT="$(CURDIR)" SERVER="$(SERVER)" \
