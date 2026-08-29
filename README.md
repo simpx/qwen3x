@@ -96,7 +96,7 @@ build/              下载的 checkpoint、生成的模型和编译产物
 ## 历史
 
 早期从基础数学逐步搭建 Qwen 的课程代码和学习笔记保存在 Git tag
-`from-scratch-v0`，不再属于当前主线。
+`learning`，不再属于当前主线。
 
 ## Roadmap
 
