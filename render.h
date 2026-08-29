@@ -90,8 +90,57 @@ struct RenderedPrompt {
     std::vector<int> tokens;
 };
 
+// Plain OpenAI-compatible request/response values. parser.cpp is the only
+// translation unit that converts these values to or from JSON text.
+struct CompletionRequest {
+    ChatRequest chat;
+    std::string model;
+    int max_tokens = 128;
+    float temperature = 1.0f;
+    int top_k = 0;
+    float top_p = 1.0f;
+    float presence_penalty = 0.0f;
+    uint64_t seed = 0;
+    bool has_seed = false;
+    bool stream = false;
+    bool include_usage = false;
+    std::vector<std::string> stops;
+};
+
+struct CompletionUsage {
+    int prompt_tokens = 0;
+    int cached_tokens = 0;
+    int completion_tokens = 0;
+};
+
 // The implementation and its JSON dependency live only in parser.cpp.
 Status parse_chat_request(const std::string& text, ChatRequest& output);
+Status parse_completion_request(const std::string& text,
+                                const std::string& served_model,
+                                int default_max_tokens,
+                                CompletionRequest& output);
+
+std::string error_json(const std::string& message,
+                       const char* type = "invalid_request_error",
+                       const char* param = nullptr,
+                       const char* code = nullptr);
+std::string models_json(const std::string& model);
+std::string completion_json(const std::string& id, int64_t created,
+                            const std::string& model,
+                            const std::string& reasoning,
+                            const std::string& content,
+                            bool include_reasoning,
+                            const char* finish_reason,
+                            const CompletionUsage& usage);
+std::string completion_chunk_json(const std::string& id, int64_t created,
+                                  const std::string& model,
+                                  const char* delta_field,
+                                  const std::string& delta,
+                                  const char* finish_reason = nullptr);
+std::string completion_usage_chunk_json(const std::string& id,
+                                        int64_t created,
+                                        const std::string& model,
+                                        const CompletionUsage& usage);
 
 // Fixed Qwen3.5 chat template and ByteLevel-BPE tokenizer. The binary contains
 // only read-only tables; template behavior remains visible in render.cpp.

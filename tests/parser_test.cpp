@@ -318,6 +318,84 @@ void test_invalid_fields() {
     check(!status.ok(), "non-array tools should fail");
 }
 
+void test_completion_request() {
+    const std::string text = R"({
+        "model":"qwen3.5-0.8b",
+        "messages":[
+            {"role":"developer","content":"brief"},
+            {"role":"user","content":"hello"}
+        ],
+        "temperature":0.5,
+        "top_p":0.9,
+        "top_k":20,
+        "presence_penalty":1.25,
+        "seed":-1,
+        "max_completion_tokens":42,
+        "stop":["END"],
+        "stream":true,
+        "stream_options":{"include_usage":true},
+        "chat_template_kwargs":{
+            "enable_thinking":true,
+            "preserve_thinking":false
+        }
+    })";
+    q35_render::CompletionRequest request;
+    const q35_render::Status status = q35_render::parse_completion_request(
+        text, "qwen3.5-0.8b", 128, request);
+    check(status.ok(), "completion request should parse");
+    check(request.chat.messages.size() == 2 &&
+          request.chat.messages[0].role == q35_render::Role::System,
+          "developer role should map to system");
+    check(request.max_tokens == 42 && request.top_k == 20,
+          "completion integer options");
+    check(request.temperature == 0.5f && request.top_p == 0.9f &&
+          request.presence_penalty == 1.25f,
+          "completion sampling options");
+    check(request.has_seed && request.seed == UINT64_MAX,
+          "completion signed seed");
+    check(request.stream && request.include_usage &&
+          request.chat.options.enable_thinking &&
+          !request.chat.options.preserve_thinking,
+          "completion stream and template options");
+    check(request.stops.size() == 1 && request.stops[0] == "END",
+          "completion stop strings");
+}
+
+void test_completion_json() {
+    q35_render::CompletionUsage usage{10, 4, 2};
+    const std::string response = q35_render::completion_json(
+        "chatcmpl-1", 123, "qwen3.5-0.8b", "think", "answer", true,
+        "stop", usage);
+    check(response.find("\"reasoning_content\":\"think\"") !=
+          std::string::npos, "completion reasoning JSON");
+    check(response.find("\"cached_tokens\":4") != std::string::npos,
+          "completion cached usage JSON");
+    const std::string chunk = q35_render::completion_chunk_json(
+        "chatcmpl-1", 123, "qwen3.5-0.8b", "content", "你");
+    check(chunk.find("\"content\":\"你\"") != std::string::npos,
+          "stream chunk keeps UTF-8");
+    const std::string error = q35_render::error_json(
+        "bad", "invalid_request_error", "model", "model_not_found");
+    check(error.find("\"code\":\"model_not_found\"") != std::string::npos,
+          "OpenAI error JSON");
+}
+
+void test_invalid_completion_requests() {
+    for (const char* text : {
+        R"({"model":"other","messages":[{"role":"user","content":"x"}]})",
+        R"({"model":"qwen3.5-0.8b","messages":[]})",
+        R"({"model":"qwen3.5-0.8b","messages":[{"role":"user","content":null}]})",
+        R"({"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"x"}],"top_p":0})",
+        R"({"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"x"}],"n":2})",
+        R"({"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"x"}],"tools":[{}]})",
+    }) {
+        q35_render::CompletionRequest request;
+        check(!q35_render::parse_completion_request(
+                  text, "qwen3.5-0.8b", 128, request).ok(),
+              "invalid completion request should fail");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -331,6 +409,9 @@ int main() {
     test_tool_schema();
     test_error_preserves_output();
     test_invalid_fields();
+    test_completion_request();
+    test_completion_json();
+    test_invalid_completion_requests();
     if (failures) return 1;
     std::puts("parser-test: ok");
     return 0;
