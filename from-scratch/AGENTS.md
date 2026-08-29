@@ -126,5 +126,5 @@ multi-head 不会让固定总宽度 `D` 下的基本 QK 点积计算量自动减
 
 如果用户确认 `from-scratch/` 已结束，下一站进入 `reference/`：重点不是再学模型
 公式，而是理解“官方实现作为 oracle、为什么保存每一步 full logits、C++ 怎么证明自己算对”。
-之后回到仓库根目录，按 `qwen35.h -> engine.cpp -> runtime.cpp -> qwen35.py -> scripts/server.py`
-阅读正式实现。
+之后回到仓库根目录，按 `main.cpp -> parser.cpp -> render.cpp -> runtime.cpp -> engine.cpp`
+阅读一站式 C++ HTTP runtime。

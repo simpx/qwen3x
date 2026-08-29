@@ -42,6 +42,7 @@ test: dump
 	$(PYTHON) test_reference.py --model "$(MODEL)" --vectors "$(OUT)" --device "$(DEVICE)"
 
 compare:
+	$(MAKE) -C "$(ENGINE_DIR)" reference-library
 	PYTHONPATH="$(abspath $(ENGINE_DIR))" $(PYTHON) compare_engine.py \
 		--library "$(LIBRARY)" \
 		--bin "$(BIN)" \
