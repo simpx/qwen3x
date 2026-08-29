@@ -12,15 +12,26 @@ import json
 import os
 import struct
 import tempfile
+import unicodedata
 from pathlib import Path
 
-from tokenizers import __version__ as tokenizers_version
+from tokenizers import (
+    Regex,
+    __version__ as tokenizers_version,
+    normalizers,
+    pre_tokenizers,
+)
 
 
 MAGIC = b"Q35RND1\0"
 VERSION = 1
 MODEL_VOCAB_SIZE = 248320
 HEADER = struct.Struct("<8sIIQ9I")
+
+LETTER = 1
+MARK = 2
+NUMBER = 4
+SPACE = 8
 
 # Little-endian file order:
 #   fixed header (magic, version, header/file sizes, nine table counts)
@@ -75,6 +86,136 @@ def added_tokens(tokenizer, config):
             raise ValueError(f"added token {token_id} has unsupported flags: {unsupported}")
         result.append((token_id, token["content"].encode(), bool(token.get("special"))))
     return result
+
+
+def unicode_ranges():
+    """Extract the Unicode classes used by Qwen's pre-tokenizer regex."""
+    flags = bytearray(0x110000)
+
+    for pattern, bit in ((r"\p{L}+", LETTER), (r"\p{M}+", MARK),
+                         (r"\p{N}+", NUMBER), (r"\s+", SPACE)):
+        splitter = pre_tokenizers.Split(Regex(pattern), behavior="removed")
+        for chunk_start in range(0, 0x110000, 4096):
+            chunk = [
+                codepoint
+                for codepoint in range(chunk_start,
+                                       min(chunk_start + 4096, 0x110000))
+                if not 0xD800 <= codepoint <= 0xDFFF
+            ]
+            text = "".join(map(chr, chunk))
+            selected = bytearray(b"\1") * len(chunk)
+            for _, (first, last) in splitter.pre_tokenize_str(text):
+                selected[first:last] = b"\0" * (last - first)
+            for codepoint, present in zip(chunk, selected):
+                if present:
+                    flags[codepoint] |= bit
+
+    ranges = []
+    codepoints = (codepoint for codepoint in range(0x110000)
+                  if not 0xD800 <= codepoint <= 0xDFFF)
+    first_codepoint = next(codepoints)
+    start = first_codepoint
+    previous_codepoint = first_codepoint
+    previous_flags = flags[first_codepoint]
+    for codepoint in codepoints:
+        current_flags = flags[codepoint]
+        if current_flags != previous_flags or codepoint != previous_codepoint + 1:
+            if previous_flags:
+                ranges.append((start, previous_codepoint, previous_flags))
+            start = codepoint
+            previous_flags = current_flags
+        previous_codepoint = codepoint
+    if previous_flags:
+        ranges.append((start, previous_codepoint, previous_flags))
+    return ranges
+
+
+def nfc_tables():
+    """Extract canonical normalization behavior from tokenizers' NFC oracle."""
+    oracle_nfd = normalizers.NFD()
+    oracle_nfc = normalizers.NFC()
+
+    # tokenizers does not expose canonical combining classes. Infer them by
+    # observing how its NFD implementation orders each character relative to
+    # one known representative of every combining class.
+    representatives = {}
+    for codepoint in range(0x110000):
+        if 0xD800 <= codepoint <= 0xDFFF:
+            continue
+        value = unicodedata.combining(chr(codepoint))
+        if value and value not in representatives:
+            representatives[value] = chr(codepoint)
+    low = representatives[min(representatives)]
+    high = representatives[max(representatives)]
+
+    def has_combining_class(character):
+        probe = "A" + high + character + low
+        return oracle_nfd.normalize_str(probe) != probe
+
+    representatives = {
+        value: character
+        for value, character in representatives.items()
+        if has_combining_class(character)
+    }
+
+    def combining_class(character):
+        if not has_combining_class(character):
+            return 0
+        for value, representative in representatives.items():
+            after = "A" + representative + character
+            before = "A" + character + representative
+            if (oracle_nfd.normalize_str(after) == after
+                    and oracle_nfd.normalize_str(before) == before):
+                return value
+        raise ValueError(
+            f"cannot infer combining class for U+{ord(character):04X}"
+        )
+
+    combining = []
+    decompositions = []
+    compositions = []
+    hangul_first = 0xAC00
+    hangul_last = hangul_first + 11172
+
+    for codepoint in range(0x110000):
+        if 0xD800 <= codepoint <= 0xDFFF:
+            continue
+        character = chr(codepoint)
+        normalized = oracle_nfd.normalize_str(character)
+
+        if normalized == character:
+            value = combining_class(character)
+            if value:
+                combining.append((codepoint, value))
+            continue
+
+        # Hangul decomposition and composition are handled algorithmically by
+        # render.cpp and do not need 11,172 entries in render.bin.
+        if hangul_first <= codepoint < hangul_last:
+            continue
+
+        decomposition = tuple(ord(item) for item in normalized)
+        if len(decomposition) > 255:
+            raise ValueError(f"decomposition of U+{codepoint:04X} is too long")
+        decompositions.append((codepoint, decomposition))
+
+        if oracle_nfc.normalize_str(normalized) != character:
+            continue
+
+        candidates = []
+        for split in range(1, len(normalized)):
+            first = oracle_nfc.normalize_str(normalized[:split])
+            second = oracle_nfc.normalize_str(normalized[split:])
+            if (len(first) == 1 and len(second) == 1
+                    and oracle_nfc.normalize_str(first + second) == character):
+                candidates.append((ord(first), ord(second), codepoint))
+        if len(candidates) != 1:
+            raise ValueError(
+                f"cannot infer composition pair for U+{codepoint:04X}"
+            )
+        compositions.append(candidates[0])
+
+    return combining, decompositions, compositions
 
 
 def write_string(output, value):
@@ -156,13 +297,8 @@ def main():
 
     added = added_tokens(tokenizer, config)
     decodable_count = max(base_count, max(token_id for token_id, _, _ in added) + 1)
-    # Unicode oracle sections are added in the next incremental step. Keeping
-    # their counts in the v1 header fixes the final format without mixing the
-    # core tokenizer tables and Unicode extraction in one review.
-    ranges = []
-    combining = []
-    decompositions = []
-    compositions = []
+    ranges = unicode_ranges()
+    combining, decompositions, compositions = nfc_tables()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
@@ -219,7 +355,7 @@ def main():
     print(
         f"wrote {args.output} ({args.output.stat().st_size / 2**20:.2f} MiB, "
         f"{base_count} base tokens, {len(merges)} merges, {len(added)} added tokens, "
-        "Unicode sections pending)"
+        f"Unicode oracle tokenizers-{tokenizers_version})"
     )
 
 

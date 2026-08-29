@@ -7,6 +7,8 @@ BUILD ?= build
 PROGRAM ?= $(BUILD)/qwen35
 BIN ?= $(BUILD)/qwen35-0.8b.bin
 PARSER_TEST ?= $(BUILD)/parser-test
+RENDER_BIN ?= $(BUILD)/qwen35-render.bin
+RENDER_DRIVER ?= $(BUILD)/render-test
 SOCKET ?= /tmp/qwen35.sock
 SERVER ?= http://127.0.0.1:8000
 SLOTS ?= 2
@@ -20,7 +22,7 @@ REFERENCE_CACHE ?= static
 CXXFLAGS ?= -O3 -std=c++17 -fno-exceptions -fno-rtti \
 	-Wall -Wextra -Wpedantic -march=native
 
-.PHONY: all sync sync-prod weights parser-test unit-test eval-test reference-generate test run chat eval eval-smoke reference-serve eval-reference eval-compare clean
+.PHONY: all sync sync-prod weights render-data parser-test render-test unit-test eval-test reference-generate test run chat eval eval-smoke reference-serve eval-reference eval-compare clean
 
 all: $(PROGRAM)
 
@@ -40,12 +42,28 @@ $(BIN): scripts/pack_weights.py
 	mkdir -p $(BUILD)
 	$(PYTHON_PROD) -m scripts.pack_weights "$(TOKENIZER)" "$@"
 
+render-data: $(RENDER_BIN)
+
+$(RENDER_BIN): scripts/pack_render.py $(TOKENIZER)/tokenizer.json $(TOKENIZER)/tokenizer_config.json
+	mkdir -p $(BUILD)
+	$(PYTHON) -m scripts.pack_render "$(TOKENIZER)" "$@"
+
 $(PARSER_TEST): parser.cpp render.h tests/parser_test.cpp third_party/nlohmann/json.hpp
 	mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -I. parser.cpp tests/parser_test.cpp -o $@
 
 parser-test: $(PARSER_TEST)
 	$(PARSER_TEST)
+
+$(RENDER_DRIVER): render.cpp parser.cpp render.h tests/render_driver.cpp third_party/nlohmann/json.hpp
+	mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -I. render.cpp parser.cpp tests/render_driver.cpp -o $@
+
+render-test: $(RENDER_BIN) $(RENDER_DRIVER)
+	TOKENIZER="$(abspath $(TOKENIZER))" \
+	RENDER_BIN="$(abspath $(RENDER_BIN))" \
+	RENDER_TEST="$(abspath $(RENDER_DRIVER))" \
+	$(PYTHON) -m unittest -v tests.test_render
 
 unit-test:
 	$(PYTHON) -m unittest -v tests.test_server tests.test_client
