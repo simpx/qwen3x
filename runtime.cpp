@@ -202,7 +202,9 @@ struct q35_session {
         adjusted_logits.reserve(static_cast<size_t>(q35_backend::vocab_size()));
         penalty_marks.assign(static_cast<size_t>(q35_backend::vocab_size()), 0);
         penalty_touched.reserve(static_cast<size_t>(context_size));
-        state = q35_backend::state_create(engine->model, context_size);
+        if (!engine->mock) {
+            state = q35_backend::state_create(engine->model, context_size);
+        }
     }
 
     ~q35_session() {
@@ -214,7 +216,7 @@ struct q35_session {
     }
 
     void reset() {
-        q35_backend::state_reset(state);
+        if (!engine->mock) q35_backend::state_reset(state);
         tokens.clear();
         checkpoint_valid = false;
         checkpoint_position = 0;
@@ -330,14 +332,6 @@ int q35_engine_create(const q35_engine_options* options, q35_engine** out,
     *out = nullptr;
 
     std::unique_ptr<q35_engine> engine(new q35_engine());
-    LOG_INFO("model load started bin=%s", options->bin_path);
-    const auto started = std::chrono::steady_clock::now();
-    engine->model = q35_backend::model_create(options->bin_path, err, errlen);
-    if (!engine->model) return Q35_ERROR;
-    const double elapsed = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - started).count();
-    LOG_INFO("model load completed elapsed=%.3fs", elapsed);
-
     engine->mock = options->mock;
     if (engine->mock) {
         const int vocab = q35_backend::vocab_size();
@@ -351,6 +345,14 @@ int q35_engine_create(const q35_engine_options* options, q35_engine** out,
         }
         LOG_INFO("mock compute enabled logits_rows=%zu",
                  engine->mock_logits.size());
+    } else {
+        LOG_INFO("model load started bin=%s", options->bin_path);
+        const auto started = std::chrono::steady_clock::now();
+        engine->model = q35_backend::model_create(options->bin_path, err, errlen);
+        if (!engine->model) return Q35_ERROR;
+        const double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count();
+        LOG_INFO("model load completed elapsed=%.3fs", elapsed);
     }
     LOG_DEBUG("model ready vocab=%d", q35_backend::vocab_size());
     *out = engine.release();
