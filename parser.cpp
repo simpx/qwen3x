@@ -7,6 +7,10 @@
 
 #include "render.h"
 
+#include <array>
+#include <charconv>
+#include <cmath>
+#include <cstdint>
 #include <string>
 #include <utility>
 
@@ -48,6 +52,109 @@ private:
     // instead of copying it; the DOM is discarded after parsing.
     std::string move_string(Json& value) {
         return std::move(value.get_ref<std::string&>());
+    }
+
+    bool float_text(double value, std::string* output) {
+        if (!std::isfinite(value)) return fail("non-finite number");
+        std::array<char, 64> buffer{};
+        const auto result = std::to_chars(
+            buffer.data(), buffer.data() + buffer.size(), value,
+            std::chars_format::general
+        );
+        if (result.ec != std::errc()) {
+            return fail("cannot render number");
+        }
+        output->assign(buffer.data(), result.ptr);
+        if (output->find_first_of(".eE") == std::string::npos) *output += ".0";
+        return true;
+    }
+
+    std::string json_string(const std::string& value) {
+        constexpr char HEX[] = "0123456789abcdef";
+        std::string output = "\"";
+        for (uint8_t byte : value) {
+            switch (byte) {
+                case '"': output += "\\\""; break;
+                case '\\': output += "\\\\"; break;
+                case '\b': output += "\\b"; break;
+                case '\f': output += "\\f"; break;
+                case '\n': output += "\\n"; break;
+                case '\r': output += "\\r"; break;
+                case '\t': output += "\\t"; break;
+                default:
+                    if (byte < 0x20) {
+                        output += "\\u00";
+                        output.push_back(HEX[byte >> 4]);
+                        output.push_back(HEX[byte & 15]);
+                    } else {
+                        output.push_back(static_cast<char>(byte));
+                    }
+            }
+        }
+        output.push_back('"');
+        return output;
+    }
+
+    bool json_text(const Json& value, std::string* output) {
+        if (value.is_null()) {
+            *output = "null";
+        } else if (value.is_boolean()) {
+            *output = value.get<bool>() ? "true" : "false";
+        } else if (value.is_number_unsigned()) {
+            *output = std::to_string(value.get<uint64_t>());
+        } else if (value.is_number_integer()) {
+            *output = std::to_string(value.get<int64_t>());
+        } else if (value.is_number_float()) {
+            return float_text(value.get<double>(), output);
+        } else if (value.is_string()) {
+            *output = json_string(value.get_ref<const std::string&>());
+        } else if (value.is_array()) {
+            *output = "[";
+            for (size_t index = 0; index < value.size(); ++index) {
+                if (index) *output += ", ";
+                std::string item;
+                if (!json_text(value[index], &item)) return false;
+                *output += item;
+            }
+            *output += ']';
+        } else if (value.is_object()) {
+            *output = "{";
+            bool first = true;
+            for (const auto& item : value.items()) {
+                if (!first) *output += ", ";
+                first = false;
+                *output += json_string(item.key());
+                *output += ": ";
+                std::string item_text;
+                if (!json_text(item.value(), &item_text)) return false;
+                *output += item_text;
+            }
+            *output += '}';
+        } else {
+            return fail("unsupported nested tool argument");
+        }
+        return true;
+    }
+
+    bool argument_text(Json& value, std::string* output) {
+        if (value.is_array() || value.is_object()) {
+            return json_text(value, output);
+        } else if (value.is_null()) {
+            *output = "None";
+        } else if (value.is_boolean()) {
+            *output = value.get<bool>() ? "True" : "False";
+        } else if (value.is_number_unsigned()) {
+            *output = std::to_string(value.get<uint64_t>());
+        } else if (value.is_number_integer()) {
+            *output = std::to_string(value.get<int64_t>());
+        } else if (value.is_number_float()) {
+            return float_text(value.get<double>(), output);
+        } else if (value.is_string()) {
+            *output = move_string(value);
+        } else {
+            return fail("unsupported tool argument");
+        }
+        return true;
     }
 
     bool string_field_equals(const Json& object, const char* field,
@@ -103,21 +210,28 @@ private:
 
         auto arguments = call->find("arguments");
         if (arguments == call->end()) return true;
+        Json parsed_arguments;
+        Json* object = &*arguments;
         if (arguments->is_string()) {
-            return fail("encoded tool_call.arguments are not supported yet");
+            parsed_arguments = Json::parse(
+                arguments->get_ref<const std::string&>(), nullptr, false
+            );
+            if (parsed_arguments.is_discarded()) {
+                return fail("tool_call.arguments contains malformed JSON");
+            }
+            object = &parsed_arguments;
         }
-        if (!arguments->is_object()) {
-            return fail("tool_call.arguments must be an object");
+        if (!object->is_object()) {
+            return fail(
+                "tool_call.arguments must be an object or an encoded object"
+            );
         }
 
-        output->arguments.reserve(arguments->size());
-        for (auto& item : arguments->items()) {
-            if (!item.value().is_string()) {
-                return fail("tool argument values must be strings for now");
-            }
+        output->arguments.reserve(object->size());
+        for (auto& item : object->items()) {
             ToolArgument argument;
             argument.name = item.key();
-            argument.text = move_string(item.value());
+            if (!argument_text(item.value(), &argument.text)) return false;
             output->arguments.push_back(std::move(argument));
         }
         return true;
@@ -149,9 +263,9 @@ private:
             output->content = move_string(*content);
         } else if (content->is_array()) {
             output->parts.reserve(content->size());
-            for (Json& value : *content) {
+            for (Json& part_value : *content) {
                 ContentPart part;
-                if (!parse_content_part(value, &part)) return false;
+                if (!parse_content_part(part_value, &part)) return false;
                 output->parts.push_back(std::move(part));
             }
         } else {
@@ -173,9 +287,9 @@ private:
                 return fail("message.tool_calls must be an array");
             }
             output->tool_calls.reserve(calls->size());
-            for (Json& value : *calls) {
+            for (Json& call_value : *calls) {
                 ToolCall call;
-                if (!parse_tool_call(value, &call)) return false;
+                if (!parse_tool_call(call_value, &call)) return false;
                 output->tool_calls.push_back(std::move(call));
             }
         }
@@ -208,7 +322,13 @@ private:
 
         auto tools = root.find("tools");
         if (tools != root.end() && !tools->is_null()) {
-            return fail("tools are not supported yet");
+            if (!tools->is_array()) return fail("tools must be an array");
+            output->tools.reserve(tools->size());
+            for (const Json& tool : *tools) {
+                std::string text;
+                if (!json_text(tool, &text)) return false;
+                output->tools.push_back(std::move(text));
+            }
         }
 
         if (!parse_bool_option(root, "add_generation_prompt",

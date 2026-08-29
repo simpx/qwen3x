@@ -116,6 +116,147 @@ void test_string_tool_calls() {
     check(calls[1].name == "beta", "nested function name");
 }
 
+void test_scalar_tool_arguments() {
+    q35_render::ChatRequest request;
+    const q35_render::Status status = q35_render::parse_chat_request(
+        R"({"messages":[{"role":"assistant","tool_calls":[{
+            "name":"lookup",
+            "arguments":{
+                "none":null,
+                "enabled":true,
+                "count":2,
+                "offset":-3,
+                "ratio":1.5,
+                "city":"Hangzhou"
+            }
+        }]}]})",
+        request
+    );
+
+    if (!status.ok()) {
+        check(false, "scalar tool arguments should parse");
+        return;
+    }
+    check(request.messages.size() == 1, "scalar argument message count");
+    if (request.messages.size() != 1) return;
+    check(request.messages[0].tool_calls.size() == 1,
+          "scalar argument tool call count");
+    if (request.messages[0].tool_calls.size() != 1) return;
+    const std::vector<q35_render::ToolArgument>& arguments =
+        request.messages[0].tool_calls[0].arguments;
+    check(arguments.size() == 6, "scalar tool argument count");
+    if (arguments.size() != 6) return;
+    check(arguments[0].name == "none" && arguments[0].text == "None",
+          "null tool argument");
+    check(arguments[1].name == "enabled" && arguments[1].text == "True",
+          "boolean tool argument");
+    check(arguments[2].text == "2", "unsigned tool argument");
+    check(arguments[3].text == "-3", "signed tool argument");
+    check(arguments[4].text == "1.5", "floating-point tool argument");
+    check(arguments[5].text == "Hangzhou", "string tool argument");
+}
+
+void test_nested_tool_arguments() {
+    q35_render::ChatRequest request;
+    const q35_render::Status status = q35_render::parse_chat_request(
+        R"({"messages":[{"role":"assistant","tool_calls":[{
+            "name":"lookup",
+            "arguments":{
+                "list":[2,1,true,null],
+                "object":{"b":2,"a":"line\n\"quoted\""}
+            }
+        }]}]})",
+        request
+    );
+
+    if (!status.ok()) {
+        check(false, "nested tool arguments should parse");
+        return;
+    }
+    check(request.messages.size() == 1, "nested argument message count");
+    if (request.messages.size() != 1) return;
+    check(request.messages[0].tool_calls.size() == 1,
+          "nested argument tool call count");
+    if (request.messages[0].tool_calls.size() != 1) return;
+    const std::vector<q35_render::ToolArgument>& arguments =
+        request.messages[0].tool_calls[0].arguments;
+    check(arguments.size() == 2, "nested tool argument count");
+    if (arguments.size() != 2) return;
+    check(arguments[0].name == "list" &&
+          arguments[0].text == "[2, 1, true, null]",
+          "array tool argument");
+    check(arguments[1].name == "object" &&
+          arguments[1].text ==
+              R"({"b": 2, "a": "line\n\"quoted\""})",
+          "object tool argument preserves order and escapes strings");
+}
+
+void test_encoded_tool_arguments() {
+    q35_render::ChatRequest request;
+    const q35_render::Status status = q35_render::parse_chat_request(
+        R"({"messages":[{"role":"assistant","tool_calls":[{
+            "type":"function",
+            "function":{
+                "name":"lookup",
+                "arguments":"{\"z\":[2,1],\"a\":\"Hangzhou\",\"enabled\":true}"
+            }
+        }]}]})",
+        request
+    );
+
+    if (!status.ok()) {
+        check(false, "encoded tool arguments should parse");
+        return;
+    }
+    check(request.messages.size() == 1, "encoded argument message count");
+    if (request.messages.size() != 1) return;
+    check(request.messages[0].tool_calls.size() == 1,
+          "encoded argument tool call count");
+    if (request.messages[0].tool_calls.size() != 1) return;
+    const std::vector<q35_render::ToolArgument>& arguments =
+        request.messages[0].tool_calls[0].arguments;
+    check(arguments.size() == 3, "encoded tool argument count");
+    if (arguments.size() != 3) return;
+    check(arguments[0].name == "z" && arguments[0].text == "[2, 1]",
+          "encoded arguments preserve first field");
+    check(arguments[1].name == "a" && arguments[1].text == "Hangzhou",
+          "encoded arguments preserve second field");
+    check(arguments[2].name == "enabled" && arguments[2].text == "True",
+          "encoded arguments normalize scalar values");
+}
+
+void test_tool_schema() {
+    q35_render::ChatRequest request;
+    const q35_render::Status status = q35_render::parse_chat_request(
+        R"({
+            "messages":[{"role":"user","content":"weather?"}],
+            "tools":[{
+                "type":"function",
+                "function":{
+                    "name":"weather",
+                    "parameters":{
+                        "type":"object",
+                        "required":["city"],
+                        "default":1.0,
+                        "maximum":18446744073709551615
+                    }
+                }
+            }]
+        })",
+        request
+    );
+
+    if (!status.ok()) {
+        check(false, "tool schema should parse");
+        return;
+    }
+    check(request.tools.size() == 1, "tool schema count");
+    if (request.tools.size() != 1) return;
+    check(request.tools[0] ==
+          R"({"type": "function", "function": {"name": "weather", "parameters": {"type": "object", "required": ["city"], "default": 1.0, "maximum": 18446744073709551615}}})",
+          "tool schema serialization and field order");
+}
+
 void test_error_preserves_output() {
     q35_render::ChatRequest request;
     q35_render::Message existing;
@@ -164,12 +305,17 @@ void test_invalid_fields() {
     check(!status.ok(), "non-array tool calls should fail");
 
     status = q35_render::parse_chat_request(
-        R"({"messages":[{"role":"assistant","tool_calls":[
-            {"name":"f","arguments":{"count":2}}
-        ]}]})",
+        R"({"messages":[{"role":"assistant","tool_calls":[{
+            "name":"f","arguments":"not json"
+        }]}]})",
         request
     );
-    check(!status.ok(), "non-string tool argument should remain unsupported");
+    check(!status.ok(), "malformed encoded arguments should fail");
+
+    status = q35_render::parse_chat_request(
+        R"({"messages":[],"tools":{}})", request
+    );
+    check(!status.ok(), "non-array tools should fail");
 }
 
 }  // namespace
@@ -179,6 +325,10 @@ int main() {
     test_null_content();
     test_content_parts();
     test_string_tool_calls();
+    test_scalar_tool_arguments();
+    test_nested_tool_arguments();
+    test_encoded_tool_arguments();
+    test_tool_schema();
     test_error_preserves_output();
     test_invalid_fields();
     if (failures) return 1;
