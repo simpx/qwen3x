@@ -1,5 +1,6 @@
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "render.h"
 
@@ -56,6 +57,34 @@ void test_null_content() {
     check(request.messages[0].content_is_null, "null content flag");
 }
 
+void test_content_parts() {
+    q35_render::ChatRequest request;
+    const q35_render::Status status = q35_render::parse_chat_request(
+        R"({"messages":[{"role":"user","content":[
+            {"text":"compare "},
+            {"type":"image"},
+            {"video":"unused"}
+        ]}]})",
+        request
+    );
+
+    if (!status.ok()) {
+        check(false, "content parts should parse");
+        return;
+    }
+    check(request.messages.size() == 1, "content parts message count");
+    if (request.messages.size() != 1) return;
+    const std::vector<q35_render::ContentPart>& parts = request.messages[0].parts;
+    check(parts.size() == 3, "content parts count");
+    if (parts.size() != 3) return;
+    check(parts[0].kind == q35_render::ContentKind::Text &&
+          parts[0].text == "compare ", "text content part");
+    check(parts[1].kind == q35_render::ContentKind::Image,
+          "image content part");
+    check(parts[2].kind == q35_render::ContentKind::Video,
+          "video content part");
+}
+
 void test_error_preserves_output() {
     q35_render::ChatRequest request;
     q35_render::Message existing;
@@ -88,9 +117,15 @@ void test_invalid_fields() {
     check(!status.ok(), "non-boolean option should fail");
 
     status = q35_render::parse_chat_request(
-        R"({"messages":[{"role":"user","content":[]}]})", request
+        R"({"messages":[{"role":"user","content":[{"type":"audio"}]}]})",
+        request
     );
-    check(!status.ok(), "content arrays should remain unsupported");
+    check(!status.ok(), "unknown content part should fail");
+
+    status = q35_render::parse_chat_request(
+        R"({"messages":[{"role":"user","content":[42]}]})", request
+    );
+    check(!status.ok(), "non-object content part should fail");
 }
 
 }  // namespace
@@ -98,6 +133,7 @@ void test_invalid_fields() {
 int main() {
     test_basic_request();
     test_null_content();
+    test_content_parts();
     test_error_preserves_output();
     test_invalid_fields();
     if (failures) return 1;

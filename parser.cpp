@@ -50,6 +50,38 @@ private:
         return std::move(value.get_ref<std::string&>());
     }
 
+    bool string_field_equals(const Json& object, const char* field,
+                             const char* expected) const {
+        const auto value = object.find(field);
+        return value != object.end() && value->is_string() &&
+               value->get_ref<const std::string&>() == expected;
+    }
+
+    bool parse_content_part(Json& value, ContentPart* output) {
+        if (!value.is_object()) {
+            return fail("message.content items must be objects");
+        }
+        if (value.contains("image") || value.contains("image_url") ||
+            string_field_equals(value, "type", "image")) {
+            output->kind = ContentKind::Image;
+            return true;
+        }
+        if (value.contains("video") ||
+            string_field_equals(value, "type", "video")) {
+            output->kind = ContentKind::Video;
+            return true;
+        }
+
+        auto text = value.find("text");
+        if (text == value.end()) {
+            return fail("unexpected item type in message.content");
+        }
+        if (!text->is_string()) return fail("content.text must be a string");
+        output->kind = ContentKind::Text;
+        output->text = move_string(*text);
+        return true;
+    }
+
     bool parse_role(Json& value, Role* output) {
         if (!value.is_string()) return fail("message.role must be a string");
         const std::string role = move_string(value);
@@ -75,7 +107,12 @@ private:
         } else if (content->is_string()) {
             output->content = move_string(*content);
         } else if (content->is_array()) {
-            return fail("message.content arrays are not supported yet");
+            output->parts.reserve(content->size());
+            for (Json& value : *content) {
+                ContentPart part;
+                if (!parse_content_part(value, &part)) return false;
+                output->parts.push_back(std::move(part));
+            }
         } else {
             return fail("message.content must be a string, array, or null");
         }
