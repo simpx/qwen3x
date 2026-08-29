@@ -32,11 +32,12 @@ Python 不参与部署或推理，只用于离线权重转换、render 数据生
 下载官方 checkpoint，并准备权重和开发阶段独立的 render 数据：
 
 ```sh
-make checkpoint model render
+make -C scripts checkpoint model render
 make
 ```
 
-所有下载和生成的文件都位于 `build/`；`make clean` 会一并删除。
+所有下载和生成的文件都位于 `build/`。`make clean` 清理程序、render、benchmark
+和测试产物，但保留下载的 checkpoint 与 pack 后的模型权重。
 
 启动服务：
 

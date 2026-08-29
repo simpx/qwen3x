@@ -194,7 +194,7 @@ def main() -> None:
         if fingerprint.get(name) != actual:
             raise AssertionError(
                 f"reference {name}={fingerprint.get(name)!r}, local={actual!r}; "
-                "run make reference-generate"
+                "run make -C reference dump"
             )
 
     worst = 0.0
@@ -211,10 +211,14 @@ def main() -> None:
         for shard in sorted(args.model.glob("*.safetensors"))
     }
     if fingerprint.get("safetensors_sha256") not in (None, model_shards):
-        raise AssertionError("reference safetensors hashes differ; run make reference-generate")
+        raise AssertionError(
+            "reference safetensors hashes differ; run make -C reference dump"
+        )
     revision = hugging_face_revision(args.model)
     if fingerprint.get("hugging_face_revision") not in (None, revision):
-        raise AssertionError("reference model revision differs; run make reference-generate")
+        raise AssertionError(
+            "reference model revision differs; run make -C reference dump"
+        )
 
     cpu_flags = ""
     cpuinfo = Path("/proc/cpuinfo")

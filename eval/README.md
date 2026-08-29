@@ -35,16 +35,16 @@ seed 44 在 `304/504` 时主动停止，临时分数 `0.3520`，只作为不完�
 先启动 Engine：
 
 ```sh
-SLOTS=4 CONTEXT=40960 REQUEST_TIMEOUT=7200 make run LOG_LEVEL=info
+make run SLOTS=4 CONTEXT=40960 LOG_LEVEL=info
 ```
 
 另一个终端运行：
 
 ```sh
-make eval-smoke
-make eval EVAL_DATASET=mmlu_pro EVAL_LIMIT=100 EVAL_SEED=42
-make eval EVAL_DATASET=ceval EVAL_LIMIT=100 EVAL_SEED=42
-make eval EVAL_DATASET=ifeval EVAL_LIMIT=100 EVAL_SEED=42
+make -C eval smoke
+make -C eval run EVAL_DATASET=mmlu_pro EVAL_LIMIT=100 EVAL_SEED=42
+make -C eval run EVAL_DATASET=ceval EVAL_LIMIT=100 EVAL_SEED=42
+make -C eval run EVAL_DATASET=ifeval EVAL_LIMIT=100 EVAL_SEED=42
 ```
 
 默认正式 sampling 严格采用 Qwen 模型卡 Benchmark Results / Language 表格脚注：
@@ -54,9 +54,9 @@ make eval EVAL_DATASET=ifeval EVAL_LIMIT=100 EVAL_SEED=42
 与 FP32 reference 对比：
 
 ```sh
-make reference-serve
-make eval-reference EVAL_DATASET=mmlu_pro EVAL_LIMIT=100
-make eval-compare \
+make -C reference serve
+make -C eval reference EVAL_DATASET=mmlu_pro EVAL_LIMIT=100
+make -C eval compare \
   ENGINE_RUN=eval/results/<engine目录> \
   REFERENCE_RUN=eval/results/<reference目录>
 ```

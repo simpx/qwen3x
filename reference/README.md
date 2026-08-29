@@ -82,8 +82,8 @@ make compare \
   CHAT_TEMPLATE=chat_template.jinja
 ```
 
-也可以在仓库根目录运行 `make reference`，一次完成生成和对比。报告默认写入
-`build/reference-report.json`。
+shared library、vectors 和报告都只生成在本目录的 `build/` 下；报告默认写入
+`reference/build/reference-report.json`（从仓库根目录看）。
 
 ## EvalScope reference server
 

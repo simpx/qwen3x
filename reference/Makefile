@@ -16,11 +16,17 @@ PORT ?= 8002
 SERVED_MODEL ?= qwen3.5-0.8b-reference
 
 ENGINE_DIR ?= ..
-LIBRARY ?= $(ENGINE_DIR)/build/libqwen35.so
+LIBRARY ?= build/libqwen35.so
 BIN ?= $(ENGINE_DIR)/build/qwen35-0.8b.bin
 VECTORS ?= build/cpu
-REPORT ?= $(ENGINE_DIR)/build/reference-report.json
+REPORT ?= build/reference-report.json
+CXX ?= c++
 CXXFLAGS ?=
+ENGINE_CXXFLAGS := -O3 -std=c++17 -fno-exceptions -fno-rtti \
+	-Wall -Wextra -Wpedantic -march=native
+THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
+	-I$(ENGINE_DIR)/third_party/spdlog/include
+SPDLOG_SRC := $(wildcard $(ENGINE_DIR)/third_party/spdlog/src/*.cpp)
 
 .PHONY: all sync dump test cpu cuda compare serve clean
 
@@ -41,9 +47,8 @@ dump:
 test: dump
 	$(PYTHON) test_reference.py --model "$(MODEL)" --vectors "$(OUT)" --device "$(DEVICE)"
 
-compare:
-	$(MAKE) -C "$(ENGINE_DIR)" reference-library
-	PYTHONPATH="$(abspath $(ENGINE_DIR))" $(PYTHON) compare_engine.py \
+compare: $(LIBRARY)
+	$(PYTHON) compare_engine.py \
 		--library "$(LIBRARY)" \
 		--bin "$(BIN)" \
 		--vectors "$(VECTORS)" \
@@ -51,6 +56,15 @@ compare:
 		--chat-template "$(CHAT_TEMPLATE)" \
 		--report "$(REPORT)" \
 		--cxxflags "$(CXXFLAGS)"
+
+$(LIBRARY): $(ENGINE_DIR)/engine.cpp $(ENGINE_DIR)/runtime.cpp \
+		$(ENGINE_DIR)/log.cpp $(ENGINE_DIR)/qwen35.h \
+		$(ENGINE_DIR)/internal.h $(SPDLOG_SRC)
+	mkdir -p "$(dir $(LIBRARY))"
+	$(CXX) $(ENGINE_CXXFLAGS) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) \
+		-fPIC -shared -I$(ENGINE_DIR) $(ENGINE_DIR)/engine.cpp \
+		$(ENGINE_DIR)/runtime.cpp $(ENGINE_DIR)/log.cpp $(SPDLOG_SRC) \
+		-pthread -o "$(LIBRARY)"
 
 serve:
 	$(PYTHON) server.py \

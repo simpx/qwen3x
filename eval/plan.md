@@ -346,10 +346,10 @@ Sampling 的随机数算法可能与 vLLM/SGLang 不同，因此不要要求不�
 保持命令简单，最终提供类似：
 
 ```sh
-make eval-smoke
-make eval EVAL_DATASET=mmlu_pro EVAL_LIMIT=100 EVAL_THINKING=0 EVAL_SEED=42
-make eval EVAL_DATASET=ceval EVAL_THINKING=0 EVAL_SEED=42
-make eval EVAL_DATASET=ifeval EVAL_THINKING=0 EVAL_SEED=42
+make -C eval smoke
+make -C eval run EVAL_DATASET=mmlu_pro EVAL_LIMIT=100 EVAL_THINKING=0 EVAL_SEED=42
+make -C eval run EVAL_DATASET=ceval EVAL_THINKING=0 EVAL_SEED=42
+make -C eval run EVAL_DATASET=ifeval EVAL_THINKING=0 EVAL_SEED=42
 ```
 
 评测并发必须固定并记录。当前正式 CPU Engine 运行使用一个进程、4 个并发请求；每个样本

@@ -7,7 +7,7 @@
 - 除非用户明确要求修改，否则只解读和 review，不修改代码。
 - 只有用户明确要求时才创建 commit。
 - 修改后运行与风险相称的测试；基础 C++ 改动至少运行 `make test`，render 边界运行
-  `make render-test`，HTTP 数据流运行 `make http-test`。
+  `make -C tests render-test`，HTTP 数据流运行 `make -C tests http-test`。
 - 用户明确要求“直接 push main”时，先在已验证的 feature branch 上准备并检查提交，再将
   该提交 fast-forward 到本地 `main` 并推送 `origin/main`。若远端 main 无法 fast-forward，
   停止并向用户说明。
@@ -18,7 +18,7 @@
   lambda，不使用异常、RTTI、复杂模板或隐藏数据流的抽象。
 - 模型计算优先使用显式数组、指针、循环和 shape；只做不影响阅读的性能优化。
 - 可恢复的输入错误通过返回值报告；内部不变量失败时先输出上下文，再 assert/abort。
-- Python 只用于 `scripts/`、`reference/` 和 `eval/`，不进入部署或推理数据流。
+- Python 只用于 `scripts/`、`tests/`、`reference/` 和 `eval/`，不进入部署或推理数据流。
 
 ## 解读方式
 
