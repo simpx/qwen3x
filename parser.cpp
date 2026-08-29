@@ -82,6 +82,47 @@ private:
         return true;
     }
 
+    bool parse_tool_call(Json& value, ToolCall* output) {
+        if (!value.is_object()) {
+            return fail("message.tool_calls items must be objects");
+        }
+
+        Json* call = &value;
+        auto function = value.find("function");
+        if (function != value.end()) {
+            if (!function->is_object()) {
+                return fail("tool_call.function must be an object");
+            }
+            call = &*function;
+        }
+
+        auto name = call->find("name");
+        if (name == call->end()) return fail("tool call is missing name");
+        if (!name->is_string()) return fail("tool_call.name must be a string");
+        output->name = move_string(*name);
+
+        auto arguments = call->find("arguments");
+        if (arguments == call->end()) return true;
+        if (arguments->is_string()) {
+            return fail("encoded tool_call.arguments are not supported yet");
+        }
+        if (!arguments->is_object()) {
+            return fail("tool_call.arguments must be an object");
+        }
+
+        output->arguments.reserve(arguments->size());
+        for (auto& item : arguments->items()) {
+            if (!item.value().is_string()) {
+                return fail("tool argument values must be strings for now");
+            }
+            ToolArgument argument;
+            argument.name = item.key();
+            argument.text = move_string(item.value());
+            output->arguments.push_back(std::move(argument));
+        }
+        return true;
+    }
+
     bool parse_role(Json& value, Role* output) {
         if (!value.is_string()) return fail("message.role must be a string");
         const std::string role = move_string(value);
@@ -128,7 +169,15 @@ private:
 
         auto calls = value.find("tool_calls");
         if (calls != value.end() && !calls->is_null()) {
-            return fail("message.tool_calls are not supported yet");
+            if (!calls->is_array()) {
+                return fail("message.tool_calls must be an array");
+            }
+            output->tool_calls.reserve(calls->size());
+            for (Json& value : *calls) {
+                ToolCall call;
+                if (!parse_tool_call(value, &call)) return false;
+                output->tool_calls.push_back(std::move(call));
+            }
         }
         return true;
     }

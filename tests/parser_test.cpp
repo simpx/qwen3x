@@ -85,6 +85,37 @@ void test_content_parts() {
           "video content part");
 }
 
+void test_string_tool_calls() {
+    q35_render::ChatRequest request;
+    const q35_render::Status status = q35_render::parse_chat_request(
+        R"({"messages":[
+            {"role":"user","content":"look it up"},
+            {"role":"assistant","content":"","tool_calls":[
+                {"name":"alpha","arguments":{"city":"Hangzhou"}},
+                {"function":{"name":"beta","arguments":{"unit":"C"}}}
+            ]}
+        ]})",
+        request
+    );
+
+    if (!status.ok()) {
+        check(false, "string tool calls should parse");
+        return;
+    }
+    check(request.messages.size() == 2, "tool call message count");
+    if (request.messages.size() != 2) return;
+    const std::vector<q35_render::ToolCall>& calls =
+        request.messages[1].tool_calls;
+    check(calls.size() == 2, "tool call count");
+    if (calls.size() != 2) return;
+    check(calls[0].name == "alpha", "direct tool call name");
+    check(calls[0].arguments.size() == 1 &&
+          calls[0].arguments[0].name == "city" &&
+          calls[0].arguments[0].text == "Hangzhou",
+          "direct tool call argument");
+    check(calls[1].name == "beta", "nested function name");
+}
+
 void test_error_preserves_output() {
     q35_render::ChatRequest request;
     q35_render::Message existing;
@@ -126,6 +157,19 @@ void test_invalid_fields() {
         R"({"messages":[{"role":"user","content":[42]}]})", request
     );
     check(!status.ok(), "non-object content part should fail");
+
+    status = q35_render::parse_chat_request(
+        R"({"messages":[{"role":"assistant","tool_calls":{}}]})", request
+    );
+    check(!status.ok(), "non-array tool calls should fail");
+
+    status = q35_render::parse_chat_request(
+        R"({"messages":[{"role":"assistant","tool_calls":[
+            {"name":"f","arguments":{"count":2}}
+        ]}]})",
+        request
+    );
+    check(!status.ok(), "non-string tool argument should remain unsupported");
 }
 
 }  // namespace
@@ -134,6 +178,7 @@ int main() {
     test_basic_request();
     test_null_content();
     test_content_parts();
+    test_string_tool_calls();
     test_error_preserves_output();
     test_invalid_fields();
     if (failures) return 1;
