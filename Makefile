@@ -7,7 +7,7 @@ PYTHON_PROD ?= $(UV) run --project scripts --locked --no-dev python
 BUILD ?= build
 CHECKPOINT_REPO ?= Qwen/Qwen3.5-0.8B
 CHECKPOINT ?= $(BUILD)/models/Qwen3.5-0.8B
-CHECKPOINT_STAMP ?= $(CHECKPOINT)/.complete
+CHECKPOINT_STAMP ?= $(BUILD)/.qwen3.5-0.8b-checkpoint
 PROGRAM ?= $(BUILD)/qwen35
 LIBRARY ?= $(BUILD)/libqwen35.so
 MODEL_BIN ?= $(BUILD)/qwen35-0.8b.bin
@@ -50,6 +50,7 @@ checkpoint: $(CHECKPOINT_STAMP)
 $(CHECKPOINT_STAMP):
 	mkdir -p "$(CHECKPOINT)"
 	$(HF) download "$(CHECKPOINT_REPO)" --local-dir "$(CHECKPOINT)"
+	rm -rf "$(CHECKPOINT)/.cache"
 	touch "$@"
 
 $(PROGRAM): $(PROGRAM_SRC) qwen35.h internal.h render.h \
