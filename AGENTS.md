@@ -13,7 +13,7 @@
   突然引入 Tensor 框架、模板元编程或隐藏 helper。
 - 修改后运行与风险相称的测试。课程改动至少运行对应 lesson；影响公共学习链或 capstone
   时运行 `cd from-scratch && make test`。改动真实 0.8B 数值路径时，如本地 checkpoint 存在，
-  还要运行 `make model-test MODEL=../models/Qwen3.5-0.8B`。
+  还要运行 `make model-test MODEL=../build/models/Qwen3.5-0.8B`。
 - 只有用户明确要求时才创建 commit。
 - 用户明确要求“直接 push main”时，先在已验证的 feature branch 上准备并检查提交，再将
   该提交 fast-forward 到本地 `main` 并推送 `origin/main`；不要只停在 feature branch，

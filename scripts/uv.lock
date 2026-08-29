@@ -608,6 +608,7 @@ name = "qwen35-tools"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "huggingface-hub" },
     { name = "jinja2" },
     { name = "tokenizers" },
     { name = "transformers" },
@@ -615,6 +616,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "huggingface-hub", specifier = ">=1.0,<2" },
     { name = "jinja2", specifier = ">=3.1,<4" },
     { name = "tokenizers", specifier = ">=0.21,<1" },
     { name = "transformers", specifier = ">=5,<6" },

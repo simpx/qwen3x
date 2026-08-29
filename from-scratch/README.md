@@ -83,9 +83,9 @@ c++ -O2 -std=c++17 00_toy_logits.cpp -o 00_toy_logits
 ~~~
 cd from-scratch
 make
-python3 09_pack_weights.py ../models/Qwen3.5-0.8B ../models/qwen35-0.8b.bin
-./09_qwen35_0_8b --generate ../models/qwen35-0.8b.bin 248044,198,198 16
-make model-test MODEL=../models/Qwen3.5-0.8B
+python3 09_pack_weights.py ../build/models/Qwen3.5-0.8B ../build/from-scratch-qwen35-0.8b.bin
+./09_qwen35_0_8b --generate ../build/from-scratch-qwen35-0.8b.bin 248044,198,198 16
+make model-test MODEL=../build/models/Qwen3.5-0.8B
 ~~~
 
 `09_chat.py` 只在 Python 侧调用官方 tokenizer/chat template；`09_qwen35_0_8b.cpp`

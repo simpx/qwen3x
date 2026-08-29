@@ -307,7 +307,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--server", default="http://127.0.0.1:8000")
     parser.add_argument("--model", default="qwen3.5-0.8b")
     parser.add_argument("--tokenizer", type=Path,
-                        default=PROJECT.parent / "models/Qwen3.5-0.8B")
+                        default=PROJECT / "build/models/Qwen3.5-0.8B")
     parser.add_argument("--dataset", choices=SUPPORTED_DATASETS,
                         default="mmlu_pro")
     parser.add_argument("--samples", type=int,

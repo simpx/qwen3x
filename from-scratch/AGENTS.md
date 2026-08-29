@@ -113,7 +113,7 @@ multi-head 不会让固定总宽度 `D` 下的基本 QK 点积计算量自动减
 - 09 的函数注释不再固定写“目的 / 直觉 / 实现”三段。直接写函数做什么、核心公式，以及输入输出
   shape；前面课程已经学过的直觉不重复。
 - 修改 toy lesson 后运行对应程序；修改公共链或第 09 课后运行 `make test`。若改真实数值路径且
-  checkpoint 存在，再运行 `make model-test MODEL=../models/Qwen3.5-0.8B`。
+  checkpoint 存在，再运行 `make model-test MODEL=../build/models/Qwen3.5-0.8B`。
 
 ## 下次继续
 

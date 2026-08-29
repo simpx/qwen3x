@@ -1,4 +1,3 @@
-/models/
 /from-scratch/00_toy_logits
 /from-scratch/01_rmsnorm_linear
 /from-scratch/02_swiglu_residual

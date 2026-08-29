@@ -39,8 +39,8 @@ uv sync --locked
 仓库已经有本地 checkpoint 时：
 
 ```sh
-make cpu MODEL=../models/Qwen3.5-0.8B    # official CPU FP32 vectors
-make cuda MODEL=../models/Qwen3.5-0.8B   # official CUDA FP32 vectors
+make cpu MODEL=../build/models/Qwen3.5-0.8B    # official CPU FP32 vectors
+make cuda MODEL=../build/models/Qwen3.5-0.8B   # official CUDA FP32 vectors
 ```
 
 默认 `make` 等同于 `make cpu`。CPU 和 CUDA 都以 FP32 加载约 0.8B 参数；两者的 vectors
@@ -79,7 +79,7 @@ CUDA oracle，但同样以紧的 `cuda_max_abs_error = 5e-4` 逐步比较。以�
 
 ```sh
 make compare \
-  MODEL=../models/Qwen3.5-0.8B \
+  MODEL=../build/models/Qwen3.5-0.8B \
   CHAT_TEMPLATE=chat_template.jinja
 ```
 
@@ -92,7 +92,7 @@ make compare \
 OpenAI-compatible oracle：
 
 ```sh
-make serve MODEL=../models/Qwen3.5-0.8B \
+make serve MODEL=../build/models/Qwen3.5-0.8B \
   CHAT_TEMPLATE=chat_template.jinja DEVICE=cuda DTYPE=float32 \
   CACHE=static MAX_CONTEXT=40960 PORT=8002
 ```

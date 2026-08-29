@@ -15,7 +15,9 @@ from transformers import AutoTokenizer
 
 
 PROJECT = Path(__file__).resolve().parents[1]
-MODEL = Path(os.environ.get("TOKENIZER", PROJECT / "models/Qwen3.5-0.8B"))
+MODEL = Path(os.environ.get(
+    "TOKENIZER", PROJECT / "build/models/Qwen3.5-0.8B"
+))
 RENDER_BIN = Path(os.environ.get(
     "RENDER_BIN", PROJECT / "build/qwen35-render.bin"
 ))

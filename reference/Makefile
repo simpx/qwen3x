@@ -1,7 +1,7 @@
 # reference/ 只负责官方 oracle。MODEL 是本地 checkpoint，默认不下载任何文件。
 UV ?= uv
 PYTHON := $(UV) run --locked python
-MODEL ?= ../models/Qwen3.5-0.8B
+MODEL ?= ../build/models/Qwen3.5-0.8B
 OUT ?= build
 # `dump` / `test` are low-level commands.  The named targets below deliberately place
 # CPU and CUDA oracle outputs in separate directories: they are both FP32, but their

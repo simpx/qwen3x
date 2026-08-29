@@ -61,7 +61,7 @@ safetensors schema 或多模型分发器。
 
 用法：
     cd from-scratch
-    python3 09_pack_weights.py ../models/Qwen3.5-0.8B ../models/qwen35-0.8b.bin
+    python3 09_pack_weights.py ../build/models/Qwen3.5-0.8B ../build/from-scratch-qwen35-0.8b.bin
 
 输入目录需要官方 config.json、model.safetensors.index.json 和对应 shard。
 本课的固定 0.8B checkpoint 只有一个 shard；脚本会明确检查所有需要的 text

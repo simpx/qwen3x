@@ -3,7 +3,7 @@ EVAL_DIR := $(CURDIR)
 PROJECT ?= ..
 PROJECT := $(abspath $(PROJECT))
 SERVER ?= http://127.0.0.1:8000
-TOKENIZER ?= $(abspath ../models/Qwen3.5-0.8B)
+TOKENIZER ?= $(abspath ../build/models/Qwen3.5-0.8B)
 BIN ?= build/qwen35-0.8b.bin
 
 EVAL_DATASET ?= mmlu_pro

@@ -33,12 +33,14 @@ Python 不参与部署或推理，只用于离线权重转换、render 数据生
 
 ## 构建和使用
 
-准备权重和开发阶段独立的 render 数据：
+下载官方 checkpoint，并准备权重和开发阶段独立的 render 数据：
 
 ```sh
-make weights render-data
+make checkpoint model render
 make
 ```
+
+所有下载和生成的文件都位于 `build/`；`make clean` 会一并删除。
 
 启动服务：
 
@@ -91,6 +93,7 @@ tests/              parser、renderer、runtime 和端到端回归
 reference/          官方 PyTorch/Transformers 数值 reference
 eval/               EvalScope 评测工具和结果
 third_party/        固定版本的 JSON、HTTP 和日志依赖
+build/              下载的 checkpoint、生成的模型和编译产物
 ```
 
 开发阶段 `weights.bin` 和 `render.bin` 分开，方便调试；稳定后再考虑打包为一个模型文件。

@@ -1,13 +1,16 @@
 CXX ?= c++
 UV ?= uv
+HF ?= $(UV) run --project scripts --locked hf
 SYSTEM_PYTHON ?= python3
 PYTHON ?= $(UV) run --project scripts --locked python
 PYTHON_PROD ?= $(UV) run --project scripts --locked --no-dev python
-TOKENIZER ?= models/Qwen3.5-0.8B
 BUILD ?= build
+CHECKPOINT_REPO ?= Qwen/Qwen3.5-0.8B
+CHECKPOINT ?= $(BUILD)/models/Qwen3.5-0.8B
+CHECKPOINT_STAMP ?= $(CHECKPOINT)/.complete
 PROGRAM ?= $(BUILD)/qwen35
 LIBRARY ?= $(BUILD)/libqwen35.so
-BIN ?= $(BUILD)/qwen35-0.8b.bin
+MODEL_BIN ?= $(BUILD)/qwen35-0.8b.bin
 PARSER_TEST ?= $(BUILD)/parser-test
 RUNTIME_TEST ?= $(BUILD)/runtime-test
 BENCH ?= $(BUILD)/bench
@@ -32,7 +35,7 @@ SPDLOG_SRC := $(wildcard third_party/spdlog/src/*.cpp)
 PROGRAM_SRC := main.cpp engine.cpp runtime.cpp log.cpp parser.cpp render.cpp \
 	$(SPDLOG_SRC)
 
-.PHONY: all sync sync-prod weights render-data reference-library parser-test runtime-test render-test http-test unit-test eval-test reference-generate test run chat bench eval eval-smoke reference-serve eval-reference eval-compare clean
+.PHONY: all sync sync-prod checkpoint model render reference-library parser-test runtime-test render-test http-test unit-test eval-test reference-generate test run chat bench eval eval-smoke reference-serve eval-reference eval-compare clean
 
 all: $(PROGRAM)
 
@@ -41,6 +44,13 @@ sync:
 
 sync-prod:
 	$(UV) sync --project scripts --locked --no-dev
+
+checkpoint: $(CHECKPOINT_STAMP)
+
+$(CHECKPOINT_STAMP):
+	mkdir -p "$(CHECKPOINT)"
+	$(HF) download "$(CHECKPOINT_REPO)" --local-dir "$(CHECKPOINT)"
+	touch "$@"
 
 $(PROGRAM): $(PROGRAM_SRC) qwen35.h internal.h render.h \
 	third_party/httplib/httplib.h third_party/nlohmann/json.hpp
@@ -54,17 +64,17 @@ $(LIBRARY): engine.cpp runtime.cpp log.cpp qwen35.h internal.h $(SPDLOG_SRC)
 
 reference-library: $(LIBRARY)
 
-weights: $(BIN)
+model: $(MODEL_BIN)
 
-$(BIN): scripts/pack_weights.py
+$(MODEL_BIN): scripts/pack_weights.py $(CHECKPOINT_STAMP)
 	mkdir -p $(BUILD)
-	$(PYTHON_PROD) -m scripts.pack_weights "$(TOKENIZER)" "$@"
+	$(PYTHON_PROD) -m scripts.pack_weights "$(CHECKPOINT)" "$@"
 
-render-data: $(RENDER_BIN)
+render: $(RENDER_BIN)
 
-$(RENDER_BIN): scripts/pack_render.py $(TOKENIZER)/tokenizer.json $(TOKENIZER)/tokenizer_config.json
+$(RENDER_BIN): scripts/pack_render.py $(CHECKPOINT_STAMP) $(CHECKPOINT)/tokenizer.json $(CHECKPOINT)/tokenizer_config.json
 	mkdir -p $(BUILD)
-	$(PYTHON) -m scripts.pack_render "$(TOKENIZER)" "$@"
+	$(PYTHON) -m scripts.pack_render "$(CHECKPOINT)" "$@"
 
 $(PARSER_TEST): parser.cpp render.h tests/parser_test.cpp third_party/nlohmann/json.hpp
 	mkdir -p $(BUILD)
@@ -90,15 +100,15 @@ $(BENCH): engine.cpp runtime.cpp log.cpp qwen35.h internal.h \
 		engine.cpp runtime.cpp log.cpp scripts/bench.cpp $(SPDLOG_SRC) \
 		-pthread -o $@
 
-bench: $(BENCH) $(BIN)
-	$(BENCH) "$(BIN)" 8 4
+bench: $(BENCH) $(MODEL_BIN)
+	$(BENCH) "$(MODEL_BIN)" 8 4
 
 $(RENDER_DRIVER): render.cpp parser.cpp render.h tests/render_driver.cpp third_party/nlohmann/json.hpp
 	mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -I. render.cpp parser.cpp tests/render_driver.cpp -o $@
 
 render-test: $(RENDER_BIN) $(RENDER_DRIVER)
-	TOKENIZER="$(abspath $(TOKENIZER))" \
+	TOKENIZER="$(abspath $(CHECKPOINT))" \
 	RENDER_BIN="$(abspath $(RENDER_BIN))" \
 	RENDER_TEST="$(abspath $(RENDER_DRIVER))" \
 	$(PYTHON) -m unittest -v tests.test_render
@@ -114,15 +124,15 @@ eval-test:
 
 reference-generate:
 	$(MAKE) -C reference dump \
-		MODEL="$(abspath $(TOKENIZER))" \
+		MODEL="$(abspath $(CHECKPOINT))" \
 		OUT="$(abspath $(REFERENCE))" \
 		DEVICE=cpu \
 		CHAT_TEMPLATE="$(abspath reference/chat_template.jinja)"
 
 test: unit-test
 
-run: $(PROGRAM) $(BIN) $(RENDER_BIN)
-	$(PROGRAM) -m "$(BIN)" -r "$(RENDER_BIN)" \
+run: $(PROGRAM) $(MODEL_BIN) $(RENDER_BIN)
+	$(PROGRAM) -m "$(MODEL_BIN)" -r "$(RENDER_BIN)" \
 		--host "$(HOST)" --port "$(PORT)" \
 		--slots "$(SLOTS)" --context "$(CONTEXT)" $(MOCK_ARG)
 
@@ -131,24 +141,24 @@ chat:
 		-H 'Content-Type: application/json' \
 		-d '{"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"你好，请用一句话介绍自己。"}],"temperature":0,"max_completion_tokens":1024,"stream":true,"stream_options":{"include_usage":true}}'
 
-eval: $(BIN)
+eval: $(MODEL_BIN)
 	$(MAKE) -C eval run PROJECT="$(CURDIR)" SERVER="$(SERVER)" \
-		TOKENIZER="$(abspath $(TOKENIZER))" BIN="$(abspath $(BIN))"
+		TOKENIZER="$(abspath $(CHECKPOINT))" BIN="$(abspath $(MODEL_BIN))"
 
 eval-smoke:
 	$(MAKE) -C eval smoke PROJECT="$(CURDIR)" SERVER="$(SERVER)" \
-		TOKENIZER="$(abspath $(TOKENIZER))" BIN="$(abspath $(BIN))"
+		TOKENIZER="$(abspath $(CHECKPOINT))" BIN="$(abspath $(MODEL_BIN))"
 
 reference-serve:
 	$(MAKE) -C reference serve \
-		MODEL="$(abspath $(TOKENIZER))" \
+		MODEL="$(abspath $(CHECKPOINT))" \
 		CHAT_TEMPLATE="$(abspath reference/chat_template.jinja)" \
 		DEVICE=cuda DTYPE="$(REFERENCE_DTYPE)" CACHE="$(REFERENCE_CACHE)" \
 		MAX_CONTEXT="$(CONTEXT)" PORT=8002
 
 eval-reference:
 	$(MAKE) -C eval reference PROJECT="$(CURDIR)" \
-		TOKENIZER="$(abspath $(TOKENIZER))"
+		TOKENIZER="$(abspath $(CHECKPOINT))"
 
 eval-compare:
 	$(MAKE) -C eval compare PROJECT="$(CURDIR)"
