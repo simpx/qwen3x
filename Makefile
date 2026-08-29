@@ -5,12 +5,16 @@ PYTHON_PROD ?= $(UV) run --locked --no-dev python
 TOKENIZER ?= models/Qwen3.5-0.8B
 BUILD ?= build
 PROGRAM ?= $(BUILD)/qwen35
+LIBRARY ?= $(BUILD)/libqwen35.so
 BIN ?= $(BUILD)/qwen35-0.8b.bin
 PARSER_TEST ?= $(BUILD)/parser-test
+RUNTIME_TEST ?= $(BUILD)/runtime-test
+BENCH ?= $(BUILD)/bench
 RENDER_BIN ?= $(BUILD)/qwen35-render.bin
 RENDER_DRIVER ?= $(BUILD)/render-test
-SOCKET ?= /tmp/qwen35.sock
 SERVER ?= http://127.0.0.1:8000
+HOST ?= 127.0.0.1
+PORT ?= 8000
 SLOTS ?= 2
 CONTEXT ?= 40960
 MOCK ?= 0
@@ -21,8 +25,13 @@ REFERENCE_CACHE ?= static
 
 CXXFLAGS ?= -O3 -std=c++17 -fno-exceptions -fno-rtti \
 	-Wall -Wextra -Wpedantic -march=native
+THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
+	-Ithird_party/spdlog/include
+SPDLOG_SRC := $(wildcard third_party/spdlog/src/*.cpp)
+PROGRAM_SRC := main.cpp engine.cpp runtime.cpp log.cpp parser.cpp render.cpp \
+	$(SPDLOG_SRC)
 
-.PHONY: all sync sync-prod weights render-data parser-test render-test unit-test eval-test reference-generate test run chat eval eval-smoke reference-serve eval-reference eval-compare clean
+.PHONY: all sync sync-prod weights render-data reference-library parser-test runtime-test render-test http-test unit-test eval-test reference-generate test run chat bench eval eval-smoke reference-serve eval-reference eval-compare clean
 
 all: $(PROGRAM)
 
@@ -32,9 +41,17 @@ sync:
 sync-prod:
 	$(UV) sync --locked --no-dev
 
-$(PROGRAM): main.cpp engine.cpp runtime.cpp log.cpp qwen35.h internal.h
+$(PROGRAM): $(PROGRAM_SRC) qwen35.h internal.h render.h \
+	third_party/httplib/httplib.h third_party/nlohmann/json.hpp
 	mkdir -p $(BUILD)
-	$(CXX) $(CXXFLAGS) main.cpp engine.cpp runtime.cpp log.cpp -pthread -o $@
+	$(CXX) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) -I. $(PROGRAM_SRC) -pthread -o $@
+
+$(LIBRARY): engine.cpp runtime.cpp log.cpp qwen35.h internal.h $(SPDLOG_SRC)
+	mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) -fPIC -shared -I. \
+		engine.cpp runtime.cpp log.cpp $(SPDLOG_SRC) -pthread -o $@
+
+reference-library: $(LIBRARY)
 
 weights: $(BIN)
 
@@ -55,6 +72,26 @@ $(PARSER_TEST): parser.cpp render.h tests/parser_test.cpp third_party/nlohmann/j
 parser-test: $(PARSER_TEST)
 	$(PARSER_TEST)
 
+$(RUNTIME_TEST): engine.cpp runtime.cpp log.cpp qwen35.h internal.h \
+		tests/runtime_test.cpp $(SPDLOG_SRC)
+	mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) -I. \
+		engine.cpp runtime.cpp log.cpp tests/runtime_test.cpp $(SPDLOG_SRC) \
+		-pthread -o $@
+
+runtime-test: $(RUNTIME_TEST)
+	$(RUNTIME_TEST)
+
+$(BENCH): engine.cpp runtime.cpp log.cpp qwen35.h internal.h \
+		scripts/bench.cpp $(SPDLOG_SRC)
+	mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) -I. \
+		engine.cpp runtime.cpp log.cpp scripts/bench.cpp $(SPDLOG_SRC) \
+		-pthread -o $@
+
+bench: $(BENCH) $(BIN)
+	$(BENCH) "$(BIN)" 8 4
+
 $(RENDER_DRIVER): render.cpp parser.cpp render.h tests/render_driver.cpp third_party/nlohmann/json.hpp
 	mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -I. render.cpp parser.cpp tests/render_driver.cpp -o $@
@@ -65,8 +102,11 @@ render-test: $(RENDER_BIN) $(RENDER_DRIVER)
 	RENDER_TEST="$(abspath $(RENDER_DRIVER))" \
 	$(PYTHON) -m unittest -v tests.test_render
 
-unit-test:
-	$(PYTHON) -m unittest -v tests.test_server tests.test_client
+http-test: $(PROGRAM) $(RENDER_BIN)
+	$(PYTHON) tests/test_http.py \
+		--program "$(abspath $(PROGRAM))" --render "$(abspath $(RENDER_BIN))"
+
+unit-test: parser-test runtime-test
 
 eval-test:
 	$(MAKE) -C eval test PROJECT="$(CURDIR)"
@@ -78,10 +118,12 @@ reference-generate:
 		DEVICE=cpu \
 		CHAT_TEMPLATE="$(abspath chat_template.jinja)"
 
-test: unit-test parser-test
+test: unit-test
 
-run: $(PROGRAM) $(BIN)
-	$(PROGRAM) -l "$(SOCKET)" -m "$(BIN)" --parallel "$(SLOTS)" --context "$(CONTEXT)" $(MOCK_ARG)
+run: $(PROGRAM) $(BIN) $(RENDER_BIN)
+	$(PROGRAM) -m "$(BIN)" -r "$(RENDER_BIN)" \
+		--host "$(HOST)" --port "$(PORT)" \
+		--slots "$(SLOTS)" --context "$(CONTEXT)" $(MOCK_ARG)
 
 chat:
 	curl --silent --show-error --no-buffer "$(SERVER)/v1/chat/completions" \
