@@ -31,7 +31,8 @@ typedef enum {
 /*
  * Called synchronously on the thread that produced the log. All strings are
  * valid only during the call. The host owns user_data and the callback's
- * lifetime; callbacks should be fast and must not call back into q35 APIs.
+ * lifetime; callbacks should be fast, must not throw, and must not call back
+ * into q35 APIs.
  */
 typedef void (*q35_log_callback)(void* user_data,
                                  q35_log_level level,

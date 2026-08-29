@@ -44,11 +44,7 @@ void logf(q35_log_level level, const char* file, int line,
     std::vsnprintf(message, sizeof(message), format, arguments);
     va_end(arguments);
 
-    try {
-        log_callback(log_user_data, level, file_name(file), line, message);
-    } catch (...) {
-        // A logger failure must never cross the C ABI boundary.
-    }
+    log_callback(log_user_data, level, file_name(file), line, message);
 }
 
 }  // namespace q35_internal

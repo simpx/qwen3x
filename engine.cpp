@@ -23,13 +23,13 @@
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
 #include <immintrin.h>
 #include <limits>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <vector>
 #include <sys/mman.h>
@@ -64,11 +64,6 @@ using BF16 = uint16_t;
 static_assert(sizeof(FP32) == 4 && std::numeric_limits<FP32>::is_iec559);
 static_assert(sizeof(BF16) == 2);
 constexpr FP32 EPS = 1e-6f, THETA = 10000000.0f;
-
-[[noreturn]] void die(const char* text) {
-    // library 不能结束宿主 Python 进程；异常会在 C ABI 边界转换成错误码和文字。
-    throw std::runtime_error(text);
-}
 
 FP32 f32(BF16 value) {
     // BF16 与 FP32 共用最高 16 bit；左移后按位复制即可得到精确的 FP32 表示。
@@ -182,7 +177,8 @@ void mv(const Linear& weight, const FP32* input, FP32* output) {
 
 // Embedding lookup：table[V,H] + token 标量 -> out[H]；out=table[token,:]。
 void embed(const BF16* table, int token, FP32* out) {
-    if (token < 0 || token >= V) die("token outside vocabulary");
+    assert(table && out);
+    assert(token >= 0 && token < V);
     // embedding table 的 shape 是 [V,H]；token id 唯一决定应复制的那一行。
     const BF16* row = table + static_cast<size_t>(token) * H;
     for (int i = 0; i < H; ++i) out[i] = f32(row[i]);
@@ -241,17 +237,22 @@ struct State {
     int position = 0;
     int capacity = 0;
     // 对 Delta layer：conv_history 是 [DQKV,CK-1]，delta_memory 是 [VH,KD,VD]；两者固定大小。
-    // 对 attention layer：key/value cache 每 token append 一次，逻辑 shape 是
-    // [tokens,KVH,AD]，故随 context 线性增长。非对应的 layer vector 保持为空。
-    std::array<std::vector<FP32>, N> conv_history, delta_memory, key_cache, value_cache;
-    explicit State(int context_size) : capacity(context_size) {
+    // 对 attention layer：key/value cache 按 capacity 一次分配，逻辑 shape 是
+    // [position+1,KVH,AD]。unique_ptr 只负责生命周期，不在创建 Session 时清零整块 cache。
+    std::array<std::vector<FP32>, N> conv_history, delta_memory;
+    std::unique_ptr<FP32[]> key_cache[N], value_cache[N];
+    std::vector<FP32> attention_score;  // [context_size]
+
+    explicit State(int context_size)
+        : capacity(context_size), attention_score(context_size) {
         for (int layer = 0; layer < N; ++layer) {
             if (layer % 4 != 3) {
                 conv_history[layer].assign(static_cast<size_t>(DQKV) * (CK - 1), 0.0f);
                 delta_memory[layer].assign(static_cast<size_t>(VH) * KD * VD, 0.0f);
             } else {
-                key_cache[layer].reserve(static_cast<size_t>(capacity) * KV_WIDTH);
-                value_cache[layer].reserve(static_cast<size_t>(capacity) * KV_WIDTH);
+                const size_t count = static_cast<size_t>(capacity) * KV_WIDTH;
+                key_cache[layer].reset(new FP32[count]);
+                value_cache[layer].reset(new FP32[count]);
             }
         }
     }
@@ -262,10 +263,6 @@ struct State {
             if (layer % 4 != 3) {
                 std::fill(conv_history[layer].begin(), conv_history[layer].end(), 0.0f);
                 std::fill(delta_memory[layer].begin(), delta_memory[layer].end(), 0.0f);
-            } else {
-                // clear 改变 logical length，但保留 reserve 出来的 Session Slot 内存。
-                key_cache[layer].clear();
-                value_cache[layer].clear();
             }
         }
     }
@@ -273,41 +270,38 @@ struct State {
 
 struct Work {
     // 公共临时量。
-    std::vector<FP32> hidden = std::vector<FP32>(H);       // [H]
-    std::vector<FP32> normalized = std::vector<FP32>(H);   // [H]
-    std::vector<FP32> branch = std::vector<FP32>(H);       // [H]
-    std::vector<FP32> logits = std::vector<FP32>(V);       // [V]
+    FP32 hidden[H] = {};       // [H]
+    FP32 normalized[H] = {};   // [H]
+    FP32 branch[H] = {};       // [H]
+    FP32 logits[V] = {};       // [V]
 
     // FFN：hidden[H] -> gate/up[I] -> branch[H]。
-    std::vector<FP32> ffn_gate = std::vector<FP32>(I);     // [I]
-    std::vector<FP32> ffn_up = std::vector<FP32>(I);       // [I]
+    FP32 ffn_gate[I] = {};     // [I]
+    FP32 ffn_up[I] = {};       // [I]
 
     // DeltaNet。
-    std::vector<FP32> delta_qkv = std::vector<FP32>(DQKV); // [Q | K | V]
-    std::vector<FP32> delta_z = std::vector<FP32>(DO);     // [VH,VD]
-    std::vector<FP32> delta_a = std::vector<FP32>(VH);     // [VH]
-    std::vector<FP32> delta_b = std::vector<FP32>(VH);     // [VH]
-    std::vector<FP32> delta_q = std::vector<FP32>(DO);     // [VH,KD]
-    std::vector<FP32> delta_k = std::vector<FP32>(DO);     // [VH,KD]
-    std::vector<FP32> delta_output = std::vector<FP32>(DO);// [VH,VD]
+    FP32 delta_qkv[DQKV] = {}; // [Q | K | V]
+    FP32 delta_z[DO] = {};     // [VH,VD]
+    FP32 delta_a[VH] = {};     // [VH]
+    FP32 delta_b[VH] = {};     // [VH]
+    FP32 delta_q[DO] = {};     // [VH,KD]
+    FP32 delta_k[DO] = {};     // [VH,KD]
+    FP32 delta_output[DO] = {};// [VH,VD]
 
     // Attention。
-    std::vector<FP32> query_and_gate = std::vector<FP32>(2 * AS); // [AH,2,AD]
-    std::vector<FP32> query = std::vector<FP32>(AS);              // [AH,AD]
-    std::vector<FP32> attention_gate = std::vector<FP32>(AS);     // [AH,AD]
-    std::vector<FP32> key = std::vector<FP32>(KV_WIDTH);          // [KVH,AD]
-    std::vector<FP32> value = std::vector<FP32>(KV_WIDTH);        // [KVH,AD]
-    std::vector<FP32> attention_output = std::vector<FP32>(AS);   // [AH,AD]
-    std::vector<FP32> attention_score; // [context_size]
-
-    explicit Work(int context_size) : attention_score(context_size) {}
+    FP32 query_and_gate[2 * AS] = {}; // [AH,2,AD]
+    FP32 query[AS] = {};              // [AH,AD]
+    FP32 attention_gate[AS] = {};     // [AH,AD]
+    FP32 key[KV_WIDTH] = {};          // [KVH,AD]
+    FP32 value[KV_WIDTH] = {};        // [KVH,AD]
+    FP32 attention_output[AS] = {};   // [AH,AD]
 };
 
 // DeltaNet 卷积是逐通道的 causal depthwise convolution；state 只保存 CK-1 个过去输入。
 // weight 的布局是 [channel, CK]，当前输入乘最后一个权重；history 从最旧到最新。
-void conv_step(FP32* x, const BF16* weight, std::vector<FP32>& history) {
+void conv_step(FP32* x, const BF16* weight, FP32* history) {
     for (int channel = 0; channel < DQKV; ++channel) {
-        FP32* past = history.data() + static_cast<size_t>(channel) * (CK - 1);
+        FP32* past = history + static_cast<size_t>(channel) * (CK - 1);
         FP32 sum = x[channel] * f32(weight[channel * CK + CK - 1]);
         for (int i = 0; i < CK - 1; ++i) sum += past[i] * f32(weight[channel * CK + i]);
         for (int i = 0; i < CK - 2; ++i) past[i] = past[i + 1];
@@ -343,25 +337,25 @@ void delta_rule(const FP32* q, const FP32* k, const FP32* v, FP32 log_decay, FP3
 
 // 完整 DeltaNet mixer：input[H] -> out[H]。
 // input -> qkv[DQKV],z[DO],a/b[VH]；各 head 更新 S[KD,VD]，拼接 [DO] 后投影回 [H]。
-void deltanet(const DeltaWeights& weights, std::vector<FP32>& conv_history,
-              std::vector<FP32>& memory, const FP32* input, Work& work, FP32* out) {
+void deltanet(const DeltaWeights& weights, FP32* conv_history,
+              FP32* memory, const FP32* input, Work& work, FP32* out) {
     // 输入已经过 layer input RMSNorm。四个投影都从同一个 normalized hidden 得到。
-    mv(weights.qkv, input, work.delta_qkv.data());
-    mv(weights.z, input, work.delta_z.data());
-    mv(weights.a, input, work.delta_a.data());
-    mv(weights.b, input, work.delta_b.data());
+    mv(weights.qkv, input, work.delta_qkv);
+    mv(weights.z, input, work.delta_z);
+    mv(weights.a, input, work.delta_a);
+    mv(weights.b, input, work.delta_b);
     // 只有拼接 Q/K/V 经过 causal depthwise conv；z、a、b 不经过它。
-    conv_step(work.delta_qkv.data(), weights.conv, conv_history);
+    conv_step(work.delta_qkv, weights.conv, conv_history);
 
     // 固定布局拆包，不创建 view 类：small_q[KH,KD]、small_k[KH,KD]、value[VH,VD]。
-    const FP32* small_q = work.delta_qkv.data();
+    const FP32* small_q = work.delta_qkv;
     const FP32* small_k = small_q + DQK;
     const FP32* value = small_k + DQK;
     for (int head = 0; head < VH; ++head) {
         // 27B 的 48 个 value head 会复用 16 个 small Q/K head；0.8B 此处是 1:1。
         const int qk_head = head / (VH / KH);
-        FP32* q = work.delta_q.data() + head * KD;
-        FP32* k = work.delta_k.data() + head * KD;
+        FP32* q = work.delta_q + head * KD;
+        FP32* k = work.delta_k + head * KD;
         std::memcpy(q, small_q + qk_head * KD, KD * sizeof(FP32));
         std::memcpy(k, small_k + qk_head * KD, KD * sizeof(FP32));
         l2(q, KD);
@@ -373,53 +367,53 @@ void deltanet(const DeltaWeights& weights, std::vector<FP32>& conv_history,
         const FP32 log_decay = -std::exp(weights.alog[head])
                                * softplus(work.delta_a[head] + f32(weights.dt[head]));
         delta_rule(q, k, value + head * VD, log_decay, beta,
-                   memory.data() + static_cast<size_t>(head) * KD * VD,
-                   work.delta_output.data() + head * VD);
+                   memory + static_cast<size_t>(head) * KD * VD,
+                   work.delta_output + head * VD);
         // 每个 value head 的 readout 在各自 VD 段内 norm/gate，之后再拼接为 [DO]。
-        gated_rms(work.delta_output.data() + head * VD, weights.norm,
-                  work.delta_z.data() + head * VD, work.delta_output.data() + head * VD);
+        gated_rms(work.delta_output + head * VD, weights.norm,
+                  work.delta_z + head * VD, work.delta_output + head * VD);
     }
-    mv(weights.out, work.delta_output.data(), out);
+    mv(weights.out, work.delta_output, out);
 }
 
 // 完整 GQA mixer：input[H] -> out[H]，并 append 当前 K/V。
 // Q[AH,AD] @ K_cache[T,KVH,AD] -> score[AH,T]，加权 V 后拼接 [AS] 并投影回 [H]。
-void attention(const AttentionWeights& weights, std::vector<FP32>& key_cache,
-               std::vector<FP32>& value_cache, int position, const FP32* input,
+void attention(const AttentionWeights& weights, FP32* key_cache,
+               FP32* value_cache, FP32* score, int position, const FP32* input,
                Work& work, FP32* out) {
     // q_proj 输出 [Q, gate] 两个 [AS] 向量；k/v 分别是 GQA 的 [KVH,AD] 向量。
-    mv(weights.q, input, work.query_and_gate.data());
-    mv(weights.k, input, work.key.data());
-    mv(weights.v, input, work.value.data());
+    mv(weights.q, input, work.query_and_gate);
+    mv(weights.k, input, work.key);
+    mv(weights.v, input, work.value);
     for (int head = 0; head < AH; ++head) {
         // QNorm 和 RoPE 是逐 query head 操作；gate 不 norm、不旋转，留到 attention
         // readout 后才做 sigmoid 门控。
-        std::memcpy(work.query.data() + head * AD,
-                    work.query_and_gate.data() + head * 2 * AD, AD * sizeof(FP32));
-        std::memcpy(work.attention_gate.data() + head * AD,
-                    work.query_and_gate.data() + head * 2 * AD + AD, AD * sizeof(FP32));
-        rms(work.query.data() + head * AD, weights.qnorm, AD, work.query.data() + head * AD);
-        rope(work.query.data() + head * AD, position);
+        std::memcpy(work.query + head * AD,
+                    work.query_and_gate + head * 2 * AD, AD * sizeof(FP32));
+        std::memcpy(work.attention_gate + head * AD,
+                    work.query_and_gate + head * 2 * AD + AD, AD * sizeof(FP32));
+        rms(work.query + head * AD, weights.qnorm, AD, work.query + head * AD);
+        rope(work.query + head * AD, position);
     }
     for (int head = 0; head < KVH; ++head) {
         // K 与 Q 使用同一 RoPE position；V 不依赖位置，因此不做 RoPE。
-        rms(work.key.data() + head * AD, weights.knorm, AD, work.key.data() + head * AD);
-        rope(work.key.data() + head * AD, position);
+        rms(work.key + head * AD, weights.knorm, AD, work.key + head * AD);
+        rope(work.key + head * AD, position);
     }
-    // 先 append 再读，等价于 causal attention 允许 token t 读取 0..t（包括自己）。
-    key_cache.insert(key_cache.end(), work.key.begin(), work.key.end());
-    value_cache.insert(value_cache.end(), work.value.begin(), work.value.end());
-    const int tokens = static_cast<int>(key_cache.size() / KV_WIDTH);
+    // 先写当前 K/V 再读 0..position，因此 token t 能读取过去和自己。
+    const size_t cache_offset = static_cast<size_t>(position) * KV_WIDTH;
+    std::memcpy(key_cache + cache_offset, work.key, sizeof(work.key));
+    std::memcpy(value_cache + cache_offset, work.value, sizeof(work.value));
+    const int tokens = position + 1;
     const FP32 scale = 1.0f / std::sqrt(static_cast<FP32>(AD));
-    FP32* score = work.attention_score.data();  // [T]，逐 head 复用，不在 forward 中分配。
 
     for (int head = 0; head < AH; ++head) {
         // GQA：8 个 Q head 按 4:1 分为两组，每组共享一个 K/V head。
         const int kv_head = head / (AH / KVH);
         FP32 maximum = -std::numeric_limits<FP32>::infinity();
         for (int token = 0; token < tokens; ++token) {
-            const FP32* key = key_cache.data() + (static_cast<size_t>(token) * KVH + kv_head) * AD;
-            score[token] = dot_f32(work.query.data() + head * AD, key, AD) * scale;
+            const FP32* key = key_cache + (static_cast<size_t>(token) * KVH + kv_head) * AD;
+            score[token] = dot_f32(work.query + head * AD, key, AD) * scale;
             maximum = std::max(maximum, score[token]);
         }
         // stable softmax：同时复用 score 数组存 exp(score-maximum)。
@@ -428,11 +422,11 @@ void attention(const AttentionWeights& weights, std::vector<FP32>& key_cache,
             score[token] = std::exp(score[token] - maximum);
             total += score[token];
         }
-        FP32* result = work.attention_output.data() + head * AD;
+        FP32* result = work.attention_output + head * AD;
         std::fill(result, result + AD, 0.0f);
         for (int token = 0; token < tokens; ++token) {
             const FP32 probability = score[token] / total;
-            const FP32* value = value_cache.data() + (static_cast<size_t>(token) * KVH + kv_head) * AD;
+            const FP32* value = value_cache + (static_cast<size_t>(token) * KVH + kv_head) * AD;
             for (int i = 0; i < AD; ++i) result[i] += probability * value[i];
         }
     }
@@ -440,52 +434,55 @@ void attention(const AttentionWeights& weights, std::vector<FP32>& key_cache,
     for (int i = 0; i < AS; ++i) {
         work.attention_output[i] *= sigmoid(work.attention_gate[i]);
     }
-    mv(weights.out, work.attention_output.data(), out);
+    mv(weights.out, work.attention_output, out);
 }
 
 // SwiGLU FFN：input[H] -> gate/up[I] -> mixed[I] -> out[H]。
 void ffn(const Layer& layer, const FP32* input, Work& work, FP32* out) {
     // SwiGLU：gate/up 各投影到 [I]，逐元素 SiLU(gate)*up，再 down_proj 回 [H]。
-    mv(layer.gate, input, work.ffn_gate.data());
-    mv(layer.up, input, work.ffn_up.data());
+    mv(layer.gate, input, work.ffn_gate);
+    mv(layer.up, input, work.ffn_up);
     for (int i = 0; i < I; ++i) {
         work.ffn_gate[i] = silu(work.ffn_gate[i]) * work.ffn_up[i];
     }
-    mv(layer.down, work.ffn_gate.data(), out);
+    mv(layer.down, work.ffn_gate, out);
 }
 
 // 这是完整的单 token forward。调用一次只处理一个 token；
 // prompt 的 prefill 只是对 prompt ids 连续调用它，decode 则在每次 argmax 后再调用。
 void forward(const Model& model, State& state, int token, Work& work,
              bool compute_logits = true) {
-    if (state.position >= state.capacity) die("session context is full");
+    assert(token >= 0 && token < V);
+    assert(state.position >= 0 && state.position < state.capacity);
     LOG_DEBUG("forward started token=%d position=%d", token, state.position);
-    embed(model.embedding, token, work.hidden.data());  // token id -> hidden[H]。
+    embed(model.embedding, token, work.hidden);  // token id -> hidden[H]。
     for (int index = 0; index < N; ++index) {
         const Layer& layer = model.layer[index];
         // hidden[H] -> RMSNorm -> mixer -> branch[H] -> residual -> hidden[H]。
-        rms(work.hidden.data(), layer.input_norm, H, work.normalized.data());
+        rms(work.hidden, layer.input_norm, H, work.normalized);
         if (layer.uses_deltanet) {
-            deltanet(layer.delta, state.conv_history[index], state.delta_memory[index],
-                     work.normalized.data(), work, work.branch.data());
+            deltanet(layer.delta, state.conv_history[index].data(),
+                     state.delta_memory[index].data(),
+                     work.normalized, work, work.branch);
         } else {
-            attention(layer.attention, state.key_cache[index], state.value_cache[index],
-                      state.position, work.normalized.data(), work, work.branch.data());
+            attention(layer.attention, state.key_cache[index].get(),
+                      state.value_cache[index].get(), state.attention_score.data(),
+                      state.position, work.normalized, work, work.branch);
         }
-        residual_add(work.hidden.data(), work.branch.data(), work.hidden.data());
+        residual_add(work.hidden, work.branch, work.hidden);
 
         // hidden[H] -> RMSNorm -> FFN -> branch[H] -> residual -> hidden[H]。
-        rms(work.hidden.data(), layer.post_norm, H, work.normalized.data());
-        ffn(layer, work.normalized.data(), work, work.branch.data());
-        residual_add(work.hidden.data(), work.branch.data(), work.hidden.data());
+        rms(work.hidden, layer.post_norm, H, work.normalized);
+        ffn(layer, work.normalized, work, work.branch);
+        residual_add(work.hidden, work.branch, work.hidden);
     }
     if (compute_logits) {
-        rms(work.hidden.data(), model.final_norm, H, work.normalized.data());
+        rms(work.hidden, model.final_norm, H, work.normalized);
         LOG_DEBUG("final norm completed");
         // lm_head：为词表的每一个候选 token 各算一个 logit。这里 W 直接重用 model.embedding：
         // logits[v] = dot(final_hidden, embedding[v])。这叫 tied embedding，避免再存一份 [V,H]
         // 输出矩阵；它与开头 embed() 的“按 token id 取同一张表的一行”正好相对。
-        mv({model.embedding, V, H}, work.normalized.data(), work.logits.data());
+        mv({model.embedding, V, H}, work.normalized, work.logits);
         LOG_DEBUG("lm head completed logits=%d", V);
     }
     ++state.position;
@@ -499,29 +496,37 @@ struct File {
     size_t size = 0;
     const uint8_t* data = nullptr;
 
-    explicit File(const char* path) {
-        try {
-            fd = open(path, O_RDONLY);
-            if (fd < 0) die("cannot open model.bin");
-            struct stat info {};
-            if (fstat(fd, &info) || info.st_size < 16) die("bad model.bin");
-            size = static_cast<size_t>(info.st_size);
-            data = static_cast<const uint8_t*>(mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0));
-            if (data == MAP_FAILED) die("mmap model.bin failed");
-            if (std::memcmp(data, "Q35COUR\0", 8) != 0) {
-                die("wrong model.bin magic; run python -m scripts.pack_weights");
-            }
-            uint32_t version = 0, reserved = 0;
-            std::memcpy(&version, data + 8, sizeof(version));
-            std::memcpy(&reserved, data + 12, sizeof(reserved));
-            if (version != MODEL_FORMAT_VERSION || reserved != 0) {
-                die("unsupported model.bin version");
-            }
-        } catch (...) {
-            release();
-            throw;
+    File() = default;
+
+    bool map(const char* path, const char** error) {
+        assert(path && error);
+        fd = open(path, O_RDONLY);
+        if (fd < 0) return fail(error, "cannot open model.bin");
+
+        struct stat info {};
+        if (fstat(fd, &info) || info.st_size < 16) {
+            return fail(error, "bad model.bin");
         }
+        size = static_cast<size_t>(info.st_size);
+        data = static_cast<const uint8_t*>(
+            mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0));
+        if (data == MAP_FAILED) {
+            data = nullptr;
+            return fail(error, "mmap model.bin failed");
+        }
+        if (std::memcmp(data, "Q35COUR\0", 8) != 0) {
+            return fail(error,
+                        "wrong model.bin magic; run python -m scripts.pack_weights");
+        }
+        uint32_t version = 0, reserved = 0;
+        std::memcpy(&version, data + 8, sizeof(version));
+        std::memcpy(&reserved, data + 12, sizeof(reserved));
+        if (version != MODEL_FORMAT_VERSION || reserved != 0) {
+            return fail(error, "unsupported model.bin version");
+        }
+        return true;
     }
+
     ~File() {
         release();
     }
@@ -533,37 +538,69 @@ struct File {
         size = 0;
     }
     File(const File&) = delete;
+
+private:
+    bool fail(const char** error, const char* message) {
+        *error = message;
+        release();
+        return false;
+    }
 };
 
 struct Reader {
     const uint8_t* begin;
     const uint8_t* cursor;
     const uint8_t* end;
+    const char* error = nullptr;
 
     explicit Reader(const File& file)
         : begin(file.data), cursor(file.data + 16), end(file.data + file.size) {}
 
     template <typename T> const T* take(size_t count) {
+        if (error) return nullptr;
         const size_t offset = static_cast<size_t>(cursor - begin);
-        cursor += (64 - offset % 64) % 64;
+        const size_t padding = (64 - offset % 64) % 64;
+        if (padding > static_cast<size_t>(end - cursor)) {
+            error = "truncated model.bin";
+            return nullptr;
+        }
+        cursor += padding;
+        if (count > std::numeric_limits<size_t>::max() / sizeof(T)) {
+            error = "model.bin tensor size overflow";
+            return nullptr;
+        }
         const size_t bytes = count * sizeof(T);
-        if (cursor > end || bytes > static_cast<size_t>(end - cursor)) die("truncated model.bin");
+        if (bytes > static_cast<size_t>(end - cursor)) {
+            error = "truncated model.bin";
+            return nullptr;
+        }
         const T* result = reinterpret_cast<const T*>(cursor);
         cursor += bytes;
         return result;
     }
-    void finish() const {
-        if (cursor != end) die("model.bin size does not match Qwen3.5-0.8B schema");
+
+    bool finish(const char** output_error) const {
+        assert(output_error);
+        if (error) {
+            *output_error = error;
+            return false;
+        }
+        if (cursor != end) {
+            *output_error = "model.bin size does not match Qwen3.5-0.8B schema";
+            return false;
+        }
+        return true;
     }
 };
 
 // LoadedModel 只负责生命周期：File 拥有 mmap，Model 中的权重指针指向这块 mmap。
 struct LoadedModel {
     File file;
-    Reader reader;
     Model model;
 
-    explicit LoadedModel(const char* path) : file(path), reader(file) {
+    bool load(const char* path, const char** error) {
+        if (!file.map(path, error)) return false;
+        Reader reader(file);
         model.embedding = reader.take<BF16>(static_cast<size_t>(V) * H);
         model.final_norm = reader.take<BF16>(H);
         for (int index = 0; index < N; ++index) {
@@ -598,7 +635,7 @@ struct LoadedModel {
             layer.down = {reader.take<BF16>(static_cast<size_t>(H) * I), H, I};
         }
         // 320 个 tensor 必须恰好吃完文件，拒绝截断和其他 schema 的额外 payload。
-        reader.finish();
+        return reader.finish(error);
     }
 };
 
@@ -612,13 +649,11 @@ struct Checkpoint {
     int position = 0;
     std::array<std::vector<qwen35::FP32>, qwen35::N> conv_history;
     std::array<std::vector<qwen35::FP32>, qwen35::N> delta_memory;
-    std::vector<qwen35::FP32> logits;
+    qwen35::FP32 logits[qwen35::V] = {};
 };
 
 struct Model {
     qwen35::LoadedModel loaded;
-
-    explicit Model(const char* path) : loaded(path) {}
 };
 
 struct State {
@@ -626,11 +661,19 @@ struct State {
     qwen35::Work work;
     Checkpoint checkpoint;
 
-    explicit State(int context_size) : live(context_size), work(context_size) {}
+    explicit State(int context_size) : live(context_size) {}
 };
 
-Model* model_create(const char* path) {
-    return new Model(path);
+Model* model_create(const char* path, char* err, size_t errlen) {
+    assert(path);
+    std::unique_ptr<Model> model(new Model());
+    const char* message = nullptr;
+    if (!model->loaded.load(path, &message)) {
+        if (err && errlen > 0) std::snprintf(err, errlen, "%s", message);
+        return nullptr;
+    }
+    if (err && errlen > 0) err[0] = '\0';
+    return model.release();
 }
 
 void model_destroy(Model* model) {
@@ -638,7 +681,8 @@ void model_destroy(Model* model) {
 }
 
 State* state_create(Model* model, int context_size) {
-    if (!model) throw std::runtime_error("backend model is null");
+    assert(model);
+    assert(context_size > 0 && context_size <= qwen35::MAX_CONTEXT);
     return new State(context_size);
 }
 
@@ -647,18 +691,18 @@ void state_destroy(State* state) {
 }
 
 void state_reset(State* state) {
-    if (!state) throw std::runtime_error("backend state is null");
+    assert(state);
     state->live.reset();
 }
 
 void state_forward(Model* model, State* state, int token, bool compute_logits) {
-    if (!model || !state) throw std::runtime_error("backend model/state is null");
+    assert(model && state);
     qwen35::forward(model->loaded.model, state->live, token, state->work,
                     compute_logits);
 }
 
 void state_checkpoint_save(State* state) {
-    if (!state) throw std::runtime_error("backend state is null");
+    assert(state);
     Checkpoint& checkpoint = state->checkpoint;
     checkpoint.position = state->live.position;
     for (int layer = 0; layer < qwen35::N; ++layer) {
@@ -666,14 +710,15 @@ void state_checkpoint_save(State* state) {
         checkpoint.conv_history[layer] = state->live.conv_history[layer];
         checkpoint.delta_memory[layer] = state->live.delta_memory[layer];
     }
-    checkpoint.logits = state->work.logits;
+    std::memcpy(checkpoint.logits, state->work.logits,
+                sizeof(checkpoint.logits));
 }
 
 void state_checkpoint_restore(State* state) {
-    if (!state) throw std::runtime_error("backend state is null");
+    assert(state);
     Checkpoint& checkpoint = state->checkpoint;
-    const size_t kv_elements =
-        static_cast<size_t>(checkpoint.position) * qwen35::KV_WIDTH;
+    assert(checkpoint.position >= 0 &&
+           checkpoint.position <= state->live.capacity);
     for (int layer = 0; layer < qwen35::N; ++layer) {
         if (layer % 4 != 3) {
             std::copy(checkpoint.conv_history[layer].begin(),
@@ -684,28 +729,25 @@ void state_checkpoint_restore(State* state) {
                       state->live.delta_memory[layer].begin());
             continue;
         }
-        if (state->live.key_cache[layer].size() < kv_elements ||
-            state->live.value_cache[layer].size() < kv_elements) {
-            throw std::runtime_error("attention cache is shorter than checkpoint");
-        }
-        state->live.key_cache[layer].resize(kv_elements);
-        state->live.value_cache[layer].resize(kv_elements);
+        assert(state->live.key_cache[layer]);
+        assert(state->live.value_cache[layer]);
     }
     state->live.position = checkpoint.position;
-    std::copy(checkpoint.logits.begin(), checkpoint.logits.end(),
-              state->work.logits.begin());
+    std::memcpy(state->work.logits, checkpoint.logits,
+                sizeof(checkpoint.logits));
 }
 
 int state_argmax(const State* state) {
     if (!state) return -1;
     return static_cast<int>(
-        std::max_element(state->work.logits.begin(), state->work.logits.end()) -
-        state->work.logits.begin());
+        std::max_element(state->work.logits,
+                         state->work.logits + qwen35::V) -
+        state->work.logits);
 }
 
 void state_copy_logits(const State* state, float* output) {
-    if (!state || !output) throw std::runtime_error("backend state/output is null");
-    std::memcpy(output, state->work.logits.data(), sizeof(float) * qwen35::V);
+    assert(state && output);
+    std::memcpy(output, state->work.logits, sizeof(float) * qwen35::V);
 }
 
 int vocab_size() {

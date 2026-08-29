@@ -10,7 +10,7 @@ namespace q35_backend {
 struct Model;
 struct State;
 
-Model* model_create(const char* path);
+Model* model_create(const char* path, char* err, size_t errlen);
 void model_destroy(Model* model);
 
 State* state_create(Model* model, int context_size);

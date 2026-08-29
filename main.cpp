@@ -38,7 +38,6 @@
 #include <iostream>
 #include <memory>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -385,16 +384,18 @@ void handle(int fd, q35_session_manager* manager, int context) {
     lease.keep = true;
 }
 
-Fd unix_socket(const std::string& path) {
+int unix_socket(const std::string& path, std::string& error) {
     sockaddr_un address{};
     if (path.empty() || path.size() >= sizeof(address.sun_path)) {
-        throw std::runtime_error("Unix socket path is empty or too long");
+        error = "Unix socket path is empty or too long";
+        return -1;
     }
-    Fd socket(::socket(AF_UNIX, SOCK_STREAM, 0));
-    if (socket.value < 0) {
-        throw std::runtime_error(std::string("socket: ") + std::strerror(errno));
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        error = std::string("socket: ") + std::strerror(errno);
+        return -1;
     }
-    return socket;
+    return fd;
 }
 
 sockaddr_un unix_address(const std::string& path) {
@@ -404,13 +405,14 @@ sockaddr_un unix_address(const std::string& path) {
     return address;
 }
 
-int run_server(const ServerOptions& options) {
-    char error[ERROR_SIZE]{};
+int run_server(const ServerOptions& options, std::string& error) {
+    char native_error[ERROR_SIZE]{};
     q35_engine* raw_engine = nullptr;
     q35_engine_options engine_options{options.model_path.c_str(), options.mock};
     if (q35_engine_create(&engine_options, &raw_engine,
-                          error, sizeof(error)) != Q35_OK) {
-        throw std::runtime_error(error);
+                          native_error, sizeof(native_error)) != Q35_OK) {
+        error = native_error;
+        return 1;
     }
     std::unique_ptr<q35_engine, decltype(&q35_engine_destroy)>
         engine(raw_engine, q35_engine_destroy);
@@ -418,8 +420,9 @@ int run_server(const ServerOptions& options) {
     q35_session_manager* raw_manager = nullptr;
     if (q35_session_manager_create(
             engine.get(), options.parallel, options.context, &raw_manager,
-            error, sizeof(error)) != Q35_OK) {
-        throw std::runtime_error(error);
+            native_error, sizeof(native_error)) != Q35_OK) {
+        error = native_error;
+        return 1;
     }
     std::unique_ptr<q35_session_manager, decltype(&q35_session_manager_destroy)>
         manager(raw_manager, q35_session_manager_destroy);
@@ -427,23 +430,29 @@ int run_server(const ServerOptions& options) {
     struct stat existing{};
     if (::lstat(options.socket_path.c_str(), &existing) == 0) {
         if (!S_ISSOCK(existing.st_mode)) {
-            throw std::runtime_error("socket path exists and is not a socket");
+            error = "socket path exists and is not a socket";
+            return 1;
         }
         if (::unlink(options.socket_path.c_str()) != 0) {
-            throw std::runtime_error(std::string("unlink: ") + std::strerror(errno));
+            error = std::string("unlink: ") + std::strerror(errno);
+            return 1;
         }
     } else if (errno != ENOENT) {
-        throw std::runtime_error(std::string("lstat: ") + std::strerror(errno));
+        error = std::string("lstat: ") + std::strerror(errno);
+        return 1;
     }
 
-    Fd listener = unix_socket(options.socket_path);
+    Fd listener(unix_socket(options.socket_path, error));
+    if (listener.value < 0) return 1;
     const sockaddr_un address = unix_address(options.socket_path);
     if (::bind(listener.value, reinterpret_cast<const sockaddr*>(&address),
                sizeof(address)) != 0) {
-        throw std::runtime_error(std::string("bind: ") + std::strerror(errno));
+        error = std::string("bind: ") + std::strerror(errno);
+        return 1;
     }
     if (::listen(listener.value, std::max(16, options.parallel * 4)) != 0) {
-        throw std::runtime_error(std::string("listen: ") + std::strerror(errno));
+        error = std::string("listen: ") + std::strerror(errno);
+        return 1;
     }
     std::fprintf(stderr, "listening on %s\n", options.socket_path.c_str());
 
@@ -451,29 +460,36 @@ int run_server(const ServerOptions& options) {
         const int connection = ::accept(listener.value, nullptr, nullptr);
         if (connection < 0) {
             if (errno == EINTR) continue;
-            throw std::runtime_error(std::string("accept: ") + std::strerror(errno));
+            error = std::string("accept: ") + std::strerror(errno);
+            return 1;
         }
         std::thread(handle, connection, manager.get(), options.context).detach();
     }
 }
 
-int run_client(const ClientOptions& options) {
+int run_client(const ClientOptions& options, std::string& error) {
     std::vector<int> prompt;
     std::string word;
     while (std::cin >> word) {
         int token = -1;
         if (!integer(word, token) || token < 0) {
-            throw std::runtime_error("stdin contains an invalid token ID");
+            error = "stdin contains an invalid token ID";
+            return 1;
         }
         prompt.push_back(token);
     }
-    if (prompt.empty()) throw std::runtime_error("stdin contains no token IDs");
+    if (prompt.empty()) {
+        error = "stdin contains no token IDs";
+        return 1;
+    }
 
-    Fd socket = unix_socket(options.socket_path);
+    Fd socket(unix_socket(options.socket_path, error));
+    if (socket.value < 0) return 1;
     const sockaddr_un address = unix_address(options.socket_path);
     if (::connect(socket.value, reinterpret_cast<const sockaddr*>(&address),
                   sizeof(address)) != 0) {
-        throw std::runtime_error(std::string("connect: ") + std::strerror(errno));
+        error = std::string("connect: ") + std::strerror(errno);
+        return 1;
     }
 
     std::ostringstream request;
@@ -485,71 +501,116 @@ int run_client(const ClientOptions& options) {
     }
     request << "\n\n";
     if (!send_all(socket.value, request.str())) {
-        throw std::runtime_error("cannot send request");
+        error = "cannot send request";
+        return 1;
     }
 
     Reader reader(socket.value);
     std::string line;
     int status = 0;
-    if (!reader.line(line)) throw std::runtime_error("incomplete response");
+    if (!reader.line(line)) {
+        error = "incomplete response";
+        return 1;
+    }
     std::istringstream first(line);
     if (!(first >> status) || status < 100 || status > 599) {
-        throw std::runtime_error("invalid response status");
+        error = "invalid response status";
+        return 1;
     }
     std::string message;
     while (reader.line(line) && !line.empty()) {
         if (line.compare(0, 9, "message: ") == 0) message = line.substr(9);
     }
-    if (!line.empty()) throw std::runtime_error("incomplete response parameters");
+    if (!line.empty()) {
+        error = "incomplete response parameters";
+        return 1;
+    }
     if (status != 200) {
-        throw std::runtime_error(message.empty() ? "server error" : message);
+        error = message.empty() ? "server error" : message;
+        return 1;
     }
     while (reader.line(line)) {
         if (line.empty()) return 0;
         std::cout << line << '\n';
         std::cout.flush();
     }
-    throw std::runtime_error("incomplete response");
+    error = "incomplete response";
+    return 1;
 }
 
-std::string option_value(int& index, int argc, char** argv) {
-    if (++index >= argc) throw std::runtime_error("missing option value");
-    return argv[index];
+bool option_value(int& index, int argc, char** argv,
+                  std::string& value, std::string& error) {
+    if (++index >= argc) {
+        error = "missing option value";
+        return false;
+    }
+    value = argv[index];
+    return true;
 }
 
-ServerOptions server_options(int argc, char** argv) {
-    ServerOptions options;
+bool server_options(int argc, char** argv, ServerOptions& options,
+                    std::string& error) {
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
-        if (argument == "-l") options.socket_path = option_value(index, argc, argv);
-        else if (argument == "-m") options.model_path = option_value(index, argc, argv);
-        else if (argument == "--parallel") {
-            if (!integer(option_value(index, argc, argv), options.parallel) ||
-                options.parallel <= 0) throw std::runtime_error("invalid --parallel");
+        if (argument == "--mock") {
+            options.mock = true;
+            continue;
+        }
+        if (argument != "-l" && argument != "-m" &&
+            argument != "--parallel" && argument != "--context") {
+            error = "unknown option: " + argument;
+            return false;
+        }
+        std::string value;
+        if (!option_value(index, argc, argv, value, error)) return false;
+        if (argument == "-l") {
+            options.socket_path = value;
+        } else if (argument == "-m") {
+            options.model_path = value;
+        } else if (argument == "--parallel") {
+            if (!integer(value, options.parallel) || options.parallel <= 0) {
+                error = "invalid --parallel";
+                return false;
+            }
         } else if (argument == "--context") {
-            if (!integer(option_value(index, argc, argv), options.context) ||
-                options.context <= 0) throw std::runtime_error("invalid --context");
-        } else if (argument == "--mock") options.mock = true;
-        else throw std::runtime_error("unknown option: " + argument);
+            if (!integer(value, options.context) || options.context <= 0) {
+                error = "invalid --context";
+                return false;
+            }
+        }
     }
-    if (options.socket_path.empty()) throw std::runtime_error("-l is required");
-    if (options.model_path.empty()) throw std::runtime_error("-m is required");
-    return options;
+    if (options.socket_path.empty()) {
+        error = "-l is required";
+        return false;
+    }
+    if (options.model_path.empty()) {
+        error = "-m is required";
+        return false;
+    }
+    return true;
 }
 
-ClientOptions client_options(int argc, char** argv) {
-    if (argc < 2) throw std::runtime_error("socket path is required");
-    ClientOptions options;
+bool client_options(int argc, char** argv, ClientOptions& options,
+                    std::string& error) {
+    if (argc < 2) {
+        error = "socket path is required";
+        return false;
+    }
     options.socket_path = argv[1];
     for (int index = 2; index < argc; ++index) {
         const std::string argument = argv[index];
-        const std::string value = option_value(index, argc, argv);
-        if (argument == "-n") {
-            if (!integer(value, options.max_tokens) || options.max_tokens <= 0)
-                throw std::runtime_error("invalid -n");
-        } else throw std::runtime_error("unknown option: " + argument);
+        if (argument != "-n") {
+            error = "unknown option: " + argument;
+            return false;
+        }
+        std::string value;
+        if (!option_value(index, argc, argv, value, error)) return false;
+        if (!integer(value, options.max_tokens) || options.max_tokens <= 0) {
+            error = "invalid -n";
+            return false;
+        }
     }
-    return options;
+    return true;
 }
 
 void usage(const char* program) {
@@ -562,17 +623,23 @@ void usage(const char* program) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    try {
-        if (argc < 2) {
-            usage(argv[0]);
-            return 2;
-        }
-        if (std::string(argv[1]) == "-l") {
-            return run_server(server_options(argc, argv));
-        }
-        return run_client(client_options(argc, argv));
-    } catch (const std::exception& error) {
-        std::fprintf(stderr, "qwen35: %s\n", error.what());
-        return 1;
+    if (argc < 2) {
+        usage(argv[0]);
+        return 2;
     }
+    std::string error;
+    int result = 1;
+    if (std::string(argv[1]) == "-l") {
+        ServerOptions options;
+        if (server_options(argc, argv, options, error)) {
+            result = run_server(options, error);
+        }
+    } else {
+        ClientOptions options;
+        if (client_options(argc, argv, options, error)) {
+            result = run_client(options, error);
+        }
+    }
+    if (result != 0) std::fprintf(stderr, "qwen35: %s\n", error.c_str());
+    return result;
 }

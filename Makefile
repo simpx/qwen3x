@@ -16,7 +16,8 @@ REFERENCE ?= reference/build/cpu
 REFERENCE_DTYPE ?= float32
 REFERENCE_CACHE ?= static
 
-CXXFLAGS ?= -O3 -std=c++17 -Wall -Wextra -Wpedantic -march=native
+CXXFLAGS ?= -O3 -std=c++17 -fno-exceptions -fno-rtti \
+	-Wall -Wextra -Wpedantic -march=native
 
 .PHONY: all sync sync-prod weights unit-test eval-test reference-generate test run chat eval eval-smoke reference-serve eval-reference eval-compare clean
 
