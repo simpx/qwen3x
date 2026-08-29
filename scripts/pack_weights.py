@@ -23,7 +23,7 @@ import struct
 from pathlib import Path
 
 ALIGNMENT = 64  # 每个 tensor 起点向上对齐，和 C++ Reader.align() 一一对应。
-MAGIC = b"Q35COUR\0"  # v1 格式与 from-scratch/09 共享。
+MAGIC = b"Q35MODL\0"  # 固定 Qwen3.5 model.bin 格式。
 FORMAT_VERSION = 1
 HEADER = struct.Struct("<8sII")  # magic、格式版本、保留字段，共固定 16 字节。
 

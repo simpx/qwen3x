@@ -33,7 +33,7 @@ def fixed_tokens(length: int) -> list[int]:
 FIXED_CASES = (
     ("length_1", fixed_tokens(1), [123, 456]),
     ("length_2", fixed_tokens(2), [123, 456]),
-    ("lesson_short", [248044, 198, 198], [198, 198]),
+    ("short_prompt", [248044, 198, 198], [198, 198]),
     ("prefix_then_decode", [10, 42, 99, 7], [123, 456]),
     ("length_16", fixed_tokens(16), [123, 456]),
     ("length_64", fixed_tokens(64), [123, 456]),

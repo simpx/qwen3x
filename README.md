@@ -2,16 +2,12 @@
 
 ## 目的
 
-这是一个用于教学和 PoC 的 Qwen 推理项目：
-
-1. `from-scratch/` 一步一步搭建基础的 Qwen3.5-0.8B，用来理解模型结构。
-2. 主目录实现一个极简、本地优先的 C++ 推理引擎，并直接提供
-   OpenAI-compatible HTTP API。
+这是一个用于 PoC 的极简、本地优先 Qwen C++ 推理引擎，并直接提供
+OpenAI-compatible HTTP API。
 
 ## 原则
 
-- `from-scratch/` 只展示模型结构和计算过程，不追求性能。
-- 主目录尽量用少量、直接的 C++ 文件完成完整数据流，只做不影响阅读的性能优化。
+- 尽量用少量、直接的 C++ 文件完成完整数据流，只做不影响阅读的性能优化。
 - 代码采用 C-oriented、exception-free C++17：模型计算使用数组、指针、循环和显式
   shape；C++ 主要用于 namespace、RAII、并发和动态存储，不使用异常、RTTI 或复杂模板。
 - 项目优先级是 `correct -> simple -> readable -> usable -> fast`。
@@ -82,7 +78,6 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ## 目录
 
 ```text
-from-scratch/       从基础数学到真实 0.8B forward 的教学代码
 engine.cpp          模型权重、State、Work 和完整 forward
 runtime.cpp         Session、sampling 和 cache 生命周期
 main.cpp            main、HTTP routes 和 completion 数据流
@@ -97,6 +92,11 @@ build/              下载的 checkpoint、生成的模型和编译产物
 ```
 
 开发阶段 `weights.bin` 和 `render.bin` 分开，方便调试；稳定后再考虑打包为一个模型文件。
+
+## 历史
+
+早期从基础数学逐步搭建 Qwen 的课程代码和学习笔记保存在 Git tag
+`from-scratch-v0`，不再属于当前主线。
 
 ## Roadmap
 

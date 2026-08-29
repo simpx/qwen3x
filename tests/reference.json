@@ -5,7 +5,7 @@
   "max_abs_error": 0.0005,
   "cases": [
     {
-      "name": "lesson_short",
+      "name": "short_prompt",
       "prefill_ids": [248044, 198, 198],
       "decode_ids": [198, 198],
       "next_token": 198,

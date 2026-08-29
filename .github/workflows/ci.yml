@@ -1,4 +1,4 @@
-name: Course checks
+name: C++ checks
 
 on:
   push:
@@ -8,13 +8,9 @@ permissions:
   contents: read
 
 jobs:
-  course:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build and run every lesson
-        working-directory: from-scratch
-        run: make test
-      - name: Build the real-model program and run its self-test
-        working-directory: .
+      - name: Build and run unit tests
         run: make test

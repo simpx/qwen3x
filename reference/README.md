@@ -3,7 +3,6 @@
 这一目录的任务只有一个：调用官方 Hugging Face checkpoint，产出带来源、可重复的
 **test vectors**。它不是另一套 C++ engine，也不是 production runtime。
 
-`from-scratch/` 已经用小尺寸解释了 RMSNorm、DeltaNet、attention、state 和完整 CPU forward；
 这里直接在真实 0.8B 上把“官方模型此时应输出什么”固定下来。参考服务、vectors dump、
 Engine 对比工具和完整 Python 环境都留在本目录，不污染实际 runtime。
 

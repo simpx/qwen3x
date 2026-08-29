@@ -1,9 +1,9 @@
 // engine.cpp -- Qwen3.5-0.8B production runtime 的 plain C++ CPU engine。
 //
-// 数学实现延续 from-scratch/09，并按正式 runtime 的需要加入可演进接口。这个文件只保留四块：
+// 这个文件直接展开固定 Qwen3.5-0.8B 的数值路径，只保留四块：
 //   1. Model：固定权重；
 //   2. State / Work：跨 token 历史与单次 forward 临时量；
-//   3. deltanet / attention / ffn：三个已经学过的 branch；
+//   3. deltanet / attention / ffn：三个模型 branch；
 //   4. forward：完整主干。
 // File/Reader 只负责 mmap 权重；文件末尾用 internal.h 的窄接口暴露 Model/State。
 // Session、token timeline、prefix、checkpoint 策略和 sampling 全部位于 runtime.cpp。
@@ -519,7 +519,7 @@ struct File {
             data = nullptr;
             return fail(error, "mmap model.bin failed");
         }
-        if (std::memcmp(data, "Q35COUR\0", 8) != 0) {
+        if (std::memcmp(data, "Q35MODL\0", 8) != 0) {
             return fail(error,
                         "wrong model.bin magic; run python -m scripts.pack_weights");
         }
