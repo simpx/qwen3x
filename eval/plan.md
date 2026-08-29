@@ -193,7 +193,7 @@ reference server 默认必须是 FP32；BF16 模式只能作为速度测试，�
 
 - `Qwen/Qwen3.5-0.8B` 的 Hugging Face revision/commit。
 - safetensors 和 packed bin 的 hash。
-- tokenizer 和 `chat_template.jinja` 的 hash。
+- tokenizer 和 `reference/chat_template.jinja` 的 hash。
 - Transformers、PyTorch 版本和 dtype。
 - C++ 编译器、编译参数和 CPU 指令集。
 

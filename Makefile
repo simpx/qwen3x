@@ -1,7 +1,8 @@
 CXX ?= c++
 UV ?= uv
-PYTHON ?= $(UV) run --locked python
-PYTHON_PROD ?= $(UV) run --locked --no-dev python
+SYSTEM_PYTHON ?= python3
+PYTHON ?= $(UV) run --project scripts --locked python
+PYTHON_PROD ?= $(UV) run --project scripts --locked --no-dev python
 TOKENIZER ?= models/Qwen3.5-0.8B
 BUILD ?= build
 PROGRAM ?= $(BUILD)/qwen35
@@ -36,10 +37,10 @@ PROGRAM_SRC := main.cpp engine.cpp runtime.cpp log.cpp parser.cpp render.cpp \
 all: $(PROGRAM)
 
 sync:
-	$(UV) sync --locked
+	$(UV) sync --project scripts --locked
 
 sync-prod:
-	$(UV) sync --locked --no-dev
+	$(UV) sync --project scripts --locked --no-dev
 
 $(PROGRAM): $(PROGRAM_SRC) qwen35.h internal.h render.h \
 	third_party/httplib/httplib.h third_party/nlohmann/json.hpp
@@ -103,7 +104,7 @@ render-test: $(RENDER_BIN) $(RENDER_DRIVER)
 	$(PYTHON) -m unittest -v tests.test_render
 
 http-test: $(PROGRAM) $(RENDER_BIN)
-	$(PYTHON) tests/test_http.py \
+	$(SYSTEM_PYTHON) tests/test_http.py \
 		--program "$(abspath $(PROGRAM))" --render "$(abspath $(RENDER_BIN))"
 
 unit-test: parser-test runtime-test
@@ -116,7 +117,7 @@ reference-generate:
 		MODEL="$(abspath $(TOKENIZER))" \
 		OUT="$(abspath $(REFERENCE))" \
 		DEVICE=cpu \
-		CHAT_TEMPLATE="$(abspath chat_template.jinja)"
+		CHAT_TEMPLATE="$(abspath reference/chat_template.jinja)"
 
 test: unit-test
 
@@ -141,7 +142,7 @@ eval-smoke:
 reference-serve:
 	$(MAKE) -C reference serve \
 		MODEL="$(abspath $(TOKENIZER))" \
-		CHAT_TEMPLATE="$(abspath chat_template.jinja)" \
+		CHAT_TEMPLATE="$(abspath reference/chat_template.jinja)" \
 		DEVICE=cuda DTYPE="$(REFERENCE_DTYPE)" CACHE="$(REFERENCE_CACHE)" \
 		MAX_CONTEXT="$(CONTEXT)" PORT=8002
 

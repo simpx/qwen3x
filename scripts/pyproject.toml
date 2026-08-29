@@ -2,9 +2,9 @@
 name = "qwen35-tools"
 version = "0.1.0"
 description = "Offline packing and verification tools for qwen3x"
-readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "jinja2>=3.1,<4",
     "tokenizers>=0.21,<1",
     "transformers>=5,<6",
 ]

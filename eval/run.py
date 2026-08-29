@@ -430,7 +430,9 @@ def main() -> None:
         "tokenizer": tokenizer_fingerprint(args.tokenizer),
         "backend_artifact": args.artifact.name,
         "backend_artifact_sha256": sha256(args.artifact),
-        "chat_template_sha256": sha256(PROJECT / "chat_template.jinja"),
+        "chat_template_sha256": sha256(
+            PROJECT / "reference/chat_template.jinja"
+        ),
     }
     if previous is not None:
         old_contract = previous.get("run_contract")

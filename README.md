@@ -86,7 +86,7 @@ runtime.cpp         Session、sampling 和 cache 生命周期
 main.cpp            main、HTTP routes 和 completion 数据流
 parser.cpp          唯一 JSON-aware 的 C++ 边界
 render.cpp          固定 Qwen3.5 chat template 和 tokenizer
-scripts/            离线 packer 和 benchmark
+scripts/            离线 packer、benchmark 及其 Python 环境
 tests/              parser、renderer、runtime 和端到端回归
 reference/          官方 PyTorch/Transformers 数值 reference
 eval/               EvalScope 评测工具和结果

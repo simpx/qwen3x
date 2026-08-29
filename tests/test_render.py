@@ -20,7 +20,9 @@ RENDER_BIN = Path(os.environ.get(
     "RENDER_BIN", PROJECT / "build/qwen35-render.bin"
 ))
 DRIVER = Path(os.environ.get("RENDER_TEST", PROJECT / "build/render-test"))
-CHAT_TEMPLATE = (PROJECT / "chat_template.jinja").read_text(encoding="utf-8")
+CHAT_TEMPLATE = (PROJECT / "reference/chat_template.jinja").read_text(
+    encoding="utf-8"
+)
 
 
 def chat_case(name):

@@ -6,7 +6,7 @@
 safetensors schema 或多模型分发器。
 
 用法：
-    uv run --locked --no-dev python -m scripts.pack_weights \
+    uv run --project scripts --locked --no-dev python -m scripts.pack_weights \
         models/Qwen3.5-0.8B build/qwen35-0.8b.bin
 
 输入目录需要官方 config.json、model.safetensors.index.json 和对应 shard。

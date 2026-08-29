@@ -80,7 +80,7 @@ CUDA oracle，但同样以紧的 `cuda_max_abs_error = 5e-4` 逐步比较。以�
 ```sh
 make compare \
   MODEL=../models/Qwen3.5-0.8B \
-  CHAT_TEMPLATE=../chat_template.jinja
+  CHAT_TEMPLATE=chat_template.jinja
 ```
 
 也可以在仓库根目录运行 `make reference`，一次完成生成和对比。报告默认写入
@@ -93,7 +93,7 @@ OpenAI-compatible oracle：
 
 ```sh
 make serve MODEL=../models/Qwen3.5-0.8B \
-  CHAT_TEMPLATE=../chat_template.jinja DEVICE=cuda DTYPE=float32 \
+  CHAT_TEMPLATE=chat_template.jinja DEVICE=cuda DTYPE=float32 \
   CACHE=static MAX_CONTEXT=40960 PORT=8002
 ```
 

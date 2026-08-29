@@ -10,7 +10,7 @@
 // token bytes, merge-ID triples and compact Unicode tables. render.cpp itself
 // therefore uses only the C++ standard library: no JSON parser, regex engine,
 // ICU, Rust or Jinja interpreter. The implementation is fixed to Qwen3.5's
-// tokenizer and to chat_template.jinja in this repository, just like
+// tokenizer and to reference/chat_template.jinja, just like
 // engine.cpp is fixed to the 0.8B model data flow.
 
 #include "render.h"
