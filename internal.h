@@ -1,6 +1,9 @@
 #ifndef QWEN35_INTERNAL_H
 #define QWEN35_INTERNAL_H
 
+#include <cassert>
+#include <cstdlib>
+
 #include "qwen35.h"
 
 // runtime.cpp 只通过这组不透明操作访问一个计算后端。构建时由根目录
@@ -34,6 +37,10 @@ namespace q35_internal {
 void logf(q35_log_level level, const char* file, int line,
           const char* format, ...);
 
+// Print an invariant failure even when no log callback is installed.
+void report_assertion(const char* expression, const char* file, int line,
+                      const char* format, ...);
+
 }  // namespace q35_internal
 
 // __VA_ARGS__ always contains at least the format string.
@@ -45,5 +52,18 @@ void logf(q35_log_level level, const char* file, int line,
     q35_internal::logf(Q35_LOG_WARN, __FILE__, __LINE__, __VA_ARGS__)
 #define LOG_ERROR(...) \
     q35_internal::logf(Q35_LOG_ERROR, __FILE__, __LINE__, __VA_ARGS__)
+
+// Evaluate condition once, report useful context, then retain standard assert
+// behavior. abort() keeps invariant failures fatal in NDEBUG builds too.
+#define Q35_ASSERT(condition, ...)                                      \
+    do {                                                                \
+        const bool q35_assert_ok = static_cast<bool>(condition);         \
+        if (!q35_assert_ok) {                                           \
+            q35_internal::report_assertion(                             \
+                #condition, __FILE__, __LINE__, __VA_ARGS__);            \
+            assert(q35_assert_ok);                                      \
+            std::abort();                                               \
+        }                                                               \
+    } while (false)
 
 #endif

@@ -47,4 +47,26 @@ void logf(q35_log_level level, const char* file, int line,
     log_callback(log_user_data, level, file_name(file), line, message);
 }
 
+void report_assertion(const char* expression, const char* file, int line,
+                      const char* format, ...) {
+    char detail[1024];
+    va_list arguments;
+    va_start(arguments, format);
+    std::vsnprintf(detail, sizeof(detail), format, arguments);
+    va_end(arguments);
+
+    char message[1280];
+    std::snprintf(message, sizeof(message),
+                  "assertion '%s' failed: %s",
+                  expression ? expression : "?", detail);
+    std::fprintf(stderr, "qwen35: %s:%d: %s\n",
+                 file_name(file), line, message);
+    std::fflush(stderr);
+
+    if (log_callback && Q35_LOG_ERROR >= log_level) {
+        log_callback(log_user_data, Q35_LOG_ERROR,
+                     file_name(file), line, message);
+    }
+}
+
 }  // namespace q35_internal

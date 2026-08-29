@@ -21,7 +21,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -177,8 +176,10 @@ void mv(const Linear& weight, const FP32* input, FP32* output) {
 
 // Embedding lookup：table[V,H] + token 标量 -> out[H]；out=table[token,:]。
 void embed(const BF16* table, int token, FP32* out) {
-    assert(table && out);
-    assert(token >= 0 && token < V);
+    Q35_ASSERT(table && out, "embed buffers table=%p out=%p",
+               static_cast<const void*>(table), static_cast<void*>(out));
+    Q35_ASSERT(token >= 0 && token < V,
+               "embed token=%d vocabulary=%d", token, V);
     // embedding table 的 shape 是 [V,H]；token id 唯一决定应复制的那一行。
     const BF16* row = table + static_cast<size_t>(token) * H;
     for (int i = 0; i < H; ++i) out[i] = f32(row[i]);
@@ -452,8 +453,11 @@ void ffn(const Layer& layer, const FP32* input, Work& work, FP32* out) {
 // prompt 的 prefill 只是对 prompt ids 连续调用它，decode 则在每次 argmax 后再调用。
 void forward(const Model& model, State& state, int token, Work& work,
              bool compute_logits = true) {
-    assert(token >= 0 && token < V);
-    assert(state.position >= 0 && state.position < state.capacity);
+    Q35_ASSERT(token >= 0 && token < V,
+               "forward token=%d vocabulary=%d", token, V);
+    Q35_ASSERT(state.position >= 0 && state.position < state.capacity,
+               "forward position=%d capacity=%d",
+               state.position, state.capacity);
     LOG_DEBUG("forward started token=%d position=%d", token, state.position);
     embed(model.embedding, token, work.hidden);  // token id -> hidden[H]。
     for (int index = 0; index < N; ++index) {
@@ -499,7 +503,8 @@ struct File {
     File() = default;
 
     bool map(const char* path, const char** error) {
-        assert(path && error);
+        Q35_ASSERT(path && error, "File::map arguments path=%p error=%p",
+                   static_cast<const void*>(path), static_cast<const void*>(error));
         fd = open(path, O_RDONLY);
         if (fd < 0) return fail(error, "cannot open model.bin");
 
@@ -580,7 +585,7 @@ struct Reader {
     }
 
     bool finish(const char** output_error) const {
-        assert(output_error);
+        Q35_ASSERT(output_error, "Reader::finish output_error is null");
         if (error) {
             *output_error = error;
             return false;
@@ -665,7 +670,7 @@ struct State {
 };
 
 Model* model_create(const char* path, char* err, size_t errlen) {
-    assert(path);
+    Q35_ASSERT(path, "model_create path is null");
     std::unique_ptr<Model> model(new Model());
     const char* message = nullptr;
     if (!model->loaded.load(path, &message)) {
@@ -681,8 +686,10 @@ void model_destroy(Model* model) {
 }
 
 State* state_create(Model* model, int context_size) {
-    assert(model);
-    assert(context_size > 0 && context_size <= qwen35::MAX_CONTEXT);
+    Q35_ASSERT(model, "state_create model is null");
+    Q35_ASSERT(context_size > 0 && context_size <= qwen35::MAX_CONTEXT,
+               "state_create context_size=%d allowed=1..%d",
+               context_size, qwen35::MAX_CONTEXT);
     return new State(context_size);
 }
 
@@ -691,18 +698,19 @@ void state_destroy(State* state) {
 }
 
 void state_reset(State* state) {
-    assert(state);
+    Q35_ASSERT(state, "state_reset state is null");
     state->live.reset();
 }
 
 void state_forward(Model* model, State* state, int token, bool compute_logits) {
-    assert(model && state);
+    Q35_ASSERT(model && state, "state_forward model=%p state=%p token=%d",
+               static_cast<void*>(model), static_cast<void*>(state), token);
     qwen35::forward(model->loaded.model, state->live, token, state->work,
                     compute_logits);
 }
 
 void state_checkpoint_save(State* state) {
-    assert(state);
+    Q35_ASSERT(state, "state_checkpoint_save state is null");
     Checkpoint& checkpoint = state->checkpoint;
     checkpoint.position = state->live.position;
     for (int layer = 0; layer < qwen35::N; ++layer) {
@@ -715,10 +723,12 @@ void state_checkpoint_save(State* state) {
 }
 
 void state_checkpoint_restore(State* state) {
-    assert(state);
+    Q35_ASSERT(state, "state_checkpoint_restore state is null");
     Checkpoint& checkpoint = state->checkpoint;
-    assert(checkpoint.position >= 0 &&
-           checkpoint.position <= state->live.capacity);
+    Q35_ASSERT(checkpoint.position >= 0 &&
+               checkpoint.position <= state->live.capacity,
+               "checkpoint position=%d capacity=%d",
+               checkpoint.position, state->live.capacity);
     for (int layer = 0; layer < qwen35::N; ++layer) {
         if (layer % 4 != 3) {
             std::copy(checkpoint.conv_history[layer].begin(),
@@ -729,8 +739,10 @@ void state_checkpoint_restore(State* state) {
                       state->live.delta_memory[layer].begin());
             continue;
         }
-        assert(state->live.key_cache[layer]);
-        assert(state->live.value_cache[layer]);
+        Q35_ASSERT(state->live.key_cache[layer],
+                   "checkpoint key cache is null layer=%d", layer);
+        Q35_ASSERT(state->live.value_cache[layer],
+                   "checkpoint value cache is null layer=%d", layer);
     }
     state->live.position = checkpoint.position;
     std::memcpy(state->work.logits, checkpoint.logits,
@@ -746,7 +758,8 @@ int state_argmax(const State* state) {
 }
 
 void state_copy_logits(const State* state, float* output) {
-    assert(state && output);
+    Q35_ASSERT(state && output, "state_copy_logits state=%p output=%p",
+               static_cast<const void*>(state), static_cast<void*>(output));
     std::memcpy(output, state->work.logits, sizeof(float) * qwen35::V);
 }
 

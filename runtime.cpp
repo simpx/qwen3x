@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -279,14 +278,18 @@ struct q35_session {
     }
 
     void restore_checkpoint() {
-        assert(checkpoint_valid);
+        Q35_ASSERT(checkpoint_valid,
+                   "restore_checkpoint valid=%d position=%d checkpoint=%d",
+                   checkpoint_valid, position(), checkpoint_position);
         const int live_position = position();
         if (engine->mock) {
             logits = mock_checkpoint_logits;
         } else {
             q35_backend::state_checkpoint_restore(state);
         }
-        assert(tokens.size() >= static_cast<size_t>(checkpoint_position));
+        Q35_ASSERT(tokens.size() >= static_cast<size_t>(checkpoint_position),
+                   "token history=%zu checkpoint_position=%d",
+                   tokens.size(), checkpoint_position);
         tokens.resize(static_cast<size_t>(checkpoint_position));
         logits_valid = true;
         LOG_INFO("session checkpoint restored live_state_tokens=%d "
@@ -459,7 +462,9 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
             checkpoint_saved = true;
         }
     }
-    assert(checkpoint_at <= 0 || checkpoint_saved);
+    Q35_ASSERT(checkpoint_at <= 0 || checkpoint_saved,
+               "checkpoint_at=%d reused=%d prompt_tokens=%d",
+               checkpoint_at, reused, count);
 
     const double elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - started).count();
@@ -575,7 +580,7 @@ SessionEntry* find_entry(q35_session_manager& manager, const q35_session* sessio
 }
 
 void reset(SessionEntry& entry) {
-    assert(entry.session);
+    Q35_ASSERT(entry.session, "SessionEntry reset has null session");
     entry.session->reset();
     entry.state = EntryState::FREE;
     entry.last_used = 0;
