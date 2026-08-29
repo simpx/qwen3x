@@ -6,6 +6,7 @@ TOKENIZER ?= models/Qwen3.5-0.8B
 BUILD ?= build
 PROGRAM ?= $(BUILD)/qwen35
 BIN ?= $(BUILD)/qwen35-0.8b.bin
+PARSER_TEST ?= $(BUILD)/parser-test
 SOCKET ?= /tmp/qwen35.sock
 SERVER ?= http://127.0.0.1:8000
 SLOTS ?= 2
@@ -19,7 +20,7 @@ REFERENCE_CACHE ?= static
 CXXFLAGS ?= -O3 -std=c++17 -fno-exceptions -fno-rtti \
 	-Wall -Wextra -Wpedantic -march=native
 
-.PHONY: all sync sync-prod weights unit-test eval-test reference-generate test run chat eval eval-smoke reference-serve eval-reference eval-compare clean
+.PHONY: all sync sync-prod weights parser-test unit-test eval-test reference-generate test run chat eval eval-smoke reference-serve eval-reference eval-compare clean
 
 all: $(PROGRAM)
 
@@ -39,6 +40,13 @@ $(BIN): scripts/pack_weights.py
 	mkdir -p $(BUILD)
 	$(PYTHON_PROD) -m scripts.pack_weights "$(TOKENIZER)" "$@"
 
+$(PARSER_TEST): parser.cpp render.h tests/parser_test.cpp third_party/nlohmann/json.hpp
+	mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -I. parser.cpp tests/parser_test.cpp -o $@
+
+parser-test: $(PARSER_TEST)
+	$(PARSER_TEST)
+
 unit-test:
 	$(PYTHON) -m unittest -v tests.test_server tests.test_client
 
@@ -52,7 +60,7 @@ reference-generate:
 		DEVICE=cpu \
 		CHAT_TEMPLATE="$(abspath chat_template.jinja)"
 
-test: unit-test
+test: unit-test parser-test
 
 run: $(PROGRAM) $(BIN)
 	$(PROGRAM) -l "$(SOCKET)" -m "$(BIN)" --parallel "$(SLOTS)" --context "$(CONTEXT)" $(MOCK_ARG)
