@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import subprocess
+import tempfile
 import time
 
 
@@ -33,12 +34,28 @@ def main():
 
     direct = subprocess.run(
         [args.program, "--prompt", "hello", "--max-tokens", "3",
-         "--session-context", "256", "--mock", "--log-level", "error"],
+         "--session-context", "256", "--mock"],
         capture_output=True,
         text=True,
         check=False,
     )
     assert direct.returncode == 0, direct.stderr
+    assert direct.stderr == "", direct.stderr
+
+    with tempfile.TemporaryDirectory() as directory:
+        log_file = os.path.join(directory, "qwen35.log")
+        logged = subprocess.run(
+            [args.program, "--prompt", "hello", "--max-tokens", "1",
+             "--session-context", "256", "--mock", "--log-level", "info",
+             "--log-file", log_file],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert logged.returncode == 0, logged.stderr
+        assert logged.stderr == "", logged.stderr
+        with open(log_file, encoding="utf-8") as stream:
+            assert "mock compute enabled" in stream.read()
 
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))

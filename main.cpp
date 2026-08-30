@@ -56,7 +56,7 @@ struct Options {
     std::string host = "127.0.0.1";
     std::string served_model = "qwen3.5-0.8b";
     std::string log_file;
-    q35_log_level log_level = Q35_LOG_INFO;
+    q35_log_level log_level = Q35_LOG_ERROR;
     int port = 8000;
     int slots = 2;
     int context = 4096;
@@ -68,7 +68,6 @@ struct Options {
     size_t log_backups = 5;
     bool context_set = false;
     bool slots_set = false;
-    bool log_level_set = false;
     bool mock = false;
 };
 
@@ -234,13 +233,13 @@ bool parse_options(int argc, char** argv, Options* options,
         } else if (argument == "--log-level") {
             if (value == "debug") options->log_level = Q35_LOG_DEBUG;
             else if (value == "info") options->log_level = Q35_LOG_INFO;
-            else if (value == "warning") options->log_level = Q35_LOG_WARN;
-            else if (value == "error") options->log_level = Q35_LOG_ERROR;
+            else if (value == "warn" || value == "warning") {
+                options->log_level = Q35_LOG_WARN;
+            } else if (value == "error") options->log_level = Q35_LOG_ERROR;
             else {
                 *error = "invalid --log-level";
                 return false;
             }
-            options->log_level_set = true;
         } else {
             *error = "unknown option: " + argument;
             return false;
@@ -271,7 +270,6 @@ bool parse_options(int argc, char** argv, Options* options,
             return false;
         }
         if (!options->slots_set) options->slots = 1;
-        if (!options->log_level_set) options->log_level = Q35_LOG_ERROR;
     }
     return true;
 }
@@ -283,7 +281,7 @@ void usage(const char* program) {
         "  %s [-m MODEL] [-r RENDER] -l [--host HOST] [--port PORT]\n"
         "  %s [-m MODEL] --bench PREFILL_TOKENS DECODE_TOKENS\n"
         "common: [--session-slots N] [--session-context N] [--mock]\n"
-        "        [--log-level LEVEL] [--log-file PATH]\n"
+        "        [--log-level debug|info|warn|error] [--log-file PATH]\n"
         "defaults beside qwen35: %s and %s\n", program, program, program,
         DEFAULT_MODEL, DEFAULT_RENDER);
 }

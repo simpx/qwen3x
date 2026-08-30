@@ -33,11 +33,12 @@ Python 不参与部署或推理，只用于离线权重转换、render 数据生
 
 ```sh
 make -C scripts checkpoint model render
-make
+make -j4
 ```
 
 所有下载和生成的文件都位于 `build/`。`make clean` 清理程序、render 和测试产物，
-但保留下载的 checkpoint 与 pack 后的模型权重。
+但保留下载的 checkpoint 与 pack 后的模型权重。首次构建可以并行编译；之后直接运行
+`make` 只会重编发生变化的源码及其依赖。
 
 直接完成一次请求：
 
@@ -94,8 +95,9 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 {"stream":true,"stream_options":{"include_usage":true}}
 ```
 
-服务还提供 `/healthz`、`/readyz` 和 `/v1/models`。默认只写结构化 stderr 日志；
-`--log-file logs/qwen35.log` 可额外启用滚动文件。
+服务还提供 `/healthz`、`/readyz` 和 `/v1/models`。默认只把 `error` 日志写入
+stderr；`--log-level info` 或 `--log-level debug` 可增加细节。指定
+`--log-file logs/qwen35.log` 后，滚动文件会替代 stderr 成为日志输出位置。
 
 ## 目录
 

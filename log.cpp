@@ -64,7 +64,6 @@ bool log_configure(q35_log_level level, const char* file,
     }
 
     std::vector<spdlog::sink_ptr> sinks;
-    sinks.push_back(std::make_shared<spdlog::sinks::stderr_color_sink_mt>());
     if (file && file[0]) {
         // With exceptions disabled spdlog treats an open failure as fatal.
         // Probe it first so ordinary path/permission errors remain recoverable.
@@ -92,6 +91,8 @@ bool log_configure(q35_log_level level, const char* file,
         sinks.push_back(
             std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
                 file, max_bytes, backups));
+    } else {
+        sinks.push_back(std::make_shared<spdlog::sinks::stderr_color_sink_mt>());
     }
 
     process_logger = std::make_shared<spdlog::logger>(
