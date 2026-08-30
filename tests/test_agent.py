@@ -23,6 +23,7 @@ class AgentTest(unittest.TestCase):
         body = agent.request_body(args, [{"role": "user", "content": "x"}])
         self.assertFalse(body["stream"])
         self.assertEqual(body["temperature"], 0)
+        self.assertIn("Never use `cd`", agent.SYSTEM_PROMPT)
         self.assertEqual(
             [tool["function"]["name"] for tool in body["tools"]],
             ["read_file", "write_file", "bash"],
