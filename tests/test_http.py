@@ -62,10 +62,12 @@ def main():
     port = listener.getsockname()[1]
     listener.close()
     environment = dict(os.environ, QWEN_API_KEY="test")
+    server_logs = tempfile.TemporaryDirectory()
+    server_log = os.path.join(server_logs.name, "server.log")
     process = subprocess.Popen(
         [args.program, "--listen", "--host", "127.0.0.1", "--port", str(port),
          "--session-slots", "2", "--session-context", "256", "--mock",
-         "--log-level", "error"],
+         "--log-file", server_log],
         env=environment,
     )
     try:
@@ -114,6 +116,9 @@ def main():
     finally:
         process.terminate()
         process.wait(timeout=10)
+    with open(server_log, encoding="utf-8") as stream:
+        assert "server ready" in stream.read()
+    server_logs.cleanup()
     print("http-test: ok")
 
 

@@ -68,6 +68,7 @@ struct Options {
     size_t log_backups = 5;
     bool context_set = false;
     bool slots_set = false;
+    bool log_level_set = false;
     bool mock = false;
 };
 
@@ -240,6 +241,7 @@ bool parse_options(int argc, char** argv, Options* options,
                 *error = "invalid --log-level";
                 return false;
             }
+            options->log_level_set = true;
         } else {
             *error = "unknown option: " + argument;
             return false;
@@ -256,6 +258,9 @@ bool parse_options(int argc, char** argv, Options* options,
     if (options->mode != Mode::Bench && options->render_path.empty()) {
         *error = "-r/--render is required";
         return false;
+    }
+    if (!options->log_level_set && options->mode == Mode::Listen) {
+        options->log_level = Q35_LOG_INFO;
     }
     if (options->mode == Mode::Bench) {
         const int64_t required = static_cast<int64_t>(options->bench_prefill) +
@@ -282,6 +287,7 @@ void usage(const char* program) {
         "  %s [-m MODEL] --bench PREFILL_TOKENS DECODE_TOKENS\n"
         "common: [--session-slots N] [--session-context N] [--mock]\n"
         "        [--log-level debug|info|warn|error] [--log-file PATH]\n"
+        "        log default: info for --listen, error otherwise\n"
         "defaults beside qwen35: %s and %s\n", program, program, program,
         DEFAULT_MODEL, DEFAULT_RENDER);
 }
