@@ -55,8 +55,8 @@ make -j4
   --listen \
   --host 127.0.0.1 \
   --port 8000 \
-  --session-slots 2 \
-  --session-context 4096
+  --session-slots 1 \
+  --session-context 262144
 ```
 
 设置 `QWEN_API_KEY` 会为 `/v1/models` 和 `/v1/chat/completions` 启用 Bearer
@@ -85,6 +85,17 @@ curl，不发送请求：
 ```sh
 scripts/chat.py -u "你好" --dry-run
 ```
+
+用最小 Agent 闭环测试原生工具调用：
+
+```sh
+scripts/agent.py -y "Use bash to run pwd, then tell me the directory."
+```
+
+`agent.py` 只提供 `read_file`、`write_file` 和 `bash`，默认在当前目录工作；
+`write_file` 和 `bash` 默认需要确认，`-y` 用于受控测试环境。当前 Agent 请求使用
+非流式 Chat Completions；普通文本 completion 已支持流式，流式 tool calls 后续补充。
+`read_file` 默认读取 200 行，也接受 `start_line` 和 `line_count`，让模型按段阅读大文件。
 
 测量不含 HTTP、JSON、chat template、tokenizer 和 sampling 的 Session 性能：
 

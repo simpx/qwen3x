@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <queue>
@@ -1113,6 +1114,112 @@ bool Renderer::Impl::load(const std::string& path, std::string* error) {
         }
     }
     if (!input.finish()) return fail(error, input.error());
+    return true;
+}
+
+bool parse_generated_tool_calls(const std::string& text,
+                                std::string* content,
+                                std::vector<ToolCall>* calls,
+                                std::string* error) {
+    if (!content || !calls) return fail(error, "tool output pointer is null");
+    content->clear();
+    calls->clear();
+
+    constexpr char TOOL_START[] = "<tool_call>";
+    constexpr char TOOL_END[] = "</tool_call>";
+    constexpr char FUNCTION_START[] = "<function=";
+    constexpr char FUNCTION_END[] = "</function>";
+    constexpr char PARAMETER_START[] = "<parameter=";
+    constexpr char PARAMETER_END[] = "</parameter>";
+
+    size_t first = text.find(TOOL_START);
+    if (first == std::string::npos) first = text.find(FUNCTION_START);
+    if (first == std::string::npos) {
+        *content = text;
+        return true;
+    }
+
+    *content = text.substr(0, first);
+    while (!content->empty() &&
+           std::strchr(" \t\r\n\f\v", content->back())) {
+        content->pop_back();
+    }
+
+    size_t cursor = first;
+    while (true) {
+        const size_t function = text.find(FUNCTION_START, cursor);
+        if (function == std::string::npos) break;
+        const size_t name_begin = function + sizeof(FUNCTION_START) - 1;
+        const size_t name_end = text.find('>', name_begin);
+        const size_t function_end = name_end == std::string::npos
+            ? std::string::npos : text.find(FUNCTION_END, name_end + 1);
+        if (name_end == std::string::npos || function_end == std::string::npos) {
+            return fail(error, "incomplete generated tool call");
+        }
+
+        ToolCall call;
+        call.name = text.substr(name_begin, name_end - name_begin);
+        while (!call.name.empty() && call.name.front() == ' ') {
+            call.name.erase(0, 1);
+        }
+        while (!call.name.empty() && call.name.back() == ' ') {
+            call.name.pop_back();
+        }
+        if (call.name.empty()) return fail(error, "generated tool name is empty");
+
+        size_t argument = name_end + 1;
+        while (true) {
+            const size_t parameter = text.find(PARAMETER_START, argument);
+            if (parameter == std::string::npos || parameter >= function_end) break;
+            const size_t parameter_name = parameter +
+                                          sizeof(PARAMETER_START) - 1;
+            const size_t parameter_name_end = text.find('>', parameter_name);
+            if (parameter_name_end == std::string::npos ||
+                parameter_name_end >= function_end) {
+                return fail(error, "incomplete generated parameter name");
+            }
+            const size_t value_begin = parameter_name_end + 1;
+            const size_t next_parameter = text.find(PARAMETER_START, value_begin);
+            const size_t parameter_end = text.find(PARAMETER_END, value_begin);
+            size_t value_end = parameter_end;
+            if (next_parameter != std::string::npos &&
+                next_parameter < function_end &&
+                (parameter_end == std::string::npos ||
+                 next_parameter < parameter_end)) {
+                value_end = next_parameter;
+                argument = next_parameter;
+            } else {
+                if (parameter_end == std::string::npos ||
+                    parameter_end > function_end) {
+                    return fail(error, "incomplete generated parameter value");
+                }
+                argument = parameter_end + sizeof(PARAMETER_END) - 1;
+            }
+
+            ToolArgument item;
+            item.name = text.substr(parameter_name,
+                                    parameter_name_end - parameter_name);
+            item.text = text.substr(value_begin, value_end - value_begin);
+            if (!item.text.empty() && item.text.front() == '\n') {
+                item.text.erase(0, 1);
+            }
+            if (!item.text.empty() && item.text.back() == '\n') {
+                item.text.pop_back();
+            }
+            if (item.name.empty()) {
+                return fail(error, "generated parameter name is empty");
+            }
+            call.arguments.push_back(std::move(item));
+        }
+        calls->push_back(std::move(call));
+        cursor = function_end + sizeof(FUNCTION_END) - 1;
+    }
+
+    if (calls->empty()) return fail(error, "generated tool wrapper has no function");
+    if (text.compare(first, sizeof(TOOL_START) - 1, TOOL_START) == 0 &&
+        text.rfind(TOOL_END) == std::string::npos) {
+        return fail(error, "incomplete generated tool wrapper");
+    }
     return true;
 }
 

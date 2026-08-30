@@ -54,6 +54,9 @@ public:
         if (!parse_template_options(root, &request.chat.options)) {
             return invalid(error_message_);
         }
+        if (request.stream && !request.chat.tools.empty()) {
+            return invalid("streaming tool calls are not supported yet");
+        }
         if (!validate_http_chat(request.chat)) return invalid(error_message_);
         output = std::move(request);
         return Status{};
@@ -215,6 +218,12 @@ private:
     bool parse_tool_call(Json& value, ToolCall* output) {
         if (!value.is_object()) {
             return fail("message.tool_calls items must be objects");
+        }
+
+        auto id = value.find("id");
+        if (id != value.end()) {
+            if (!id->is_string()) return fail("tool_call.id must be a string");
+            output->id = move_string(*id);
         }
 
         Json* call = &value;
@@ -403,12 +412,6 @@ private:
                 return fail(std::string(name) + " is not supported");
             }
         }
-        auto tools = root.find("tools");
-        if (tools != root.end() && !tools->is_null() &&
-            !(tools->is_array() && tools->empty())) {
-            return fail("tools are not supported by the HTTP runtime yet");
-        }
-
         int n = 1;
         if (!integer_option(root, "n", 1, 1, &n) || n != 1) {
             return fail("only n=1 is supported");
@@ -508,10 +511,14 @@ private:
             if (message.role == Role::System && index != 0) {
                 return fail("system/developer message must be first");
             }
-            if (message.role == Role::Tool || !message.tool_calls.empty()) {
-                return fail("tool messages are not supported by the HTTP runtime yet");
+            if (!message.tool_calls.empty() && message.role != Role::Assistant) {
+                return fail("tool_calls require an assistant message");
             }
-            if (message.content_is_null) return fail("message content must be text");
+            if (message.content_is_null &&
+                !(message.role == Role::Assistant &&
+                  !message.tool_calls.empty())) {
+                return fail("message content must be text");
+            }
             for (const ContentPart& part : message.parts) {
                 if (part.kind != ContentKind::Text) {
                     return fail("only text message content is supported");
@@ -614,11 +621,31 @@ std::string completion_json(const std::string& id, int64_t created,
                             const std::string& reasoning,
                             const std::string& content,
                             bool include_reasoning,
+                            const std::vector<ToolCall>& tool_calls,
                             const char* finish_reason,
                             const CompletionUsage& usage) {
-    Json message{{"role", "assistant"}, {"content", content},
+    Json message{{"role", "assistant"},
+                 {"content", tool_calls.empty() || !content.empty()
+                     ? Json(content) : Json(nullptr)},
                  {"refusal", nullptr}};
     if (include_reasoning) message["reasoning_content"] = reasoning;
+    if (!tool_calls.empty()) {
+        message["tool_calls"] = Json::array();
+        for (const ToolCall& call : tool_calls) {
+            Json arguments = Json::object();
+            for (const ToolArgument& argument : call.arguments) {
+                arguments[argument.name] = argument.text;
+            }
+            message["tool_calls"].push_back({
+                {"id", call.id},
+                {"type", "function"},
+                {"function", {
+                    {"name", call.name},
+                    {"arguments", arguments.dump()},
+                }},
+            });
+        }
+    }
     Json choice{{"index", 0}, {"message", std::move(message)},
                 {"logprobs", nullptr}, {"finish_reason", finish_reason}};
     return Json{{"id", id}, {"object", "chat.completion"},

@@ -18,15 +18,16 @@ THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(PROJECT)/third_party/spdlog/include
 SPDLOG_SRC := $(wildcard $(PROJECT)/third_party/spdlog/src/*.cpp)
 
-.PHONY: test parser-test runtime-test cli-test chat-test render-test http-test clean
+.PHONY: test parser-test runtime-test cli-test chat-test agent-test render-test http-test clean
 
-test: parser-test runtime-test cli-test chat-test
+test: parser-test runtime-test cli-test chat-test agent-test
 
-$(PARSER_TEST): parser_test.cpp $(PROJECT)/parser.cpp $(PROJECT)/render.h \
+$(PARSER_TEST): parser_test.cpp $(PROJECT)/parser.cpp $(PROJECT)/render.cpp \
+		$(PROJECT)/render.h \
 		$(PROJECT)/third_party/nlohmann/json.hpp
 	mkdir -p "$(BUILD)"
 	$(CXX) $(CXXFLAGS) -I$(PROJECT) \
-		$(PROJECT)/parser.cpp parser_test.cpp -o "$@"
+		$(PROJECT)/parser.cpp $(PROJECT)/render.cpp parser_test.cpp -o "$@"
 
 parser-test: $(PARSER_TEST)
 	$(PARSER_TEST)
@@ -50,6 +51,10 @@ cli-test: $(PROGRAM)
 chat-test:
 	cd "$(PROJECT)" && $(SYSTEM_PYTHON) -m unittest discover \
 		-s tests -p test_chat.py -v
+
+agent-test:
+	cd "$(PROJECT)" && $(SYSTEM_PYTHON) -m unittest discover \
+		-s tests -p test_agent.py -v
 
 $(RENDER_DRIVER): render_driver.cpp $(PROJECT)/render.cpp $(PROJECT)/parser.cpp \
 		$(PROJECT)/render.h $(PROJECT)/third_party/nlohmann/json.hpp

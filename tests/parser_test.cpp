@@ -361,15 +361,106 @@ void test_completion_request() {
           "completion stop strings");
 }
 
+void test_completion_tool_request() {
+    const std::string text = R"({
+        "model":"qwen3.5-0.8b",
+        "messages":[
+            {"role":"user","content":"read it"},
+            {"role":"assistant","content":null,"tool_calls":[{
+                "id":"call_1","type":"function","function":{
+                    "name":"read_file","arguments":"{\"path\":\"README.md\"}"
+                }
+            }]},
+            {"role":"tool","tool_call_id":"call_1","content":"hello"}
+        ],
+        "tools":[{"type":"function","function":{
+            "name":"read_file","parameters":{"type":"object"}
+        }}],
+        "stream":false
+    })";
+    q35_render::CompletionRequest request;
+    const q35_render::Status status = q35_render::parse_completion_request(
+        text, "qwen3.5-0.8b", 128, request);
+    check(status.ok(), "completion tool request should parse");
+    check(request.chat.tools.size() == 1, "completion tool schema count");
+    check(request.chat.messages.size() == 3, "completion tool history count");
+    if (request.chat.messages.size() < 2 ||
+        request.chat.messages[1].tool_calls.empty()) return;
+    check(request.chat.messages[1].tool_calls[0].id == "call_1",
+          "completion tool call ID");
+}
+
+void test_generated_tool_calls() {
+    const std::string text = R"(I will read it.
+<tool_call>
+<function=read_file>
+<parameter=path>
+README.md
+</parameter>
+</function>
+</tool_call>
+<tool_call>
+<function=bash>
+<parameter=command>
+printf 'hello\nworld'
+</parameter>
+</function>
+</tool_call>)";
+    std::string content;
+    std::string error;
+    std::vector<q35_render::ToolCall> calls;
+    check(q35_render::parse_generated_tool_calls(
+              text, &content, &calls, &error),
+          "generated tool calls should parse");
+    check(content == "I will read it.", "generated tool preamble");
+    check(calls.size() == 2, "generated tool call count");
+    if (calls.size() != 2) return;
+    check(calls[0].name == "read_file" &&
+          calls[0].arguments.size() == 1 &&
+          calls[0].arguments[0].name == "path" &&
+          calls[0].arguments[0].text == "README.md",
+          "generated read call");
+    check(calls[1].name == "bash" &&
+          calls[1].arguments[0].text == "printf 'hello\\nworld'",
+          "generated multiline argument");
+
+    check(q35_render::parse_generated_tool_calls(
+              "plain answer", &content, &calls, &error) &&
+          content == "plain answer" && calls.empty(),
+          "plain generated content");
+    check(q35_render::parse_generated_tool_calls(
+              "<function=bash><parameter=command>pwd</parameter></function>",
+              &content, &calls, &error) && calls.size() == 1 &&
+          calls[0].name == "bash" && calls[0].arguments[0].text == "pwd",
+          "generated function fallback");
+    check(!q35_render::parse_generated_tool_calls(
+              "<tool_call><function=bash>", &content, &calls, &error),
+          "incomplete generated call should fail");
+}
+
 void test_completion_json() {
     q35_render::CompletionUsage usage{10, 4, 2};
+    std::vector<q35_render::ToolCall> no_calls;
     const std::string response = q35_render::completion_json(
         "chatcmpl-1", 123, "qwen3.5-0.8b", "think", "answer", true,
-        "stop", usage);
+        no_calls, "stop", usage);
     check(response.find("\"reasoning_content\":\"think\"") !=
           std::string::npos, "completion reasoning JSON");
     check(response.find("\"cached_tokens\":4") != std::string::npos,
           "completion cached usage JSON");
+    q35_render::ToolCall call;
+    call.id = "call_1";
+    call.name = "read_file";
+    call.arguments.push_back({"path", "README.md"});
+    const std::string tool_response = q35_render::completion_json(
+        "chatcmpl-2", 123, "qwen3.5-0.8b", "", "", false,
+        {call}, "tool_calls", usage);
+    check(tool_response.find("\"content\":null") != std::string::npos &&
+          tool_response.find("\"finish_reason\":\"tool_calls\"") !=
+              std::string::npos &&
+          tool_response.find("\\\"path\\\":\\\"README.md\\\"") !=
+              std::string::npos,
+          "completion tool call JSON");
     const std::string chunk = q35_render::completion_chunk_json(
         "chatcmpl-1", 123, "qwen3.5-0.8b", "content", "你");
     check(chunk.find("\"content\":\"你\"") != std::string::npos,
@@ -387,7 +478,7 @@ void test_invalid_completion_requests() {
         R"({"model":"qwen3.5-0.8b","messages":[{"role":"user","content":null}]})",
         R"({"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"x"}],"top_p":0})",
         R"({"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"x"}],"n":2})",
-        R"({"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"x"}],"tools":[{}]})",
+        R"({"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"x"}],"tools":[{}],"stream":true})",
     }) {
         q35_render::CompletionRequest request;
         check(!q35_render::parse_completion_request(
@@ -410,6 +501,8 @@ int main() {
     test_error_preserves_output();
     test_invalid_fields();
     test_completion_request();
+    test_completion_tool_request();
+    test_generated_tool_calls();
     test_completion_json();
     test_invalid_completion_requests();
     if (failures) return 1;

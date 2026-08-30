@@ -50,6 +50,7 @@ struct ToolArgument {
 };
 
 struct ToolCall {
+    std::string id;
     std::string name;
     std::vector<ToolArgument> arguments;
 };
@@ -120,6 +121,12 @@ Status parse_completion_request(const std::string& text,
                                 int default_max_tokens,
                                 CompletionRequest& output);
 
+// Split Qwen3.5's generated XML tool syntax from ordinary assistant text.
+bool parse_generated_tool_calls(const std::string& text,
+                                std::string* content,
+                                std::vector<ToolCall>* calls,
+                                std::string* error);
+
 std::string error_json(const std::string& message,
                        const char* type = "invalid_request_error",
                        const char* param = nullptr,
@@ -130,6 +137,7 @@ std::string completion_json(const std::string& id, int64_t created,
                             const std::string& reasoning,
                             const std::string& content,
                             bool include_reasoning,
+                            const std::vector<ToolCall>& tool_calls,
                             const char* finish_reason,
                             const CompletionUsage& usage);
 std::string completion_chunk_json(const std::string& id, int64_t created,

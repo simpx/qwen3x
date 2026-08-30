@@ -42,7 +42,7 @@
 namespace {
 
 constexpr size_t ERROR_SIZE = 512;
-constexpr size_t MAX_REQUEST_BYTES = 1024 * 1024;
+constexpr size_t MAX_REQUEST_BYTES = 16 * 1024 * 1024;
 constexpr const char* DEFAULT_MODEL = "qwen35-0.8b-model.bin";
 constexpr const char* DEFAULT_RENDER = "qwen35-0.8b-render.bin";
 
@@ -58,8 +58,8 @@ struct Options {
     std::string log_file;
     q35_log_level log_level = Q35_LOG_ERROR;
     int port = 8000;
-    int slots = 2;
-    int context = 4096;
+    int slots = 1;
+    int context = q35_backend::max_context();
     int max_tokens = 128;
     int bench_prefill = 0;
     int bench_decode = 0;
@@ -362,6 +362,7 @@ void usage(const char* program) {
         "  %s [-m MODEL] --bench PREFILL_TOKENS DECODE_TOKENS\n"
         "common: [--session-slots N] [--session-context N] [--mock]\n"
         "        [--log-level trace|debug|info|warn|error] [--log-file PATH]\n"
+        "defaults: 1 session slot, 262144-token context\n"
         "        log default: info for --listen, error otherwise\n"
         "defaults beside qwen35: %s and %s\n", program, program, program,
         DEFAULT_MODEL, DEFAULT_RENDER);
@@ -756,10 +757,28 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
         q35_render::CompletionUsage usage{
             static_cast<int>(prompt.tokens.size()), result.cached_tokens,
             static_cast<int>(result.tokens.size())};
+        std::vector<q35_render::ToolCall> tool_calls;
+        std::string content = result.content;
+        if (!request.chat.tools.empty()) {
+            if (!q35_render::parse_generated_tool_calls(
+                    result.content, &content, &tool_calls, &error)) {
+                LOG_WARN("tool output not parsed request_id=%s completion_id=%s "
+                         "error=%s",
+                         access->request_id.c_str(), completion_id.c_str(),
+                         error.c_str());
+                content = result.content;
+                tool_calls.clear();
+            }
+        }
+        for (q35_render::ToolCall& call : tool_calls) {
+            call.id = make_id("call_");
+        }
+        if (!tool_calls.empty()) result.finish_reason = "tool_calls";
         json_response(response, 200, q35_render::completion_json(
             completion_id, created, runtime.options.served_model,
-            result.reasoning, result.content,
+            result.reasoning, content,
             request.chat.options.enable_thinking,
+            tool_calls,
             result.finish_reason.c_str(), usage));
         record_generation(access.get(), result);
         return false;

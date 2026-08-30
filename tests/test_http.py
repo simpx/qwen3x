@@ -66,7 +66,7 @@ def main():
     server_log = os.path.join(server_logs.name, "server.log")
     process = subprocess.Popen(
         [args.program, "--listen", "--host", "127.0.0.1", "--port", str(port),
-         "--session-slots", "2", "--session-context", "256", "--mock",
+         "--session-slots", "2", "--session-context", "1024", "--mock",
          "--log-file", server_log],
         env=environment,
     )
@@ -99,6 +99,54 @@ def main():
         completion = json.loads(data)
         assert completion["choices"][0]["message"]["content"]
         assert completion["usage"]["completion_tokens"] == 3
+
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        }
+        tool_body = {
+            "model": "qwen3.5-0.8b",
+            "messages": [{"role": "user", "content": "read README.md"}],
+            "tools": [tool],
+            "stream": False,
+            "temperature": 0,
+            "max_completion_tokens": 1,
+        }
+        status, _, data = request(
+            port, "POST", "/v1/chat/completions", tool_body)
+        assert status == 200, data
+
+        tool_body["messages"].extend([
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": '{"path":"README.md"}',
+                    },
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "hello"},
+        ])
+        status, _, data = request(
+            port, "POST", "/v1/chat/completions", tool_body)
+        assert status == 200, data
+
+        tool_body["stream"] = True
+        status, _, data = request(
+            port, "POST", "/v1/chat/completions", tool_body)
+        assert status == 400 and "streaming tool calls" in data
 
         body.update({
             "stream": True,
