@@ -38,6 +38,9 @@ correct -> simple -> readable -> usable -> fast
   render、runtime 和 engine 数据流。
 - 部署时只启动这个进程。模型运行不依赖 Python、动态链接的项目库、内部 RPC、额外 worker
   或 tokenizer 服务。
+- `qwen35.h` 提供 Engine/Session 的窄 C ABI；正常构建将其实现直接链接进 `qwen35`。为了
+  逐 token 数值对齐，`reference/` 可以把同一实现临时编译成 `reference/build/libqwen35.so`
+  供 ctypes 驱动。这个 shared library 是测试适配器，不是部署方式或分发产物。
 - 理想形态是单文件 C++；当一个文件已经妨碍阅读时，才沿真实数据流拆分。源码文件数量
   保持少，文件边界表达职责，而不是表达框架层次。
 
@@ -73,6 +76,9 @@ log.cpp        进程级日志实现
 
 Python 产出测试向量、模型数据或验证结果；`qwen35` 运行时独立消费最终二进制数据。这样
 开发阶段可以利用成熟生态，最终分发仍保持纯 C++、本地和自包含。
+
+reference 的 ctypes 包装只调用上述 C ABI，用于控制 Session、checkpoint 和读取完整 logits；
+HTTP、JSON、render 和产品服务接口仍由 `qwen35` 可执行文件统一提供。
 
 JSON 同样只是一种边界语言：`parser.cpp` 将它转换为普通 C++ 数据；render、runtime 和
 engine 只认识自身需要的明确类型。

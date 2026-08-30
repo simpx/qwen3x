@@ -121,7 +121,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 服务还提供 `/healthz`、`/readyz` 和 `/v1/models`。`--listen` 默认使用 `info`
 日志，prompt 和 benchmark 默认使用 `error`；显式 `--log-level` 会覆盖模式默认值。
-指定 `--log-file logs/qwen35.log` 后，滚动文件会替代 stderr 成为日志输出位置。
+指定 `--log-file build/qwen35.log` 后，滚动文件会替代 stderr 成为日志输出位置。
 
 ## 目录
 

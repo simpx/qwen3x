@@ -33,8 +33,8 @@ bool token_is_stop(int token);
 
 namespace q35_internal {
 
-// Configure the process logger before worker threads start. stderr is always
-// enabled; a non-empty file adds a rotating file sink.
+// Configure the process logger before worker threads start. An empty file uses
+// stderr; a non-empty file replaces stderr with a rotating file sink.
 bool log_configure(q35_log_level level, const char* file,
                    size_t max_bytes, size_t backups,
                    char* err, size_t errlen);
