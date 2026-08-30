@@ -52,6 +52,7 @@ parser.cpp     JSON <-> 简单 C++ 请求/响应结构
 render.cpp     Qwen chat template、tokenizer、token decode
 runtime.cpp    Session、cache/checkpoint、prefill、decode、sampling
 engine.cpp     权重、State/Work、算子和完整 Qwen forward
+arch/cuda/     CUDA engine；chunk prefill 与单 token decode forward
 log.cpp        进程级日志实现
 ```
 
@@ -158,8 +159,10 @@ qwen35-0.8b-render.bin
 - 公式 shape 和 checkpoint 实际存储布局分别说明。模型代码使用 `H、I、D、T、V` 等固定
   符号，并让矩阵乘法维度能够直接检查。
 - `engine.cpp` 中一个 token 的完整 forward 从上到下展开，作为最容易理解和验证的实现。
-- 当前 CPU prefill 逐 token forward，作为 correctness baseline。
-- 未来 CUDA prefill 按 chunk 批量调度，并把 `checkpoint_at` 作为精确 chunk 边界。
+- CPU prefill 逐 token forward，作为 correctness baseline。
+- CUDA prefill 在 backend 内按 chunk 批量调度；runtime 把 `checkpoint_at` 作为精确 range
+  边界，CUDA chunk 不跨过该边界。CUDA decode 保留可直接阅读的单 token forward，并用
+  CUDA Graph replay 相同的具名 kernel 顺序。
 - checkpoint 恢复后应等价于已经处理相同前缀；cache 优化通过 token、logits 和生成结果
   一致性测试验证。
 - 性能优化由 benchmark 或 profiler 数据驱动，并保持模型数据流可读。

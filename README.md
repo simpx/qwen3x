@@ -36,6 +36,18 @@ make -C scripts checkpoint model render
 make -j4
 ```
 
+默认构建 `build/qwen35` CPU correctness engine。NVIDIA CUDA 版本使用同一套
+main/runtime/render，只替换 engine：
+
+```sh
+make cuda -j4
+./build/qwen35-cuda --prompt "hello"
+```
+
+CUDA 构建需要 CUDA Toolkit，当前在 CUDA 12.8 / compute capability 8.9 上验证。
+decode 使用显式单 token forward 的 CUDA Graph，prefill 按 128-token chunk 执行；完整
+优化过程、正确性阈值和 CPU/CUDA benchmark 见 [eval/cuda.md](eval/cuda.md)。
+
 所有下载和生成的文件都位于 `build/`。`make clean` 清理程序、render 和测试产物，
 但保留下载的 checkpoint 与 pack 后的模型权重。首次构建可以并行编译；之后直接运行
 `make` 只会重编发生变化的源码及其依赖。
@@ -137,7 +149,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ## 目录
 
 ```text
-engine.cpp          模型权重、State、Work 和完整 forward
+engine.cpp          CPU correctness engine 与完整单 token forward
+arch/cuda/engine.cu CUDA Model/State、chunk prefill 和单 token forward
 runtime.cpp         Session、sampling 和 cache 生命周期
 main.cpp            main、HTTP routes 和 completion 数据流
 parser.cpp          唯一 JSON-aware 的 C++ 边界

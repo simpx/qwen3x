@@ -17,6 +17,7 @@ SERVED_MODEL ?= qwen3.5-0.8b-reference
 
 ENGINE_DIR ?= ..
 LIBRARY ?= build/libqwen35.so
+CUDA_LIBRARY ?= build/libqwen35-cuda.so
 BIN ?= $(ENGINE_DIR)/build/qwen35-0.8b-model.bin
 VECTORS ?= build/cpu
 REPORT ?= build/reference-report.json
@@ -28,7 +29,7 @@ THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(ENGINE_DIR)/third_party/spdlog/include
 SPDLOG_SRC := $(wildcard $(ENGINE_DIR)/third_party/spdlog/src/*.cpp)
 
-.PHONY: all sync dump test cpu cuda compare serve clean
+.PHONY: all sync dump test cpu cuda compare compare-cuda serve clean
 
 all: cpu
 
@@ -57,6 +58,17 @@ compare: $(LIBRARY)
 		--report "$(REPORT)" \
 		--cxxflags "$(CXXFLAGS)"
 
+compare-cuda: $(CUDA_LIBRARY)
+	$(PYTHON) compare_engine.py \
+		--library "$(CUDA_LIBRARY)" \
+		--bin "$(BIN)" \
+		--vectors "$(VECTORS)" \
+		--model "$(MODEL)" \
+		--chat-template "$(CHAT_TEMPLATE)" \
+		--report "build/cuda-reference-report.json" \
+		--tolerance-key cuda_max_abs_error \
+		--cxxflags "CUDA $(CXXFLAGS)"
+
 $(LIBRARY): $(ENGINE_DIR)/engine.cpp $(ENGINE_DIR)/runtime.cpp \
 		$(ENGINE_DIR)/log.cpp $(ENGINE_DIR)/qwen35.h \
 		$(ENGINE_DIR)/internal.h $(SPDLOG_SRC)
@@ -65,6 +77,17 @@ $(LIBRARY): $(ENGINE_DIR)/engine.cpp $(ENGINE_DIR)/runtime.cpp \
 		-fPIC -shared -I$(ENGINE_DIR) $(ENGINE_DIR)/engine.cpp \
 		$(ENGINE_DIR)/runtime.cpp $(ENGINE_DIR)/log.cpp $(SPDLOG_SRC) \
 		-pthread -o "$(LIBRARY)"
+
+$(CUDA_LIBRARY): $(ENGINE_DIR)/arch/cuda/engine.cu $(ENGINE_DIR)/runtime.cpp \
+		$(ENGINE_DIR)/log.cpp $(ENGINE_DIR)/qwen35.h \
+		$(ENGINE_DIR)/internal.h $(SPDLOG_SRC)
+	mkdir -p "$(dir $(CUDA_LIBRARY))"
+	nvcc -O3 -std=c++17 -arch=native \
+		-Xcompiler=-fPIC,-fno-exceptions,-fno-rtti,-Wall,-Wextra \
+		$(THIRD_PARTY_FLAGS) -shared -I$(ENGINE_DIR) \
+		$(ENGINE_DIR)/arch/cuda/engine.cu $(ENGINE_DIR)/runtime.cpp \
+		$(ENGINE_DIR)/log.cpp $(SPDLOG_SRC) -Xcompiler=-pthread \
+		-o "$(CUDA_LIBRARY)"
 
 serve:
 	$(PYTHON) server.py \

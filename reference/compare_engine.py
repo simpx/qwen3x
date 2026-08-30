@@ -176,13 +176,14 @@ def main() -> None:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--chat-template", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--tolerance-key", default="cpu_max_abs_error")
     parser.add_argument("--cxxflags", default="")
     args = parser.parse_args()
 
     metadata = json.loads((args.vectors / "vectors.json").read_text())
     if metadata.get("format") != "qwen3x-hf-vectors":
         raise SystemExit("unsupported Transformers reference format")
-    tolerance = float(metadata["comparison_tolerances"]["cpu_max_abs_error"])
+    tolerance = float(metadata["comparison_tolerances"][args.tolerance_key])
     fingerprint = metadata["fingerprint"]
     expected_hashes = {
         "config_sha256": sha256(args.model / "config.json"),
@@ -203,7 +204,7 @@ def main() -> None:
             for case in metadata["cases"]:
                 worst = max(worst, check_case(engine, vectors, case, tolerance))
     print(
-        f"SIMD Engine reference: passed cases={len(metadata['cases'])} "
+        f"Engine reference: passed cases={len(metadata['cases'])} "
         f"max_abs_error={worst:.9g} tolerance={tolerance:.9g}"
     )
     model_shards = {

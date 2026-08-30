@@ -1,6 +1,8 @@
 CXX ?= c++
+NVCC ?= nvcc
 BUILD ?= build
 PROGRAM ?= $(BUILD)/qwen35
+CUDA_PROGRAM ?= $(BUILD)/qwen35-cuda
 
 CXXFLAGS ?= -O3 -std=c++17 -fno-exceptions -fno-rtti \
 	-Wall -Wextra -Wpedantic -march=native
@@ -8,32 +10,52 @@ THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-Ithird_party/spdlog/include
 THREAD_FLAGS := -pthread
 SPDLOG_SRC := $(wildcard third_party/spdlog/src/*.cpp)
-PROGRAM_SRC := main.cpp engine.cpp runtime.cpp log.cpp parser.cpp render.cpp \
+COMMON_SRC := main.cpp runtime.cpp log.cpp parser.cpp render.cpp \
 	$(SPDLOG_SRC)
-PROGRAM_OBJ := $(patsubst %.cpp,$(BUILD)/obj/%.o,$(PROGRAM_SRC))
+COMMON_OBJ := $(patsubst %.cpp,$(BUILD)/obj/%.o,$(COMMON_SRC))
+PROGRAM_OBJ := $(BUILD)/obj/engine.o $(COMMON_OBJ)
 PROGRAM_DEP := $(PROGRAM_OBJ:.o=.d)
+CUDA_OBJ := $(BUILD)/obj/arch/cuda/engine.o
+CUDA_DEP := $(CUDA_OBJ:.o=.d)
+CUDA_ARCH ?= native
+NVCCFLAGS ?= -O3 -std=c++17 -arch=$(CUDA_ARCH) \
+	-Xcompiler=-fno-exceptions,-fno-rtti,-Wall,-Wextra
 
 .DELETE_ON_ERROR:
 
-.PHONY: all test clean
+.PHONY: all cuda test cuda-test clean
 
 all: $(PROGRAM)
+
+cuda: $(CUDA_PROGRAM)
 
 $(PROGRAM): $(PROGRAM_OBJ)
 	mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) $^ $(THREAD_FLAGS) -o $@
+
+$(CUDA_PROGRAM): $(CUDA_OBJ) $(COMMON_OBJ)
+	mkdir -p $(BUILD)
+	$(NVCC) $(NVCCFLAGS) $^ -Xcompiler=-pthread -o $@
+
+$(CUDA_OBJ): arch/cuda/engine.cu internal.h qwen35.h Makefile
+	mkdir -p $(dir $@)
+	$(NVCC) $(NVCCFLAGS) -I. -MMD -MP -c $< -o $@
 
 $(BUILD)/obj/%.o: %.cpp Makefile
 	mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) -I. $(THREAD_FLAGS) \
 		-MMD -MP -c $< -o $@
 
--include $(PROGRAM_DEP)
+-include $(PROGRAM_DEP) $(CUDA_DEP)
 
 test: all
 	$(MAKE) -C tests test
 
+cuda-test: cuda
+	$(MAKE) -C reference compare-cuda PYTHON=python3 VECTORS=build/cpu
+
 clean:
-	rm -f "$(PROGRAM)" $(PROGRAM_OBJ) $(PROGRAM_DEP)
+	rm -f "$(PROGRAM)" "$(CUDA_PROGRAM)" $(PROGRAM_OBJ) $(PROGRAM_DEP) \
+		$(CUDA_OBJ) $(CUDA_DEP)
 	$(MAKE) -C scripts clean
 	$(MAKE) -C tests clean
