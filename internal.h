@@ -51,6 +51,8 @@ void report_assertion(const char* expression, const char* file, int line,
 }  // namespace q35_internal
 
 // __VA_ARGS__ always contains at least the format string.
+#define LOG_TRACE(...) \
+    q35_internal::logf(Q35_LOG_TRACE, __FILE__, __LINE__, __VA_ARGS__)
 #define LOG_DEBUG(...) \
     q35_internal::logf(Q35_LOG_DEBUG, __FILE__, __LINE__, __VA_ARGS__)
 #define LOG_INFO(...) \

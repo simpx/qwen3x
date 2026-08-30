@@ -117,7 +117,20 @@ def main():
         process.terminate()
         process.wait(timeout=10)
     with open(server_log, encoding="utf-8") as stream:
-        assert "server ready" in stream.read()
+        logs = stream.read()
+        assert "server ready" in logs
+        assert "renderer load started" in logs
+        assert "renderer load completed" in logs
+        assert "access started request_id=" in logs
+        assert "request prepared request_id=" in logs
+        assert "parse_ms=" in logs and "render_ms=" in logs
+        assert "generation started request_id=" in logs
+        assert "prefill_ms=" in logs and "ttft_ms=" in logs
+        assert "duration_ms=" in logs and "decode_tps=" in logs
+        assert "access completed request_id=" in logs
+        assert logs.count("access started request_id=") == \
+            logs.count("access completed request_id=")
+        assert "request accepted" not in logs
     server_logs.cleanup()
     print("http-test: ok")
 

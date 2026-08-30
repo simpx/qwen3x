@@ -78,6 +78,7 @@ struct Runtime {
     q35_session_manager* manager = nullptr;
     std::unique_ptr<q35_render::Renderer> renderer;
     int think_end_token = -1;
+    std::atomic<int> inflight{0};
 
     ~Runtime() {
         if (manager) q35_session_manager_destroy(manager);
@@ -101,7 +102,80 @@ struct GenerationResult {
     std::string content;
     std::string finish_reason = "length";
     int cached_tokens = 0;
+    double prefill_seconds = 0.0;
+    double ttft_seconds = 0.0;
+    double decode_seconds = 0.0;
+    double elapsed_seconds = 0.0;
 };
+
+using Clock = std::chrono::steady_clock;
+
+double elapsed_since(Clock::time_point started) {
+    return std::chrono::duration<double>(Clock::now() - started).count();
+}
+
+struct AccessLog {
+    std::string request_id;
+    std::string completion_id = "-";
+    std::string remote;
+    std::string method;
+    std::string path;
+    std::string model = "-";
+    std::string finish_reason = "-";
+    std::string stage = "auth";
+    Clock::time_point started;
+    std::atomic<int>* inflight = nullptr;
+    int inflight_start = 0;
+    int slots = 0;
+    int status = 500;
+    size_t request_bytes = 0;
+    size_t response_bytes = 0;
+    size_t messages = 0;
+    size_t prompt_tokens = 0;
+    int cached_tokens = 0;
+    int completion_tokens = 0;
+    bool stream = false;
+    double parse_ms = 0.0;
+    double render_ms = 0.0;
+    double prefill_ms = 0.0;
+    double ttft_ms = 0.0;
+    double decode_tps = 0.0;
+    std::atomic<bool> completed{false};
+
+    void complete(const char* result, const char* stage) {
+        if (completed.exchange(true)) return;
+        const int inflight_end = inflight->fetch_sub(1) - 1;
+        LOG_INFO("access completed request_id=%s completion_id=%s remote=%s "
+                 "method=%s path=%s status=%d result=%s stage=%s model=%s "
+                 "stream=%d inflight_start=%d inflight_end=%d slots=%d "
+                 "request_bytes=%zu response_bytes=%zu messages=%zu "
+                 "prompt_tokens=%zu cached_tokens=%d completion_tokens=%d "
+                 "finish_reason=%s parse_ms=%.3f render_ms=%.3f "
+                 "prefill_ms=%.3f ttft_ms=%.3f duration_ms=%.3f "
+                 "decode_tps=%.2f",
+                 request_id.c_str(), completion_id.c_str(), remote.c_str(),
+                 method.c_str(), path.c_str(), status, result, stage,
+                 model.c_str(), stream, inflight_start, inflight_end, slots,
+                 request_bytes, response_bytes, messages, prompt_tokens,
+                 cached_tokens, completion_tokens, finish_reason.c_str(),
+                 parse_ms, render_ms, prefill_ms, ttft_ms,
+                 elapsed_since(started) * 1000.0, decode_tps);
+    }
+
+    ~AccessLog() {
+        complete("aborted", "server");
+    }
+};
+
+void record_generation(AccessLog* access, const GenerationResult& result) {
+    access->cached_tokens = result.cached_tokens;
+    access->completion_tokens = static_cast<int>(result.tokens.size());
+    access->finish_reason = result.finish_reason;
+    access->prefill_ms = result.prefill_seconds * 1000.0;
+    access->ttft_ms = result.ttft_seconds * 1000.0;
+    access->decode_tps = result.decode_seconds > 0.0
+        ? access->completion_tokens / result.decode_seconds : 0.0;
+}
 
 template <typename Integer>
 bool integer(const std::string& text, Integer* output) {
@@ -232,7 +306,8 @@ bool parse_options(int argc, char** argv, Options* options,
                 return false;
             }
         } else if (argument == "--log-level") {
-            if (value == "debug") options->log_level = Q35_LOG_DEBUG;
+            if (value == "trace") options->log_level = Q35_LOG_TRACE;
+            else if (value == "debug") options->log_level = Q35_LOG_DEBUG;
             else if (value == "info") options->log_level = Q35_LOG_INFO;
             else if (value == "warn" || value == "warning") {
                 options->log_level = Q35_LOG_WARN;
@@ -286,7 +361,7 @@ void usage(const char* program) {
         "  %s [-m MODEL] [-r RENDER] -l [--host HOST] [--port PORT]\n"
         "  %s [-m MODEL] --bench PREFILL_TOKENS DECODE_TOKENS\n"
         "common: [--session-slots N] [--session-context N] [--mock]\n"
-        "        [--log-level debug|info|warn|error] [--log-file PATH]\n"
+        "        [--log-level trace|debug|info|warn|error] [--log-file PATH]\n"
         "        log default: info for --listen, error otherwise\n"
         "defaults beside qwen35: %s and %s\n", program, program, program,
         DEFAULT_MODEL, DEFAULT_RENDER);
@@ -423,6 +498,7 @@ bool generate(Runtime& runtime, const q35_render::CompletionRequest& request,
         *error = native_error;
         return false;
     }
+    result->prefill_seconds = elapsed_since(started);
 
     uint64_t rng = request.has_seed ? request.seed : random_seed();
     std::vector<int> penalty_tokens;
@@ -454,6 +530,9 @@ bool generate(Runtime& runtime, const q35_render::CompletionRequest& request,
         }
 
         result->tokens.push_back(token);
+        if (result->tokens.size() == 1) {
+            result->ttft_seconds = elapsed_since(started);
+        }
         if (penalty_seen.insert(token).second) penalty_tokens.push_back(token);
         if (!split_output(runtime, request, result->tokens,
                           &result->reasoning, &result->content, error)) return false;
@@ -517,82 +596,147 @@ bool generate(Runtime& runtime, const q35_render::CompletionRequest& request,
         *error = "client disconnected";
         return false;
     }
+    result->elapsed_seconds = elapsed_since(started);
+    result->decode_seconds =
+        result->elapsed_seconds - result->prefill_seconds;
     return true;
 }
 
-bool prepare_request(Runtime& runtime, const httplib::Request& http,
+bool prepare_request(Runtime& runtime, AccessLog* access,
+                     const httplib::Request& http,
                      httplib::Response& response,
                      q35_render::CompletionRequest* request,
                      q35_render::RenderedPrompt* prompt) {
+    const auto started = Clock::now();
+    access->stage = "parse";
     const q35_render::Status status = q35_render::parse_completion_request(
         http.body, runtime.options.served_model,
         runtime.options.max_tokens, *request);
     if (!status.ok()) {
         const bool missing_model = status.message().find("model not found") !=
                                    std::string::npos;
-        api_error(response, missing_model ? 404 : 400, status.message(),
+        const int http_status = missing_model ? 404 : 400;
+        LOG_WARN("request rejected request_id=%s stage=parse status=%d error=%s",
+                 access->request_id.c_str(), http_status,
+                 status.message().c_str());
+        api_error(response, http_status, status.message(),
                   "invalid_request_error", missing_model ? "model" : nullptr,
                   missing_model ? "model_not_found" : nullptr);
         return false;
     }
+    const double parse_elapsed = elapsed_since(started);
+    access->parse_ms = parse_elapsed * 1000.0;
+    access->model = request->model;
+    access->messages = request->chat.messages.size();
+    access->stream = request->stream;
+    LOG_DEBUG("request parsed request_id=%s model=%s messages=%zu tools=%zu "
+              "stream=%d max_tokens=%d temperature=%.3f elapsed=%.3fs",
+              access->request_id.c_str(), request->model.c_str(),
+              request->chat.messages.size(), request->chat.tools.size(),
+              request->stream, request->max_tokens, request->temperature,
+              parse_elapsed);
+
+    access->stage = "render";
+    const auto render_started = Clock::now();
     std::string error;
-    if (!runtime.renderer->render(request->chat, prompt, &error)) {
+    const bool rendered = runtime.renderer->render(request->chat, prompt, &error);
+    access->render_ms = elapsed_since(render_started) * 1000.0;
+    if (!rendered) {
+        LOG_WARN("request rejected request_id=%s stage=render status=400 error=%s",
+                 access->request_id.c_str(), error.c_str());
         api_error(response, 400, error, "invalid_request_error", "messages");
         return false;
     }
     if (prompt->tokens.empty()) {
+        LOG_ERROR("request failed request_id=%s stage=render status=500 "
+                  "error=empty_prompt", access->request_id.c_str());
         api_error(response, 500, "chat template produced an empty prompt",
                   "server_error", nullptr, "invalid_chat_template");
         return false;
     }
+    access->prompt_tokens = prompt->tokens.size();
+    access->stage = "context";
     if (prompt->tokens.size() + static_cast<size_t>(request->max_tokens) >
         static_cast<size_t>(runtime.options.context)) {
+        LOG_WARN("request rejected request_id=%s stage=context status=400 "
+                 "prompt_tokens=%zu max_tokens=%d context=%d",
+                 access->request_id.c_str(), prompt->tokens.size(),
+                 request->max_tokens, runtime.options.context);
         api_error(response, 400, "prompt and completion exceed the Session context",
                   "invalid_request_error", "max_completion_tokens",
                   "context_length_exceeded");
         return false;
     }
+    LOG_INFO("request prepared request_id=%s messages=%zu prompt_bytes=%zu "
+             "prompt_tokens=%zu stream=%d thinking=%d parse_ms=%.3f "
+             "render_ms=%.3f elapsed_ms=%.3f",
+             access->request_id.c_str(), request->chat.messages.size(),
+             prompt->text.size(), prompt->tokens.size(), request->stream,
+             request->chat.options.enable_thinking, access->parse_ms,
+             access->render_ms,
+             elapsed_since(started) * 1000.0);
+    access->stage = "prepared";
     return true;
 }
 
-q35_session* acquire(Runtime& runtime, const std::vector<int>& prompt,
+q35_session* acquire(Runtime& runtime, const std::string& request_id,
+                     const std::vector<int>& prompt,
                      httplib::Response& response) {
+    const auto started = Clock::now();
     q35_session* session = nullptr;
     char error[ERROR_SIZE]{};
     const int status = q35_session_manager_acquire(
         runtime.manager, prompt.data(), static_cast<int>(prompt.size()),
         &session, error, sizeof(error));
     if (status == Q35_BUSY) {
+        LOG_WARN("request rejected request_id=%s stage=session status=429 "
+                 "error=%s", request_id.c_str(),
+                 error[0] ? error : "all sessions are busy");
         api_error(response, 429, error[0] ? error : "all sessions are busy",
                   "rate_limit_error", nullptr, "engine_busy");
         return nullptr;
     }
     if (status != Q35_OK) {
+        LOG_ERROR("request failed request_id=%s stage=session status=500 "
+                  "error=%s", request_id.c_str(),
+                  error[0] ? error : "cannot acquire Session");
         api_error(response, 500, error[0] ? error : "cannot acquire Session",
                   "server_error");
         return nullptr;
     }
+    LOG_DEBUG("session acquired request_id=%s prompt_tokens=%zu elapsed=%.3fs",
+              request_id.c_str(), prompt.size(), elapsed_since(started));
     return session;
 }
 
-void chat(Runtime& runtime, const httplib::Request& http,
-          httplib::Response& response) {
-    if (!authenticate(http, response)) return;
+bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
+          const httplib::Request& http, httplib::Response& response) {
+    if (!authenticate(http, response)) {
+        LOG_WARN("request rejected request_id=%s stage=auth status=401",
+                 access->request_id.c_str());
+        return false;
+    }
     q35_render::CompletionRequest request;
     q35_render::RenderedPrompt prompt;
-    if (!prepare_request(runtime, http, response, &request, &prompt)) return;
+    if (!prepare_request(runtime, access.get(), http, response,
+                         &request, &prompt)) return false;
 
-    q35_session* session = acquire(runtime, prompt.tokens, response);
-    if (!session) return;
+    access->stage = "session";
+    q35_session* session = acquire(
+        runtime, access->request_id, prompt.tokens, response);
+    if (!session) return false;
     auto lease = std::make_shared<SessionLease>();
     lease->manager = runtime.manager;
     lease->session = session;
 
     const std::string completion_id = make_id("chatcmpl-");
+    access->completion_id = completion_id;
+    access->stage = "generation";
     const int64_t created = static_cast<int64_t>(std::time(nullptr));
-    LOG_INFO("generation started completion_id=%s prompt_tokens=%zu max_tokens=%d "
-             "stream=%d", completion_id.c_str(), prompt.tokens.size(),
-             request.max_tokens, request.stream);
+    LOG_INFO("generation started request_id=%s completion_id=%s "
+             "prompt_tokens=%zu max_tokens=%d stream=%d",
+             access->request_id.c_str(), completion_id.c_str(),
+             prompt.tokens.size(), request.max_tokens, request.stream);
 
     if (!request.stream) {
         GenerationResult result;
@@ -600,8 +744,13 @@ void chat(Runtime& runtime, const httplib::Request& http,
         const Publish discard = [](const char*, const std::string&) { return true; };
         if (!generate(runtime, request, prompt.tokens, session, discard,
                       &result, &error)) {
+            record_generation(access.get(), result);
+            LOG_ERROR("request failed request_id=%s completion_id=%s "
+                      "stage=generation status=500 error=%s",
+                      access->request_id.c_str(), completion_id.c_str(),
+                      error.c_str());
             api_error(response, 500, error, "server_error");
-            return;
+            return false;
         }
         lease->keep = true;
         q35_render::CompletionUsage usage{
@@ -612,12 +761,8 @@ void chat(Runtime& runtime, const httplib::Request& http,
             result.reasoning, result.content,
             request.chat.options.enable_thinking,
             result.finish_reason.c_str(), usage));
-        LOG_INFO("generation completed completion_id=%s finish_reason=%s "
-                 "prompt_tokens=%d cache_hit_tokens=%d completion_tokens=%d",
-                 completion_id.c_str(), result.finish_reason.c_str(),
-                 usage.prompt_tokens, usage.cached_tokens,
-                 usage.completion_tokens);
-        return;
+        record_generation(access.get(), result);
+        return false;
     }
 
     response.set_header("Cache-Control", "no-cache");
@@ -626,16 +771,38 @@ void chat(Runtime& runtime, const httplib::Request& http,
     response.set_chunked_content_provider(
         "text/event-stream; charset=utf-8",
         [&runtime, request = std::move(request), prompt = std::move(prompt),
-         lease, completion_id, created](size_t offset,
-                                        httplib::DataSink& sink) mutable {
+         lease, access, completion_id,
+         created](size_t offset, httplib::DataSink& sink) mutable {
             if (offset != 0) return false;
+            auto release = [&](bool keep) {
+                if (!lease->session) return;
+                q35_session_manager_release(
+                    lease->manager, lease->session, keep);
+                lease->session = nullptr;
+            };
+            auto interrupted = [&](const char* stage) {
+                LOG_WARN("request interrupted request_id=%s completion_id=%s "
+                         "stage=%s elapsed=%.3fs", access->request_id.c_str(),
+                         completion_id.c_str(), stage,
+                         elapsed_since(access->started));
+                release(false);
+                access->status = 200;
+                access->stage = stage;
+                access->complete("disconnected", stage);
+            };
             auto send = [&](const std::string& text) {
                 const std::string event = "data: " + text + "\n\n";
-                return sink.is_writable() && sink.write(event.data(), event.size());
+                if (!sink.is_writable() ||
+                    !sink.write(event.data(), event.size())) return false;
+                access->response_bytes += event.size();
+                return true;
             };
             if (!send(q35_render::completion_chunk_json(
                     completion_id, created, runtime.options.served_model,
-                    "role", "assistant"))) return false;
+                    "role", "assistant"))) {
+                interrupted("stream_start");
+                return false;
+            }
 
             GenerationResult result;
             std::string error;
@@ -647,35 +814,62 @@ void chat(Runtime& runtime, const httplib::Request& http,
             };
             if (!generate(runtime, request, prompt.tokens, lease->session,
                           publish, &result, &error)) {
+                record_generation(access.get(), result);
+                if (error == "client disconnected") {
+                    interrupted("generation");
+                } else {
+                    LOG_ERROR("request failed request_id=%s completion_id=%s "
+                              "stage=generation status=500 error=%s",
+                              access->request_id.c_str(), completion_id.c_str(),
+                              error.c_str());
+                }
                 if (error != "client disconnected" && sink.is_writable()) {
                     send(q35_render::error_json(error, "server_error"));
                     send("[DONE]");
                 }
+                if (error != "client disconnected") {
+                    release(false);
+                    access->status = 200;
+                    access->stage = "generation";
+                    access->complete("error", "generation");
+                }
                 return false;
             }
+            record_generation(access.get(), result);
             if (!send(q35_render::completion_chunk_json(
                     completion_id, created, runtime.options.served_model,
-                    nullptr, "", result.finish_reason.c_str()))) return false;
+                    nullptr, "", result.finish_reason.c_str()))) {
+                interrupted("stream_finish");
+                return false;
+            }
             q35_render::CompletionUsage usage{
                 static_cast<int>(prompt.tokens.size()), result.cached_tokens,
                 static_cast<int>(result.tokens.size())};
             if (request.include_usage &&
                 !send(q35_render::completion_usage_chunk_json(
                     completion_id, created, runtime.options.served_model,
-                    usage))) return false;
-            if (!send("[DONE]")) return false;
-            lease->keep = true;
+                    usage))) {
+                interrupted("stream_usage");
+                return false;
+            }
+            if (!send("[DONE]")) {
+                interrupted("stream_done");
+                return false;
+            }
             sink.done();
-            LOG_INFO("generation completed completion_id=%s finish_reason=%s "
-                     "prompt_tokens=%d cache_hit_tokens=%d completion_tokens=%d",
-                     completion_id.c_str(), result.finish_reason.c_str(),
-                     usage.prompt_tokens, usage.cached_tokens,
-                     usage.completion_tokens);
+            release(true);
+            access->status = 200;
+            access->stage = "generation";
+            access->complete("ok", "generation");
             return true;
         });
+    return true;
 }
 
 bool initialize(Runtime* runtime, std::string* error) {
+    const auto render_started = Clock::now();
+    LOG_INFO("renderer load started bin=%s",
+             runtime->options.render_path.c_str());
     std::string render_error;
     runtime->renderer.reset(q35_render::Renderer::create(
         runtime->options.render_path, &render_error));
@@ -690,6 +884,8 @@ bool initialize(Runtime* runtime, std::string* error) {
         return false;
     }
     runtime->think_end_token = think_end[0];
+    LOG_INFO("renderer load completed elapsed=%.3fs",
+             elapsed_since(render_started));
 
     char native_error[ERROR_SIZE]{};
     q35_engine_options engine_options{
@@ -866,16 +1062,37 @@ int serve(Runtime& runtime, std::string* error) {
     });
     server.Post("/v1/chat/completions", [&](const httplib::Request& request,
                                             httplib::Response& response) {
-        const std::string request_id = make_id("req-");
-        response.set_header("X-Request-Id", request_id);
-        const auto started = std::chrono::steady_clock::now();
-        LOG_INFO("request started request_id=%s method=POST path=%s",
-                 request_id.c_str(), request.path.c_str());
-        chat(runtime, request, response);
-        const double elapsed = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - started).count();
-        LOG_INFO("request accepted request_id=%s status=%d elapsed=%.3fs",
-                 request_id.c_str(), response.status, elapsed);
+        auto access = std::make_shared<AccessLog>();
+        access->request_id = make_id("req-");
+        access->remote = request.remote_addr.empty()
+            ? "-" : request.remote_addr;
+        access->method = request.method;
+        access->path = request.path;
+        access->model = runtime.options.served_model;
+        access->started = Clock::now();
+        access->inflight = &runtime.inflight;
+        access->inflight_start = runtime.inflight.fetch_add(1) + 1;
+        access->slots = runtime.options.slots;
+        access->request_bytes = request.body.size();
+        response.set_header("X-Request-Id", access->request_id);
+        LOG_INFO("access started request_id=%s remote=%s method=%s path=%s "
+                 "inflight=%d slots=%d request_bytes=%zu",
+                 access->request_id.c_str(), access->remote.c_str(),
+                 access->method.c_str(), access->path.c_str(),
+                 access->inflight_start, access->slots,
+                 access->request_bytes);
+        const bool streaming = chat(runtime, access, request, response);
+        if (streaming) {
+            LOG_DEBUG("stream ready request_id=%s status=%d elapsed=%.3fs",
+                      access->request_id.c_str(), response.status,
+                      elapsed_since(access->started));
+        } else {
+            access->status = response.status;
+            access->response_bytes = response.body.size();
+            const char* result = response.status >= 500 ? "error"
+                : response.status >= 400 ? "rejected" : "ok";
+            access->complete(result, access->stage.c_str());
+        }
     });
     server.set_error_handler([](const httplib::Request&,
                                 httplib::Response& response) {

@@ -31,6 +31,7 @@ const char* file_name(const char* path) {
 
 spdlog::level::level_enum spd_level(q35_log_level level) {
     switch (level) {
+        case Q35_LOG_TRACE: return spdlog::level::trace;
         case Q35_LOG_DEBUG: return spdlog::level::debug;
         case Q35_LOG_WARN: return spdlog::level::warn;
         case Q35_LOG_ERROR: return spdlog::level::err;
@@ -45,7 +46,7 @@ void q35_log_set_callback(q35_log_callback callback,
                           q35_log_level level) {
     log_callback = callback;
     log_user_data = user_data;
-    log_level = level >= Q35_LOG_DEBUG && level <= Q35_LOG_ERROR
+    log_level = level >= Q35_LOG_TRACE && level <= Q35_LOG_ERROR
         ? level : Q35_LOG_INFO;
 }
 
@@ -100,7 +101,8 @@ bool log_configure(q35_log_level level, const char* file,
     process_logger->set_level(spd_level(level));
     process_logger->set_pattern(
         "[%Y-%m-%d %H:%M:%S.%e] [%t] [%^%l%$] [%s:%#] %v");
-    process_logger->flush_on(spdlog::level::warn);
+    process_logger->flush_on(
+        file && file[0] ? spdlog::level::info : spdlog::level::warn);
     process_logger->set_error_handler([](const std::string& message) {
         std::fprintf(stderr, "qwen35: logging error: %s\n", message.c_str());
     });

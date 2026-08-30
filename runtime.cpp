@@ -243,7 +243,7 @@ struct q35_session {
                     token - MOCK_TARGET_TOKENS.front() + 1);
             }
             logits = engine->mock_logits[row];
-            LOG_DEBUG("mock forward token=%d position=%d logits_row=%zu target=%d",
+            LOG_TRACE("mock forward token=%d position=%d logits_row=%zu target=%d",
                       token, next_position, row, MOCK_TARGET_TOKENS[row]);
         } else {
             q35_backend::state_forward(engine->model, state, token,
@@ -275,7 +275,7 @@ struct q35_session {
         }
         checkpoint_position = position();
         checkpoint_valid = true;
-        LOG_INFO("session checkpoint saved checkpoint_state_tokens=%d",
+        LOG_DEBUG("session checkpoint saved checkpoint_state_tokens=%d",
                  checkpoint_position);
     }
 
@@ -294,7 +294,7 @@ struct q35_session {
                    tokens.size(), checkpoint_position);
         tokens.resize(static_cast<size_t>(checkpoint_position));
         logits_valid = true;
-        LOG_INFO("session checkpoint restored live_state_tokens=%d "
+        LOG_DEBUG("session checkpoint restored live_state_tokens=%d "
                  "checkpoint_state_tokens=%d discarded_tokens=%d",
                  checkpoint_position, checkpoint_position,
                  live_position - checkpoint_position);
@@ -433,7 +433,7 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
     const int checkpoint_position =
         session->checkpoint_valid ? session->checkpoint_position : 0;
     if (cached_tokens) *cached_tokens = reused;
-    LOG_INFO("session sync prompt_tokens=%d live_state_tokens=%d "
+    LOG_DEBUG("session sync prompt_tokens=%d live_state_tokens=%d "
              "checkpoint_state_tokens=%d checkpoint_at=%d "
              "cache_result=%s cache_hit_tokens=%d to_prefill_tokens=%d",
              count, live, checkpoint_position, checkpoint_at,
@@ -452,7 +452,7 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
         session->save_checkpoint();
         checkpoint_saved = true;
     }
-    LOG_INFO("session prefill started mode=%s prompt_tokens=%d "
+    LOG_DEBUG("session prefill started mode=%s prompt_tokens=%d "
              "cache_hit_tokens=%d to_prefill_tokens=%d",
              mode, count, reused, tokens_to_prefill);
     for (int index = reused; index < count; ++index) {
@@ -493,7 +493,7 @@ int q35_session_eval(q35_session* session, int token,
     session->append(token);
     const double elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - started).count();
-    LOG_DEBUG("session evaluated token=%d position=%d elapsed=%.3fs",
+    LOG_TRACE("session evaluated token=%d position=%d elapsed=%.3fs",
               token, session->position(), elapsed);
     return succeed(err, errlen);
 }
@@ -507,7 +507,7 @@ int q35_session_argmax(const q35_session* session) {
     const int token = session->engine->mock
         ? argmax_host(session->logits)
         : q35_backend::state_argmax(session->state);
-    LOG_DEBUG("argmax selected token=%d position=%d",
+    LOG_TRACE("argmax selected token=%d position=%d",
               token, session->position());
     return token;
 }
@@ -523,7 +523,7 @@ int q35_session_sample(q35_session* session, float temperature, int top_k,
         generated_tokens, generated_count, *rng, session->sample_order,
         session->adjusted_logits, session->penalty_marks,
         session->penalty_touched);
-    LOG_DEBUG("sample selected token=%d position=%d temperature=%.3f top_k=%d "
+    LOG_TRACE("sample selected token=%d position=%d temperature=%.3f top_k=%d "
               "top_p=%.3f presence_penalty=%.3f generated_tokens=%d",
               token, session->position(), temperature, top_k, top_p,
               presence_penalty, generated_count);
@@ -532,7 +532,7 @@ int q35_session_sample(q35_session* session, float temperature, int top_k,
 
 bool q35_token_is_stop(int token) {
     const bool stop = q35_backend::token_is_stop(token);
-    if (stop) LOG_DEBUG("stop token detected token=%d", token);
+    if (stop) LOG_TRACE("stop token detected token=%d", token);
     return stop;
 }
 
@@ -557,7 +557,7 @@ int q35_session_copy_logits(const q35_session* session, float* output,
     } else {
         q35_backend::state_copy_logits(session->state, output);
     }
-    LOG_DEBUG("logits copied count=%d position=%d",
+    LOG_TRACE("logits copied count=%d position=%d",
               q35_backend::vocab_size(), session->position());
     return succeed(err, errlen);
 }
@@ -730,7 +730,7 @@ void q35_session_manager_release(q35_session_manager* manager,
     const int checkpoint_state_tokens =
         q35_internal::session_checkpoint_state_tokens(entry->session);
     lock.unlock();
-    LOG_INFO("session release slot=%d result=%s live_state_tokens=%d "
+    LOG_DEBUG("session release slot=%d result=%s live_state_tokens=%d "
              "checkpoint_state_tokens=%d",
              slot, keep ? "kept" : "cleared", live_state_tokens,
              checkpoint_state_tokens);

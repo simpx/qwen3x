@@ -458,7 +458,7 @@ void forward(const Model& model, State& state, int token, Work& work,
     Q35_ASSERT(state.position >= 0 && state.position < state.capacity,
                "forward position=%d capacity=%d",
                state.position, state.capacity);
-    LOG_DEBUG("forward started token=%d position=%d", token, state.position);
+    LOG_TRACE("forward started token=%d position=%d", token, state.position);
     embed(model.embedding, token, work.hidden);  // token id -> hidden[H]。
     for (int index = 0; index < N; ++index) {
         const Layer& layer = model.layer[index];
@@ -482,15 +482,15 @@ void forward(const Model& model, State& state, int token, Work& work,
     }
     if (compute_logits) {
         rms(work.hidden, model.final_norm, H, work.normalized);
-        LOG_DEBUG("final norm completed");
+        LOG_TRACE("final norm completed");
         // lm_head：为词表的每一个候选 token 各算一个 logit。这里 W 直接重用 model.embedding：
         // logits[v] = dot(final_hidden, embedding[v])。这叫 tied embedding，避免再存一份 [V,H]
         // 输出矩阵；它与开头 embed() 的“按 token id 取同一张表的一行”正好相对。
         mv({model.embedding, V, H}, work.normalized, work.logits);
-        LOG_DEBUG("lm head completed logits=%d", V);
+        LOG_TRACE("lm head completed logits=%d", V);
     }
     ++state.position;
-    LOG_DEBUG("forward completed token=%d position=%d", token, state.position);
+    LOG_TRACE("forward completed token=%d position=%d", token, state.position);
 }
 
 // 到这里模型数学已经结束。以下 File/Reader 只把 packed 文件绑定成上面的 Model 指针。

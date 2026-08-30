@@ -22,6 +22,7 @@ enum {
 /* Engine: one loaded, read-only Qwen3.5-0.8B model. */
 
 typedef enum {
+    Q35_LOG_TRACE = -1,
     Q35_LOG_DEBUG = 0,
     Q35_LOG_INFO = 1,
     Q35_LOG_WARN = 2,
