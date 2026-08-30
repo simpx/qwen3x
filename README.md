@@ -62,6 +62,30 @@ make -j4
 设置 `QWEN_API_KEY` 会为 `/v1/models` 和 `/v1/chat/completions` 启用 Bearer
 鉴权。
 
+日常请求可以使用零依赖的薄客户端，不需要手写 JSON：
+
+```sh
+scripts/chat.py -u "你好"
+scripts/chat.py -s "回答简短" -u "你好" -a "你好！" -u "你是谁？"
+```
+
+`-c ID NAME ARGUMENTS` 表示 assistant tool call，`-t ID CONTENT` 用同一个
+ID 返回工具结果。连续的 `-c` 属于同一条 assistant 消息：
+
+```sh
+scripts/chat.py \
+  -u "杭州天气怎么样？" \
+  -c call_weather weather '{"city":"杭州"}' \
+  -t call_weather "晴，28°C"
+```
+
+`ARGUMENTS` 也可以写成 `@args.json`。增加 `--dry-run` 只生成可直接执行的
+curl，不发送请求：
+
+```sh
+scripts/chat.py -u "你好" --dry-run
+```
+
 测量不含 HTTP、JSON、chat template、tokenizer 和 sampling 的 Session 性能：
 
 ```sh

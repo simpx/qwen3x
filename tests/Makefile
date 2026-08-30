@@ -18,9 +18,9 @@ THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(PROJECT)/third_party/spdlog/include
 SPDLOG_SRC := $(wildcard $(PROJECT)/third_party/spdlog/src/*.cpp)
 
-.PHONY: test parser-test runtime-test cli-test render-test http-test clean
+.PHONY: test parser-test runtime-test cli-test chat-test render-test http-test clean
 
-test: parser-test runtime-test cli-test
+test: parser-test runtime-test cli-test chat-test
 
 $(PARSER_TEST): parser_test.cpp $(PROJECT)/parser.cpp $(PROJECT)/render.h \
 		$(PROJECT)/third_party/nlohmann/json.hpp
@@ -46,6 +46,10 @@ cli-test: $(PROGRAM)
 		echo "$$output" | grep -q '^prefill  8 tokens' && \
 		echo "$$output" | grep -q '^decode   4 tokens' && \
 		echo "cli-test: ok"
+
+chat-test:
+	cd "$(PROJECT)" && $(SYSTEM_PYTHON) -m unittest discover \
+		-s tests -p test_chat.py -v
 
 $(RENDER_DRIVER): render_driver.cpp $(PROJECT)/render.cpp $(PROJECT)/parser.cpp \
 		$(PROJECT)/render.h $(PROJECT)/third_party/nlohmann/json.hpp
