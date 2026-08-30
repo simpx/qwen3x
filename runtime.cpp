@@ -455,6 +455,9 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
     LOG_DEBUG("session prefill started mode=%s prompt_tokens=%d "
              "cache_hit_tokens=%d to_prefill_tokens=%d",
              mode, count, reused, tokens_to_prefill);
+    // The CPU backend currently forwards one token at a time. A future CUDA
+    // backend should prefill token chunks and split a chunk at checkpoint_at,
+    // so the recurrent state saved here represents that exact token boundary.
     for (int index = reused; index < count; ++index) {
         const bool need_logits =
             index + 1 == checkpoint_at || index + 1 == count;
