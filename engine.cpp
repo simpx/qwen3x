@@ -702,11 +702,16 @@ void state_reset(State* state) {
     state->live.reset();
 }
 
-void state_forward(Model* model, State* state, int token, bool compute_logits) {
-    Q35_ASSERT(model && state, "state_forward model=%p state=%p token=%d",
-               static_cast<void*>(model), static_cast<void*>(state), token);
-    qwen35::forward(model->loaded.model, state->live, token, state->work,
-                    compute_logits);
+void state_forward(Model* model, State* state,
+                   const int* tokens, int count, bool compute_logits) {
+    Q35_ASSERT(model && state && tokens && count > 0,
+               "state_forward model=%p state=%p tokens=%p count=%d",
+               static_cast<void*>(model), static_cast<void*>(state),
+               static_cast<const void*>(tokens), count);
+    for (int index = 0; index < count; ++index) {
+        qwen35::forward(model->loaded.model, state->live, tokens[index],
+                        state->work, compute_logits && index + 1 == count);
+    }
 }
 
 void state_checkpoint_save(State* state) {

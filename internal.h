@@ -19,7 +19,8 @@ void model_destroy(Model* model);
 State* state_create(Model* model, int context_size);
 void state_destroy(State* state);
 void state_reset(State* state);
-void state_forward(Model* model, State* state, int token, bool compute_logits);
+void state_forward(Model* model, State* state,
+                   const int* tokens, int count, bool compute_logits);
 void state_checkpoint_save(State* state);
 void state_checkpoint_restore(State* state);
 int state_argmax(const State* state);

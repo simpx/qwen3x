@@ -223,34 +223,45 @@ struct q35_session {
         logits_valid = false;
     }
 
-    void append(int token, bool compute_logits = true) {
+    void append(const int* input, int count, bool compute_logits = true) {
+        Q35_ASSERT(input && count > 0,
+                   "session append input=%p count=%d",
+                   static_cast<const void*>(input), count);
         if (engine->mock) {
-            const int previous_token = tokens.empty() ? -1 : tokens.back();
-            const int next_position = position() + 1;
-            size_t row = static_cast<size_t>(next_position % 10);
-            if (previous_token == THINK_START_TOKEN && token == NEWLINE_TOKEN) {
-                row = 11;
-            } else if (token == MOCK_REASONING_TOKEN) {
-                row = 12;
-            } else if (previous_token == MOCK_REASONING_TOKEN &&
-                       token == NEWLINE_TOKEN) {
-                row = 13;
-            } else if (token == THINK_END_TOKEN) {
-                row = 14;
-            } else if (token >= MOCK_TARGET_TOKENS.front() &&
-                       token <= MOCK_TARGET_TOKENS[9]) {
-                row = static_cast<size_t>(
-                    token - MOCK_TARGET_TOKENS.front() + 1);
+            for (int index = 0; index < count; ++index) {
+                const int token = input[index];
+                const int previous_token = tokens.empty() ? -1 : tokens.back();
+                const int next_position = position() + 1;
+                size_t row = static_cast<size_t>(next_position % 10);
+                if (previous_token == THINK_START_TOKEN && token == NEWLINE_TOKEN) {
+                    row = 11;
+                } else if (token == MOCK_REASONING_TOKEN) {
+                    row = 12;
+                } else if (previous_token == MOCK_REASONING_TOKEN &&
+                           token == NEWLINE_TOKEN) {
+                    row = 13;
+                } else if (token == THINK_END_TOKEN) {
+                    row = 14;
+                } else if (token >= MOCK_TARGET_TOKENS.front() &&
+                           token <= MOCK_TARGET_TOKENS[9]) {
+                    row = static_cast<size_t>(
+                        token - MOCK_TARGET_TOKENS.front() + 1);
+                }
+                logits = engine->mock_logits[row];
+                tokens.push_back(token);
+                LOG_TRACE("mock forward token=%d position=%d logits_row=%zu target=%d",
+                          token, next_position, row, MOCK_TARGET_TOKENS[row]);
             }
-            logits = engine->mock_logits[row];
-            LOG_TRACE("mock forward token=%d position=%d logits_row=%zu target=%d",
-                      token, next_position, row, MOCK_TARGET_TOKENS[row]);
         } else {
-            q35_backend::state_forward(engine->model, state, token,
+            q35_backend::state_forward(engine->model, state, input, count,
                                        compute_logits);
+            tokens.insert(tokens.end(), input, input + count);
         }
-        tokens.push_back(token);
         logits_valid = compute_logits || engine->mock;
+    }
+
+    void append(int token, bool compute_logits = true) {
+        append(&token, 1, compute_logits);
     }
 
     PrefixMatch match_prefix(const int* request, int count) const {
@@ -455,13 +466,17 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
     LOG_DEBUG("session prefill started mode=%s prompt_tokens=%d "
              "cache_hit_tokens=%d to_prefill_tokens=%d",
              mode, count, reused, tokens_to_prefill);
-    // The CPU backend currently forwards one token at a time. A future CUDA
-    // backend should prefill token chunks and split a chunk at checkpoint_at,
-    // so the recurrent state saved here represents that exact token boundary.
-    for (int index = reused; index < count; ++index) {
-        const bool need_logits =
-            index + 1 == checkpoint_at || index + 1 == count;
-        session->append(tokens[index], need_logits);
+    // checkpoint_at is an exact backend range boundary. Each backend chooses
+    // how to traverse a range without crossing the saved snapshot position.
+    int cursor = reused;
+    if (checkpoint_at > cursor && checkpoint_at < count) {
+        session->append(tokens + cursor, checkpoint_at - cursor, true);
+        session->save_checkpoint();
+        checkpoint_saved = true;
+        cursor = checkpoint_at;
+    }
+    if (cursor < count) {
+        session->append(tokens + cursor, count - cursor, true);
         if (session->position() == checkpoint_at) {
             session->save_checkpoint();
             checkpoint_saved = true;
