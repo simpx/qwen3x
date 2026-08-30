@@ -35,7 +35,8 @@ seed 44 在 `304/504` 时主动停止，临时分数 `0.3520`，只作为不完�
 先启动 Engine：
 
 ```sh
-make run SLOTS=4 CONTEXT=40960 LOG_LEVEL=info
+./build/qwen35 --listen \
+  --session-slots 4 --session-context 40960 --log-level info
 ```
 
 另一个终端运行：

@@ -17,7 +17,7 @@ SERVED_MODEL ?= qwen3.5-0.8b-reference
 
 ENGINE_DIR ?= ..
 LIBRARY ?= build/libqwen35.so
-BIN ?= $(ENGINE_DIR)/build/qwen35-0.8b.bin
+BIN ?= $(ENGINE_DIR)/build/qwen35-0.8b-model.bin
 VECTORS ?= build/cpu
 REPORT ?= build/reference-report.json
 CXX ?= c++

@@ -29,8 +29,16 @@ def request(port, method, path, body=None, *, authorized=True):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--program", required=True)
-    parser.add_argument("--render", required=True)
     args = parser.parse_args()
+
+    direct = subprocess.run(
+        [args.program, "--prompt", "hello", "--max-tokens", "3",
+         "--session-context", "256", "--mock", "--log-level", "error"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert direct.returncode == 0, direct.stderr
 
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -38,9 +46,9 @@ def main():
     listener.close()
     environment = dict(os.environ, QWEN_API_KEY="test")
     process = subprocess.Popen(
-        [args.program, "--model", "unused", "--render", args.render,
-         "--host", "127.0.0.1", "--port", str(port), "--slots", "2",
-         "--context", "256", "--mock", "--log-level", "error"],
+        [args.program, "--listen", "--host", "127.0.0.1", "--port", str(port),
+         "--session-slots", "2", "--session-context", "256", "--mock",
+         "--log-level", "error"],
         env=environment,
     )
     try:

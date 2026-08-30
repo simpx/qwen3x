@@ -36,23 +36,44 @@ make -C scripts checkpoint model render
 make
 ```
 
-所有下载和生成的文件都位于 `build/`。`make clean` 清理程序、render、benchmark
-和测试产物，但保留下载的 checkpoint 与 pack 后的模型权重。
+所有下载和生成的文件都位于 `build/`。`make clean` 清理程序、render 和测试产物，
+但保留下载的 checkpoint 与 pack 后的模型权重。
 
-启动服务：
+直接完成一次请求：
+
+```sh
+./build/qwen35 --prompt "hello" \
+  --max-tokens 128
+```
+
+`--prompt` 直接构造结构化的 chat request，不经过 JSON。启动服务则使用
+`--listen`：
 
 ```sh
 ./build/qwen35 \
-  --model build/qwen35-0.8b.bin \
-  --render build/qwen35-render.bin \
+  --listen \
   --host 127.0.0.1 \
   --port 8000 \
-  --slots 2 \
-  --context 4096
+  --session-slots 2 \
+  --session-context 4096
 ```
 
-也可以直接运行 `make run`。设置 `QWEN_API_KEY` 会为 `/v1/models` 和
-`/v1/chat/completions` 启用 Bearer 鉴权。
+设置 `QWEN_API_KEY` 会为 `/v1/models` 和 `/v1/chat/completions` 启用 Bearer
+鉴权。
+
+测量不含 HTTP、JSON、chat template、tokenizer 和 sampling 的 Session 性能：
+
+```sh
+./build/qwen35 --bench 512 128
+```
+
+两个数字依次是 prefill token 数和 decode token 数。默认 Session context 是两者
+之和，也可以用 `--session-context` 显式指定更大的容量。benchmark 默认创建一个
+session slot；`--session-slots` 可以复现服务所用的内存配置，但计时仍只推进其中一个
+Session，不代表并发吞吐量。
+
+`qwen35` 默认从可执行文件所在目录加载 `qwen35-0.8b-model.bin` 和
+`qwen35-0.8b-render.bin`。`--model` 和 `--render` 只在需要覆盖默认路径时使用。
 
 普通 completion：
 
@@ -84,7 +105,7 @@ runtime.cpp         Session、sampling 和 cache 生命周期
 main.cpp            main、HTTP routes 和 completion 数据流
 parser.cpp          唯一 JSON-aware 的 C++ 边界
 render.cpp          固定 Qwen3.5 chat template 和 tokenizer
-scripts/            离线 packer、benchmark 及其 Python 环境
+scripts/            离线 packer 及其 Python 环境
 tests/              parser、renderer、runtime 和端到端回归
 reference/          官方 PyTorch/Transformers 数值 reference
 eval/               EvalScope 评测工具和结果
@@ -92,7 +113,7 @@ third_party/        固定版本的 JSON、HTTP 和日志依赖
 build/              下载的 checkpoint、生成的模型和编译产物
 ```
 
-开发阶段 `weights.bin` 和 `render.bin` 分开，方便调试；稳定后再考虑打包为一个模型文件。
+开发阶段 model 和 render 数据分开，方便调试；稳定后再考虑打包为一个模型文件。
 
 ## 历史
 

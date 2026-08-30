@@ -1,14 +1,18 @@
-// main.cpp -- one-process Qwen3.5 HTTP inference server.
+// main.cpp -- one-process Qwen3.5 inference program.
 //
+//   qwen35 -p "hello"
+//   qwen35 -l --host 127.0.0.1 --port 8000
+//   qwen35 --bench PREFILL_TOKENS DECODE_TOKENS
+//
+// Prompt mode constructs a ChatRequest directly. Listen mode adds the HTTP/JSON
+// boundary. Bench mode bypasses both renderer and HTTP to measure Session only.
+//
+// Listen mode exposes:
 //   POST /v1/chat/completions
 //   Content-Type: application/json
-//
 //   {"model":"qwen3.5-0.8b",
 //    "messages":[{"role":"user","content":"hello"}],
 //    "stream":true}
-//
-// The request stays in this process:
-//   HTTP -> JSON -> chat template -> tokenizer -> model -> decoder -> JSON/SSE
 
 #include <algorithm>
 #include <atomic>
@@ -19,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <random>
@@ -38,10 +43,16 @@ namespace {
 
 constexpr size_t ERROR_SIZE = 512;
 constexpr size_t MAX_REQUEST_BYTES = 1024 * 1024;
+constexpr const char* DEFAULT_MODEL = "qwen35-0.8b-model.bin";
+constexpr const char* DEFAULT_RENDER = "qwen35-0.8b-render.bin";
+
+enum class Mode { None, Prompt, Listen, Bench };
 
 struct Options {
+    Mode mode = Mode::None;
     std::string model_path;
     std::string render_path;
+    std::string prompt;
     std::string host = "127.0.0.1";
     std::string served_model = "qwen3.5-0.8b";
     std::string log_file;
@@ -49,10 +60,15 @@ struct Options {
     int port = 8000;
     int slots = 2;
     int context = 4096;
-    int default_max_tokens = 128;
+    int max_tokens = 128;
+    int bench_prefill = 0;
+    int bench_decode = 0;
     int request_timeout = 600;
     size_t log_max_bytes = 20 * 1024 * 1024;
     size_t log_backups = 5;
+    bool context_set = false;
+    bool slots_set = false;
+    bool log_level_set = false;
     bool mock = false;
 };
 
@@ -99,6 +115,18 @@ bool integer(const std::string& text, Integer* output) {
     return true;
 }
 
+std::string sibling_file(const char* program, const char* name) {
+    std::error_code error;
+    std::filesystem::path executable =
+        std::filesystem::read_symlink("/proc/self/exe", error);
+    if (error) {
+        error.clear();
+        executable = std::filesystem::absolute(program, error);
+        if (error) executable = program;
+    }
+    return (executable.parent_path() / name).string();
+}
+
 bool option_value(int& index, int argc, char** argv,
                   std::string* value, std::string* error) {
     if (++index >= argc) {
@@ -117,9 +145,40 @@ bool parse_options(int argc, char** argv, Options* options,
             options->mock = true;
             continue;
         }
+        if (argument == "-l" || argument == "--listen") {
+            if (options->mode != Mode::None) {
+                *error = "choose exactly one of --prompt, --listen, or --bench";
+                return false;
+            }
+            options->mode = Mode::Listen;
+            continue;
+        }
+        if (argument == "--bench") {
+            if (options->mode != Mode::None) {
+                *error = "choose exactly one of --prompt, --listen, or --bench";
+                return false;
+            }
+            if (index + 2 >= argc ||
+                !integer(argv[index + 1], &options->bench_prefill) ||
+                !integer(argv[index + 2], &options->bench_decode) ||
+                options->bench_prefill <= 0 || options->bench_decode <= 0) {
+                *error = "--bench requires positive PREFILL_TOKENS and DECODE_TOKENS";
+                return false;
+            }
+            options->mode = Mode::Bench;
+            index += 2;
+            continue;
+        }
         std::string value;
         if (!option_value(index, argc, argv, &value, error)) return false;
-        if (argument == "-m" || argument == "--model") {
+        if (argument == "-p" || argument == "--prompt") {
+            if (options->mode != Mode::None) {
+                *error = "choose exactly one of --prompt, --listen, or --bench";
+                return false;
+            }
+            options->mode = Mode::Prompt;
+            options->prompt = value;
+        } else if (argument == "-m" || argument == "--model") {
             options->model_path = value;
         } else if (argument == "-r" || argument == "--render") {
             options->render_path = value;
@@ -135,20 +194,22 @@ bool parse_options(int argc, char** argv, Options* options,
                 *error = "invalid --port";
                 return false;
             }
-        } else if (argument == "--slots") {
+        } else if (argument == "--session-slots") {
             if (!integer(value, &options->slots) || options->slots <= 0) {
-                *error = "invalid --slots";
+                *error = "invalid --session-slots";
                 return false;
             }
-        } else if (argument == "--context") {
+            options->slots_set = true;
+        } else if (argument == "--session-context") {
             if (!integer(value, &options->context) || options->context <= 0) {
-                *error = "invalid --context";
+                *error = "invalid --session-context";
                 return false;
             }
-        } else if (argument == "--default-max-tokens") {
-            if (!integer(value, &options->default_max_tokens) ||
-                options->default_max_tokens <= 0) {
-                *error = "invalid --default-max-tokens";
+            options->context_set = true;
+        } else if (argument == "--max-tokens") {
+            if (!integer(value, &options->max_tokens) ||
+                options->max_tokens <= 0) {
+                *error = "invalid --max-tokens";
                 return false;
             }
         } else if (argument == "--request-timeout") {
@@ -179,6 +240,7 @@ bool parse_options(int argc, char** argv, Options* options,
                 *error = "invalid --log-level";
                 return false;
             }
+            options->log_level_set = true;
         } else {
             *error = "unknown option: " + argument;
             return false;
@@ -188,19 +250,42 @@ bool parse_options(int argc, char** argv, Options* options,
         *error = "-m/--model is required";
         return false;
     }
-    if (options->render_path.empty()) {
+    if (options->mode == Mode::None) {
+        *error = "one of -p/--prompt, -l/--listen, or --bench is required";
+        return false;
+    }
+    if (options->mode != Mode::Bench && options->render_path.empty()) {
         *error = "-r/--render is required";
         return false;
+    }
+    if (options->mode == Mode::Bench) {
+        const int64_t required = static_cast<int64_t>(options->bench_prefill) +
+                                 options->bench_decode;
+        if (required > q35_backend::max_context()) {
+            *error = "benchmark exceeds the model context";
+            return false;
+        }
+        if (!options->context_set) options->context = static_cast<int>(required);
+        if (required > options->context) {
+            *error = "benchmark exceeds --session-context";
+            return false;
+        }
+        if (!options->slots_set) options->slots = 1;
+        if (!options->log_level_set) options->log_level = Q35_LOG_ERROR;
     }
     return true;
 }
 
 void usage(const char* program) {
     std::fprintf(stderr,
-        "usage: %s -m WEIGHTS -r RENDER [--host HOST] [--port PORT]\n"
-        "       [--slots N] [--context N] [--default-max-tokens N]\n"
-        "       [--request-timeout SEC] [--served-model-name NAME] [--mock]\n"
-        "       [--log-level LEVEL] [--log-file PATH]\n", program);
+        "usage:\n"
+        "  %s [-m MODEL] [-r RENDER] -p PROMPT [--max-tokens N]\n"
+        "  %s [-m MODEL] [-r RENDER] -l [--host HOST] [--port PORT]\n"
+        "  %s [-m MODEL] --bench PREFILL_TOKENS DECODE_TOKENS\n"
+        "common: [--session-slots N] [--session-context N] [--mock]\n"
+        "        [--log-level LEVEL] [--log-file PATH]\n"
+        "defaults beside qwen35: %s and %s\n", program, program, program,
+        DEFAULT_MODEL, DEFAULT_RENDER);
 }
 
 std::string make_id(const char* prefix) {
@@ -437,7 +522,7 @@ bool prepare_request(Runtime& runtime, const httplib::Request& http,
                      q35_render::RenderedPrompt* prompt) {
     const q35_render::Status status = q35_render::parse_completion_request(
         http.body, runtime.options.served_model,
-        runtime.options.default_max_tokens, *request);
+        runtime.options.max_tokens, *request);
     if (!status.ok()) {
         const bool missing_model = status.message().find("model not found") !=
                                    std::string::npos;
@@ -619,6 +704,125 @@ bool initialize(Runtime* runtime, std::string* error) {
     return true;
 }
 
+int run_prompt(Runtime& runtime, std::string* error) {
+    q35_render::CompletionRequest request;
+    request.model = runtime.options.served_model;
+    request.max_tokens = runtime.options.max_tokens;
+    request.temperature = 0.0f;
+    q35_render::Message message;
+    message.role = q35_render::Role::User;
+    message.content = runtime.options.prompt;
+    request.chat.messages.push_back(std::move(message));
+
+    q35_render::RenderedPrompt prompt;
+    if (!runtime.renderer->render(request.chat, &prompt, error)) return 1;
+    if (prompt.tokens.empty()) {
+        *error = "chat template produced an empty prompt";
+        return 1;
+    }
+    if (prompt.tokens.size() + static_cast<size_t>(request.max_tokens) >
+        static_cast<size_t>(runtime.options.context)) {
+        *error = "prompt and completion exceed --session-context";
+        return 1;
+    }
+
+    char native_error[ERROR_SIZE]{};
+    q35_session* session = nullptr;
+    if (q35_session_manager_acquire(
+            runtime.manager, prompt.tokens.data(),
+            static_cast<int>(prompt.tokens.size()), &session,
+            native_error, sizeof(native_error)) != Q35_OK) {
+        *error = native_error;
+        return 1;
+    }
+    SessionLease lease;
+    lease.manager = runtime.manager;
+    lease.session = session;
+
+    GenerationResult result;
+    const Publish discard = [](const char*, const std::string&) { return true; };
+    if (!generate(runtime, request, prompt.tokens, session, discard,
+                  &result, error)) return 1;
+    if (!result.reasoning.empty()) {
+        std::fwrite(result.reasoning.data(), 1, result.reasoning.size(), stdout);
+        std::fputc('\n', stdout);
+    }
+    std::fwrite(result.content.data(), 1, result.content.size(), stdout);
+    if (result.content.empty() || result.content.back() != '\n') {
+        std::fputc('\n', stdout);
+    }
+    return 0;
+}
+
+int run_benchmark(const Options& options, std::string* error) {
+    char native_error[ERROR_SIZE]{};
+    q35_engine* engine = nullptr;
+    q35_engine_options engine_options{options.model_path.c_str(), options.mock};
+    if (q35_engine_create(&engine_options, &engine,
+                          native_error, sizeof(native_error)) != Q35_OK) {
+        *error = native_error;
+        return 1;
+    }
+
+    q35_session_manager* manager = nullptr;
+    if (q35_session_manager_create(
+            engine, options.slots, options.context, &manager,
+            native_error, sizeof(native_error)) != Q35_OK) {
+        *error = native_error;
+        q35_engine_destroy(engine);
+        return 1;
+    }
+
+    std::vector<int> prompt(static_cast<size_t>(options.bench_prefill));
+    for (int index = 0; index < options.bench_prefill; ++index) {
+        prompt[index] = 100 + index % 1000;
+    }
+
+    q35_session* session = nullptr;
+    if (q35_session_manager_acquire(
+            manager, prompt.data(), options.bench_prefill, &session,
+            native_error, sizeof(native_error)) != Q35_OK) {
+        *error = native_error;
+        q35_session_manager_destroy(manager);
+        q35_engine_destroy(engine);
+        return 1;
+    }
+
+    const auto prefill_started = std::chrono::steady_clock::now();
+    int status = q35_session_sync(
+        session, prompt.data(), options.bench_prefill, options.bench_prefill,
+        nullptr, native_error, sizeof(native_error));
+    const auto decode_started = std::chrono::steady_clock::now();
+    if (status == Q35_OK) {
+        for (int index = 0; index < options.bench_decode; ++index) {
+            status = q35_session_eval(session, 100,
+                                      native_error, sizeof(native_error));
+            if (status != Q35_OK) break;
+        }
+    }
+    const auto finished = std::chrono::steady_clock::now();
+
+    q35_session_manager_release(manager, session, false);
+    q35_session_manager_destroy(manager);
+    q35_engine_destroy(engine);
+    if (status != Q35_OK) {
+        *error = native_error;
+        return 1;
+    }
+
+    const double prefill_seconds = std::chrono::duration<double>(
+        decode_started - prefill_started).count();
+    const double decode_seconds = std::chrono::duration<double>(
+        finished - decode_started).count();
+    std::printf("prefill  %d tokens  %.3f s  %.3f tok/s\n",
+                options.bench_prefill, prefill_seconds,
+                options.bench_prefill / prefill_seconds);
+    std::printf("decode   %d tokens  %.3f s  %.3f tok/s\n",
+                options.bench_decode, decode_seconds,
+                options.bench_decode / decode_seconds);
+    return 0;
+}
+
 int serve(Runtime& runtime, std::string* error) {
     httplib::Server server;
     const int workers = std::max(8, runtime.options.slots + 4);
@@ -692,6 +896,8 @@ int serve(Runtime& runtime, std::string* error) {
 
 int main(int argc, char** argv) {
     Options options;
+    options.model_path = sibling_file(argv[0], DEFAULT_MODEL);
+    options.render_path = sibling_file(argv[0], DEFAULT_RENDER);
     std::string error;
     if (!parse_options(argc, argv, &options, &error)) {
         usage(argv[0]);
@@ -710,10 +916,18 @@ int main(int argc, char** argv) {
     }
 
     int result = 1;
-    {
+    if (options.mode == Mode::Bench) {
+        result = run_benchmark(options, &error);
+    } else {
         Runtime runtime;
         runtime.options = std::move(options);
-        if (initialize(&runtime, &error)) result = serve(runtime, &error);
+        if (initialize(&runtime, &error)) {
+            if (runtime.options.mode == Mode::Prompt) {
+                result = run_prompt(runtime, &error);
+            } else {
+                result = serve(runtime, &error);
+            }
+        }
     }
     if (result != 0) LOG_ERROR("%s", error.c_str());
     q35_internal::log_shutdown();

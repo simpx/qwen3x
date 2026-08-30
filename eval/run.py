@@ -323,7 +323,7 @@ def parse_args() -> argparse.Namespace:
                         help="number of simultaneous OpenAI requests")
     parser.add_argument("--backend", choices=("qwen35", "transformers"), default="qwen35")
     parser.add_argument("--artifact", type=Path,
-                        default=PROJECT / "build/qwen35-0.8b.bin")
+                        default=PROJECT / "build/qwen35-0.8b-model.bin")
     parser.add_argument("--output", type=Path, default=HERE / "results")
     parser.add_argument("--resume", type=Path,
                         help="resume an existing run directory using EvalScope cache")

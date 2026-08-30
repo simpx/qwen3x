@@ -19,7 +19,7 @@ MODEL = Path(os.environ.get(
     "TOKENIZER", PROJECT / "build/models/Qwen3.5-0.8B"
 ))
 RENDER_BIN = Path(os.environ.get(
-    "RENDER_BIN", PROJECT / "build/qwen35-render.bin"
+    "RENDER_BIN", PROJECT / "build/qwen35-0.8b-render.bin"
 ))
 DRIVER = Path(os.environ.get("RENDER_TEST", PROJECT / "build/render-test"))
 CHAT_TEMPLATE = (PROJECT / "reference/chat_template.jinja").read_text(
