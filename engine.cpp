@@ -355,21 +355,26 @@ void forward(const Model& model, State& state, int token, bool compute_logits) {
     ++state.position;
 }
 
-struct Reader {
-    const uint8_t *begin, *cursor, *end;
-    const char* error = nullptr;
-    template <typename T> const T* take(size_t count) {
-        if (error) return nullptr;
-        const size_t padding = (64 - static_cast<size_t>(cursor - begin) % 64) % 64;
-        if (padding > static_cast<size_t>(end - cursor)) { error = "truncated model.bin"; return nullptr; }
-        cursor += padding;
-        const size_t bytes = count * sizeof(T);
-        if (bytes > static_cast<size_t>(end - cursor)) { error = "truncated model.bin"; return nullptr; }
-        const T* result = reinterpret_cast<const T*>(cursor); cursor += bytes; return result;
+template <typename T>
+const T* take(const void* base, size_t size, size_t& cursor,
+              size_t count, const char** error) {
+    if (*error) return nullptr;
+    const size_t padding = (64 - cursor % 64) % 64;
+    if (cursor > size || padding > size - cursor) {
+        *error = "truncated model.bin"; return nullptr;
     }
-};
+    cursor += padding;
+    if (count > std::numeric_limits<size_t>::max() / sizeof(T) ||
+        count * sizeof(T) > size - cursor) {
+        *error = "truncated model.bin"; return nullptr;
+    }
+    const T* result = reinterpret_cast<const T*>(
+        static_cast<const uint8_t*>(base) + cursor);
+    cursor += count * sizeof(T);
+    return result;
+}
 
-// model.bin 是唯一固定 tensor stream；header 选择 config，Reader 按 64-byte alignment 绑定指针。
+// Model 直接拥有 mmap，并按 model.bin 的唯一固定顺序绑定所有 tensor。
 bool Model::load(const char* path, const char** error) {
     auto fail = [&](const char* message) { *error = message; return false; };
     fd = open(path, O_RDONLY);
@@ -390,35 +395,42 @@ bool Model::load(const char* path, const char** error) {
     if (!config) return fail("unsupported Qwen3.5 model ID");
     if (!q35_model::header_matches(file, file_size, *config))
         return fail("Qwen3.5 model.bin header mismatch");
-    Reader reader {file, file + q35_model::HEADER_SIZE, file + file_size};
+    size_t cursor = q35_model::HEADER_SIZE;
     const auto& c = *config;
     const int AS = c.AH * c.AD, KVW = c.KVH * c.AD;
     const int DO = c.VH * c.VD, DQKV = 2 * c.KH * c.KD + DO;
     auto linear = [&](int rows, int cols) {
-        return Linear {reader.take<BF16>(static_cast<size_t>(rows) * cols), rows, cols};
+        return Linear {take<BF16>(file, file_size, cursor,
+                                  static_cast<size_t>(rows) * cols, error), rows, cols};
     };
     layer.reset(new (std::nothrow) Layer[c.N]);
     if (!layer) return fail("cannot allocate model layer table");
-    embedding = reader.take<BF16>(static_cast<size_t>(c.V) * c.H);
-    final_norm = reader.take<BF16>(c.H);
+    embedding = take<BF16>(file, file_size, cursor, static_cast<size_t>(c.V) * c.H, error);
+    final_norm = take<BF16>(file, file_size, cursor, c.H, error);
     for (int i = 0; i < c.N; ++i) {
-        Layer& l = layer[i]; l.input_norm = reader.take<BF16>(c.H);
+        Layer& l = layer[i]; l.input_norm = take<BF16>(file, file_size, cursor, c.H, error);
         if (i % c.AI != c.AI - 1) {
             l.delta.qkv = linear(DQKV, c.H); l.delta.z = linear(DO, c.H);
             l.delta.a = linear(c.VH, c.H); l.delta.b = linear(c.VH, c.H);
-            l.delta.conv = reader.take<BF16>(static_cast<size_t>(DQKV) * c.CK);
-            l.delta.alog = reader.take<FP32>(c.VH); l.delta.dt = reader.take<BF16>(c.VH);
-            l.delta.norm = reader.take<FP32>(c.VD); l.delta.out = linear(c.H, DO);
+            l.delta.conv = take<BF16>(file, file_size, cursor,
+                                      static_cast<size_t>(DQKV) * c.CK, error);
+            l.delta.alog = take<FP32>(file, file_size, cursor, c.VH, error);
+            l.delta.dt = take<BF16>(file, file_size, cursor, c.VH, error);
+            l.delta.norm = take<FP32>(file, file_size, cursor, c.VD, error);
+            l.delta.out = linear(c.H, DO);
         } else {
             l.attention.q = linear(2 * AS, c.H); l.attention.k = linear(KVW, c.H);
-            l.attention.v = linear(KVW, c.H); l.attention.qnorm = reader.take<BF16>(c.AD);
-            l.attention.knorm = reader.take<BF16>(c.AD); l.attention.out = linear(c.H, AS);
+            l.attention.v = linear(KVW, c.H);
+            l.attention.qnorm = take<BF16>(file, file_size, cursor, c.AD, error);
+            l.attention.knorm = take<BF16>(file, file_size, cursor, c.AD, error);
+            l.attention.out = linear(c.H, AS);
         }
-        l.post_norm = reader.take<BF16>(c.H); l.gate = linear(c.I, c.H);
+        l.post_norm = take<BF16>(file, file_size, cursor, c.H, error);
+        l.gate = linear(c.I, c.H);
         l.up = linear(c.I, c.H); l.down = linear(c.H, c.I);
     }
-    if (reader.error) return fail(reader.error);
-    if (reader.cursor != reader.end) return fail("model.bin size does not match schema");
+    if (*error) return false;
+    if (cursor != file_size) return fail("model.bin size does not match schema");
     return true;
 }
 
@@ -426,7 +438,8 @@ Model* model_create(const char* path, char* err, size_t errlen) {
     std::unique_ptr<Model> model(new (std::nothrow) Model());
     const char* message = nullptr;
     if (!model || !model->load(path, &message)) {
-        if (err && errlen) std::snprintf(err, errlen, "%s", message ? message : "allocation failed");
+        if (err && errlen)
+            std::snprintf(err, errlen, "%s", message ? message : "allocation failed");
         return nullptr;
     }
     if (err && errlen) err[0] = '\0';

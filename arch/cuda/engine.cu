@@ -91,17 +91,28 @@ struct Layer {
     AttentionWeights attention;
 };
 
-struct ModelData {
-    const q35_model::ModelConfig* config = nullptr;
-    const BF16* embedding = nullptr;
-    const BF16* final_norm = nullptr;
-    void* weights = nullptr;
-    std::unique_ptr<Layer[]> layers;
+}  // namespace qwen35_cuda
 
-    ~ModelData() {
+namespace q35_backend {
+
+struct Model {
+    const q35_model::ModelConfig* config = nullptr;
+    const qwen35_cuda::BF16* embedding = nullptr;
+    const qwen35_cuda::BF16* final_norm = nullptr;
+    void* weights = nullptr;
+    std::unique_ptr<qwen35_cuda::Layer[]> layers;
+
+    ~Model() {
         if (weights) cudaFree(weights);
     }
+    bool load(const char* path, const char** error);
 };
+
+}  // namespace q35_backend
+
+namespace qwen35_cuda {
+
+using q35_backend::Model;
 
 struct DeviceFloatStorage {
     float* memory = nullptr;
@@ -1316,7 +1327,7 @@ void batch_ffn_bf16(cublasHandle_t handle, const Layer& layer,
              work.converted, stream);
 }
 
-void prefill_chunk_fp32(const ModelData& model, StateData& state,
+void prefill_chunk_fp32(const Model& model, StateData& state,
                         int start, int count, bool compute_logits) {
     Q35_ASSERT(model.config, "CUDA prefill model config is null");
     const q35_model::ModelConfig& c = *model.config;
@@ -1357,7 +1368,7 @@ void prefill_chunk_fp32(const ModelData& model, StateData& state,
     }
 }
 
-void prefill_chunk_bf16(const ModelData& model, StateData& state,
+void prefill_chunk_bf16(const Model& model, StateData& state,
                         int start, int count, bool compute_logits) {
     Q35_ASSERT(model.config, "CUDA prefill model config is null");
     const q35_model::ModelConfig& c = *model.config;
@@ -1399,7 +1410,7 @@ void prefill_chunk_bf16(const ModelData& model, StateData& state,
     }
 }
 
-void forward(const ModelData& model, StateData& state, bool compute_logits) {
+void forward(const Model& model, StateData& state, bool compute_logits) {
     Q35_ASSERT(model.config, "CUDA forward model config is null");
     const q35_model::ModelConfig& c = *model.config;
     const int H = c.H, I = c.I, N = c.N;
@@ -1431,7 +1442,7 @@ void forward(const ModelData& model, StateData& state, bool compute_logits) {
     advance_position_kernel<<<1, 1, 0, stream>>>(state.device_position);
 }
 
-cudaGraphExec_t capture_forward(const ModelData& model, StateData& state,
+cudaGraphExec_t capture_forward(const Model& model, StateData& state,
                                 bool compute_logits) {
     CUDA_OK(cudaStreamBeginCapture(state.stream, cudaStreamCaptureModeThreadLocal));
     forward(model, state, compute_logits);
@@ -1443,212 +1454,134 @@ cudaGraphExec_t capture_forward(const ModelData& model, StateData& state,
     return executable;
 }
 
-struct File {
-    int descriptor = -1;
-    size_t size = 0;
-    const uint8_t* data = nullptr;
-    uint32_t model_id = 0;
-
-    bool map(const char* path, const char** error) {
-        descriptor = open(path, O_RDONLY);
-        if (descriptor < 0) return fail(error, "cannot open model.bin");
-        struct stat information {};
-        if (fstat(descriptor, &information) ||
-            information.st_size < static_cast<off_t>(q35_model::HEADER_SIZE)) {
-            return fail(error, "bad model.bin");
-        }
-        size = static_cast<size_t>(information.st_size);
-        data = static_cast<const uint8_t*>(
-            mmap(nullptr, size, PROT_READ, MAP_PRIVATE, descriptor, 0));
-        if (data == MAP_FAILED) {
-            data = nullptr;
-            return fail(error, "mmap model.bin failed");
-        }
-        uint32_t version = 0, reserved = 0;
-        if (std::memcmp(data, "Q35MODL\0", 8) != 0) {
-            return fail(error, "wrong model.bin magic");
-        }
-        std::memcpy(&version, data + 8, sizeof(version));
-        std::memcpy(&reserved, data + 12, sizeof(reserved));
-        if (reserved != 0 || version != q35_model::FORMAT_VERSION) {
-            return fail(error, "unsupported model.bin version");
-        }
-        model_id = q35_model::header_field(data, q35_model::MODEL_ID);
-        if (!q35_model::config_for_id(model_id)) {
-            return fail(error, "unsupported Qwen3.5 model ID");
-        }
-        return true;
+template <typename T>
+const T* take(const void* base, size_t size, size_t& cursor,
+              size_t count, const char** error) {
+    if (*error) return nullptr;
+    const size_t padding = (64 - cursor % 64) % 64;
+    if (cursor > size || padding > size - cursor) {
+        *error = "truncated model.bin";
+        return nullptr;
     }
-
-    ~File() { release(); }
-
-    void release() {
-        if (data) munmap(const_cast<uint8_t*>(data), size);
-        if (descriptor >= 0) close(descriptor);
-        data = nullptr;
-        descriptor = -1;
-        size = 0;
-        model_id = 0;
+    cursor += padding;
+    if (count > std::numeric_limits<size_t>::max() / sizeof(T) ||
+        count * sizeof(T) > size - cursor) {
+        *error = "truncated model.bin";
+        return nullptr;
     }
-
-private:
-    bool fail(const char** error, const char* message) {
-        *error = message;
-        release();
-        return false;
-    }
-};
-
-struct Reader {
-    const uint8_t* begin;
-    const uint8_t* cursor;
-    const uint8_t* end;
-    const char* error = nullptr;
-
-    explicit Reader(const File& file)
-        : begin(file.data), cursor(file.data + q35_model::HEADER_SIZE),
-          end(file.data + file.size) {}
-
-    template <typename T> const T* take(size_t count) {
-        if (error) return nullptr;
-        const size_t offset = static_cast<size_t>(cursor - begin);
-        const size_t padding = (64 - offset % 64) % 64;
-        if (padding > static_cast<size_t>(end - cursor)) {
-            error = "truncated model.bin";
-            return nullptr;
-        }
-        cursor += padding;
-        if (count > std::numeric_limits<size_t>::max() / sizeof(T) ||
-            count * sizeof(T) > static_cast<size_t>(end - cursor)) {
-            error = "truncated model.bin";
-            return nullptr;
-        }
-        const T* result = reinterpret_cast<const T*>(cursor);
-        cursor += count * sizeof(T);
-        return result;
-    }
-};
-
-struct Loader {
-    ModelData* model;
-    Reader reader;
-    const uint8_t* device_begin;
-    const char* error = nullptr;
-
-    Loader(ModelData* output, const File& file)
-        : model(output), reader(file),
-          device_begin(static_cast<const uint8_t*>(output->weights)) {}
-
-    const BF16* bf16(size_t count) {
-        const BF16* source = reader.take<BF16>(count);
-        if (!source) return nullptr;
-        const size_t offset = reinterpret_cast<const uint8_t*>(source) - reader.begin;
-        return reinterpret_cast<const BF16*>(device_begin + offset);
-    }
-
-    const float* f32(size_t count) {
-        const float* source = reader.take<float>(count);
-        if (!source) return nullptr;
-        const size_t offset = reinterpret_cast<const uint8_t*>(source) - reader.begin;
-        return reinterpret_cast<const float*>(device_begin + offset);
-    }
-
-    Linear linear(int rows, int columns) {
-        return {bf16(static_cast<size_t>(rows) * columns), rows, columns};
-    }
-
-    bool load(const q35_model::ModelConfig& config) {
-        const int V = config.V, H = config.H, I = config.I, N = config.N;
-        const int AI = config.AI, AH = config.AH, KVH = config.KVH;
-        const int AD = config.AD, KH = config.KH, VH = config.VH;
-        const int KD = config.KD, VD = config.VD, CK = config.CK;
-        const int AS = AH * AD, KVW = KVH * AD;
-        const int DO = VH * VD, DQKV = 2 * KH * KD + DO;
-        model->layers.reset(new (std::nothrow) Layer[N]);
-        if (!model->layers) {
-            error = "cannot allocate CUDA model layer table";
-            return false;
-        }
-        model->embedding = bf16(static_cast<size_t>(V) * H);
-        model->final_norm = bf16(H);
-        for (int index = 0; index < N && good(); ++index) {
-            Layer& layer = model->layers[index];
-            const bool uses_deltanet = index % AI != AI - 1;
-            layer.input_norm = bf16(H);
-            if (uses_deltanet) {
-                layer.delta.qkv = linear(DQKV, H);
-                layer.delta.z = linear(DO, H);
-                layer.delta.a = linear(VH, H);
-                layer.delta.b = linear(VH, H);
-                layer.delta.conv = bf16(static_cast<size_t>(DQKV) * CK);
-                layer.delta.alog = f32(VH);
-                layer.delta.dt = bf16(VH);
-                layer.delta.norm = f32(VD);
-                layer.delta.out = linear(H, DO);
-            } else {
-                layer.attention.q = linear(2 * AS, H);
-                layer.attention.k = linear(KVW, H);
-                layer.attention.v = linear(KVW, H);
-                layer.attention.qnorm = bf16(AD);
-                layer.attention.knorm = bf16(AD);
-                layer.attention.out = linear(H, AS);
-            }
-            layer.post_norm = bf16(H);
-            layer.gate = linear(I, H);
-            layer.up = linear(I, H);
-            layer.down = linear(H, I);
-        }
-        if (!good()) return false;
-        if (reader.cursor != reader.end) {
-            error = "model.bin size does not match selected Qwen3.5 schema";
-            return false;
-        }
-        return true;
-    }
-
-    bool good() {
-        if (!error && reader.error) error = reader.error;
-        return !error;
-    }
-};
-
-bool load_model(const char* path, ModelData* model, const char** error) {
-    File file;
-    if (!file.map(path, error)) return false;
-    model->config = q35_model::config_for_id(file.model_id);
-    Q35_ASSERT(model->config, "validated CUDA model ID has no config id=%u",
-               file.model_id);
-    if (!q35_model::header_matches(file.data, file.size, *model->config)) {
-        *error = "Qwen3.5 model.bin header mismatch";
-        return false;
-    }
-    cudaError_t status = cudaMalloc(&model->weights, file.size);
-    if (status != cudaSuccess) {
-        *error = "CUDA model allocation failed";
-        return false;
-    }
-    status = cudaMemcpy(model->weights, file.data, file.size,
-                        cudaMemcpyHostToDevice);
-    if (status != cudaSuccess) {
-        *error = "CUDA model upload failed";
-        return false;
-    }
-    Loader loader(model, file);
-    const bool loaded = loader.load(*model->config);
-    if (!loaded) {
-        *error = loader.error ? loader.error : "cannot load CUDA model";
-        return false;
-    }
-    return true;
+    const T* result = reinterpret_cast<const T*>(
+        static_cast<const uint8_t*>(base) + cursor);
+    cursor += count * sizeof(T);
+    return result;
 }
 
 }  // namespace qwen35_cuda
 
 namespace q35_backend {
 
-struct Model {
-    qwen35_cuda::ModelData data;
-};
+bool Model::load(const char* path, const char** error) {
+    using qwen35_cuda::BF16;
+    using qwen35_cuda::Layer;
+    using qwen35_cuda::Linear;
+
+    int fd = -1;
+    size_t size = 0;
+    const uint8_t* file = nullptr;
+    auto close_file = [&]() {
+        if (file) munmap(const_cast<uint8_t*>(file), size);
+        if (fd >= 0) close(fd);
+        file = nullptr;
+        fd = -1;
+    };
+    auto fail = [&](const char* message) {
+        *error = message;
+        close_file();
+        return false;
+    };
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0) return fail("cannot open model.bin");
+    struct stat information {};
+    if (fstat(fd, &information) ||
+        information.st_size < static_cast<off_t>(q35_model::HEADER_SIZE)) {
+        return fail("bad model.bin");
+    }
+    size = static_cast<size_t>(information.st_size);
+    file = static_cast<const uint8_t*>(
+        mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0));
+    if (file == MAP_FAILED) {
+        file = nullptr;
+        return fail("mmap model.bin failed");
+    }
+    if (std::memcmp(file, "Q35MODL\0", 8) != 0)
+        return fail("wrong model.bin magic");
+    uint32_t version = 0, reserved = 0;
+    std::memcpy(&version, file + 8, sizeof(version));
+    std::memcpy(&reserved, file + 12, sizeof(reserved));
+    if (reserved != 0 || version != q35_model::FORMAT_VERSION)
+        return fail("unsupported model.bin version");
+    const uint32_t id = q35_model::header_field(file, q35_model::MODEL_ID);
+    config = q35_model::config_for_id(id);
+    if (!config) return fail("unsupported Qwen3.5 model ID");
+    if (!q35_model::header_matches(file, size, *config))
+        return fail("Qwen3.5 model.bin header mismatch");
+
+    cudaError_t status = cudaMalloc(&weights, size);
+    if (status != cudaSuccess) return fail("CUDA model allocation failed");
+    status = cudaMemcpy(weights, file, size, cudaMemcpyHostToDevice);
+    if (status != cudaSuccess) return fail("CUDA model upload failed");
+
+    size_t cursor = q35_model::HEADER_SIZE;
+    const auto& c = *config;
+    const int AS = c.AH * c.AD, KVW = c.KVH * c.AD;
+    const int DO = c.VH * c.VD, DQKV = 2 * c.KH * c.KD + DO;
+    auto linear = [&](int rows, int columns) {
+        return Linear {qwen35_cuda::take<BF16>(
+                           weights, size, cursor,
+                           static_cast<size_t>(rows) * columns, error),
+                       rows, columns};
+    };
+    layers.reset(new (std::nothrow) Layer[c.N]);
+    if (!layers) return fail("cannot allocate CUDA model layer table");
+    embedding = qwen35_cuda::take<BF16>(
+        weights, size, cursor, static_cast<size_t>(c.V) * c.H, error);
+    final_norm = qwen35_cuda::take<BF16>(weights, size, cursor, c.H, error);
+    for (int i = 0; i < c.N; ++i) {
+        Layer& l = layers[i];
+        l.input_norm = qwen35_cuda::take<BF16>(weights, size, cursor, c.H, error);
+        if (i % c.AI != c.AI - 1) {
+            l.delta.qkv = linear(DQKV, c.H); l.delta.z = linear(DO, c.H);
+            l.delta.a = linear(c.VH, c.H); l.delta.b = linear(c.VH, c.H);
+            l.delta.conv = qwen35_cuda::take<BF16>(
+                weights, size, cursor, static_cast<size_t>(DQKV) * c.CK, error);
+            l.delta.alog = qwen35_cuda::take<float>(
+                weights, size, cursor, c.VH, error);
+            l.delta.dt = qwen35_cuda::take<BF16>(
+                weights, size, cursor, c.VH, error);
+            l.delta.norm = qwen35_cuda::take<float>(
+                weights, size, cursor, c.VD, error);
+            l.delta.out = linear(c.H, DO);
+        } else {
+            l.attention.q = linear(2 * AS, c.H);
+            l.attention.k = linear(KVW, c.H);
+            l.attention.v = linear(KVW, c.H);
+            l.attention.qnorm = qwen35_cuda::take<BF16>(
+                weights, size, cursor, c.AD, error);
+            l.attention.knorm = qwen35_cuda::take<BF16>(
+                weights, size, cursor, c.AD, error);
+            l.attention.out = linear(c.H, AS);
+        }
+        l.post_norm = qwen35_cuda::take<BF16>(weights, size, cursor, c.H, error);
+        l.gate = linear(c.I, c.H);
+        l.up = linear(c.I, c.H);
+        l.down = linear(c.H, c.I);
+    }
+    if (*error) return fail(*error);
+    if (cursor != size)
+        return fail("model.bin size does not match selected Qwen3.5 schema");
+    close_file();
+    return true;
+}
 
 struct State {
     qwen35_cuda::StateData data;
@@ -1658,10 +1591,11 @@ struct State {
 
 Model* model_create(const char* path, char* err, size_t errlen) {
     Q35_ASSERT(path, "CUDA model_create path is null");
-    std::unique_ptr<Model> model(new Model());
+    std::unique_ptr<Model> model(new (std::nothrow) Model());
     const char* message = nullptr;
-    if (!qwen35_cuda::load_model(path, &model->data, &message)) {
-        if (err && errlen > 0) std::snprintf(err, errlen, "%s", message);
+    if (!model || !model->load(path, &message)) {
+        if (err && errlen > 0)
+            std::snprintf(err, errlen, "%s", message ? message : "allocation failed");
         return nullptr;
     }
     if (err && errlen > 0) err[0] = '\0';
@@ -1674,8 +1608,8 @@ State* state_create(Model* model, int context_size) {
     Q35_ASSERT(model, "CUDA state_create model is null");
     Q35_ASSERT(context_size > 0 && context_size <= qwen35_cuda::MAX_CONTEXT,
                "CUDA state_create context_size=%d", context_size);
-    Q35_ASSERT(model->data.config, "CUDA state_create model config is null");
-    return new State(*model->data.config, context_size);
+    Q35_ASSERT(model->config, "CUDA state_create model config is null");
+    return new State(*model->config, context_size);
 }
 
 void state_destroy(State* state) { delete state; }
@@ -1706,11 +1640,11 @@ void state_forward(Model* model, State* state,
                state->data.position + count <= state->data.capacity,
                "CUDA state_forward position=%d count=%d capacity=%d",
                state->data.position, count, state->data.capacity);
-    Q35_ASSERT(model->data.config, "CUDA state_forward model config is null");
+    Q35_ASSERT(model->config, "CUDA state_forward model config is null");
     for (int index = 0; index < count; ++index) {
-        Q35_ASSERT(tokens[index] >= 0 && tokens[index] < model->data.config->V,
+        Q35_ASSERT(tokens[index] >= 0 && tokens[index] < model->config->V,
                    "CUDA state_forward token[%d]=%d vocabulary=%d",
-                   index, tokens[index], model->data.config->V);
+                   index, tokens[index], model->config->V);
     }
     qwen35_cuda::StateData& data = state->data;
     CUDA_OK(cudaMemcpyAsync(
@@ -1720,9 +1654,9 @@ void state_forward(Model* model, State* state,
     if (count == 1) {
         if (!data.forward_graph) {
             data.forward_graph = qwen35_cuda::capture_forward(
-                model->data, data, false);
+                *model, data, false);
             data.logits_graph = qwen35_cuda::capture_forward(
-                model->data, data, true);
+                *model, data, true);
         }
         CUDA_OK(cudaMemcpyAsync(data.device_position, &data.position,
                                 sizeof(int), cudaMemcpyHostToDevice,
@@ -1734,20 +1668,20 @@ void state_forward(Model* model, State* state,
         for (int offset = 0; offset < count;) {
             const int chunk = std::min(qwen35_cuda::PREFILL_CHUNK,
                                        count - offset);
-            switch (model->data.config->id) {
+            switch (model->config->id) {
             case q35_model::QWEN35_08B.id:
                 qwen35_cuda::prefill_chunk_fp32(
-                    model->data, data, data.position + offset, chunk,
+                    *model, data, data.position + offset, chunk,
                     compute_logits && offset + chunk == count);
                 break;
             case q35_model::QWEN35_4B.id:
                 qwen35_cuda::prefill_chunk_bf16(
-                    model->data, data, data.position + offset, chunk,
+                    *model, data, data.position + offset, chunk,
                     compute_logits && offset + chunk == count);
                 break;
             default:
                 Q35_ASSERT(false, "CUDA state_forward unsupported model_id=%u",
-                           model->data.config->id);
+                           model->config->id);
             }
             offset += chunk;
         }
@@ -1819,8 +1753,8 @@ bool token_is_stop(int token) {
 
 uint32_t model_id(const Model* model) {
     Q35_ASSERT(model, "CUDA model_id model is null");
-    Q35_ASSERT(model->data.config, "CUDA model_id config is null");
-    return model->data.config->id;
+    Q35_ASSERT(model->config, "CUDA model_id config is null");
+    return model->config->id;
 }
 
 }  // namespace q35_backend
