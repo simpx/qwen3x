@@ -25,6 +25,7 @@ void state_checkpoint_save(State* state);
 void state_checkpoint_restore(State* state);
 int state_argmax(const State* state);
 void state_copy_logits(const State* state, float* output);
+uint32_t model_id(const Model* model);
 
 int vocab_size();
 int max_context();

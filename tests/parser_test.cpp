@@ -376,12 +376,13 @@ void test_completion_tool_request() {
         "tools":[{"type":"function","function":{
             "name":"read_file","parameters":{"type":"object"}
         }}],
-        "stream":false
+        "stream":true
     })";
     q35_render::CompletionRequest request;
     const q35_render::Status status = q35_render::parse_completion_request(
         text, "qwen3.5-0.8b", 128, request);
     check(status.ok(), "completion tool request should parse");
+    check(request.stream, "completion tool request should allow streaming");
     check(request.chat.tools.size() == 1, "completion tool schema count");
     check(request.chat.messages.size() == 3, "completion tool history count");
     if (request.chat.messages.size() < 2 ||
@@ -461,6 +462,25 @@ void test_completion_json() {
           tool_response.find("\\\"path\\\":\\\"README.md\\\"") !=
               std::string::npos,
           "completion tool call JSON");
+    call.arguments.push_back({"start_line", "201"});
+    const std::vector<std::string> tools = {
+        R"({"type":"function","function":{"name":"read_file","parameters":{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer"}}}}})"
+    };
+    const std::string typed_tool_response = q35_render::completion_json(
+        "chatcmpl-3", 123, "qwen3.5-0.8b", "", "", false,
+        {call}, "tool_calls", usage, &tools);
+    check(typed_tool_response.find(
+              "\\\"path\\\":\\\"README.md\\\"") != std::string::npos &&
+          typed_tool_response.find(
+              "\\\"start_line\\\":201") != std::string::npos,
+          "generated arguments follow tool JSON schema");
+    const std::string tool_chunk = q35_render::completion_tool_call_chunk_json(
+        "chatcmpl-3", 123, "qwen3.5-0.8b", 0, call, &tools);
+    check(tool_chunk.find("\"tool_calls\"") != std::string::npos &&
+          tool_chunk.find("\"name\":\"read_file\"") != std::string::npos &&
+          tool_chunk.find("\"index\":0") != std::string::npos &&
+          tool_chunk.find("\\\"start_line\\\":201") != std::string::npos,
+          "stream tool call chunk follows schema");
     const std::string chunk = q35_render::completion_chunk_json(
         "chatcmpl-1", 123, "qwen3.5-0.8b", "content", "你");
     check(chunk.find("\"content\":\"你\"") != std::string::npos,
@@ -478,7 +498,6 @@ void test_invalid_completion_requests() {
         R"({"model":"qwen3.5-0.8b","messages":[{"role":"user","content":null}]})",
         R"({"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"x"}],"top_p":0})",
         R"({"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"x"}],"n":2})",
-        R"({"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"x"}],"tools":[{}],"stream":true})",
     }) {
         q35_render::CompletionRequest request;
         check(!q35_render::parse_completion_request(

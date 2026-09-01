@@ -375,6 +375,11 @@ void q35_engine_destroy(q35_engine* engine) {
     delete engine;
 }
 
+uint32_t q35_engine_model_id(const q35_engine* engine) {
+    if (!engine || engine->mock) return 800;
+    return q35_backend::model_id(engine->model);
+}
+
 int q35_session_create(q35_engine* engine, int context_size, q35_session** out,
                        char* err, size_t errlen) {
     if (!engine) return fail(err, errlen, "engine is null");

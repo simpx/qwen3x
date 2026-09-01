@@ -1,9 +1,10 @@
-# 官方 Qwen3.5-0.8B reference
+# 官方 Qwen3.5 reference
 
 这一目录的任务只有一个：调用官方 Hugging Face checkpoint，产出带来源、可重复的
 **test vectors**。它不是另一套 C++ engine，也不是 production runtime。
 
-这里直接在真实 0.8B 上把“官方模型此时应输出什么”固定下来。参考服务、vectors dump、
+这里直接在真实 checkpoint 上把“官方模型此时应输出什么”固定下来。0.8B 保留严格
+FP32 correctness baseline；4B 增加面向 BF16 Tensor Core 生产路径的行为契约。参考服务、vectors dump、
 Engine 对比工具和完整 Python 环境都留在本目录，不污染实际 runtime。
 
 ## 为什么同时用 PyTorch 和 Transformers
@@ -64,6 +65,12 @@ CUDA 实现使用 BF16 checkpoint weights、FP32 activation 和 FP32 cuBLAS accu
 CUDA oracle，但同样以紧的 `cuda_max_abs_error = 5e-4` 逐步比较。以后 Tensor-Core BF16-activation
 优化必须新建自己的 reference/contract，不能修改这个 correctness baseline。
 
+4B prefill 的 cuBLAS 路径使用 BF16 权重和 BF16 activation、FP32 accumulation。官方
+checkpoint 无法在 16 GiB GPU 上同时保留完整 FP32 权重，因此 `mixed-fp32` oracle 保留官方
+BF16 权重，并让 Embedding、Linear 和 conv 在每个算子边界以 FP32 计算。它的
+`--behavior-only` 契约要求：greedy token 完全一致（或处于 0.02 的近并列 argmax）、top-10
+至少重叠 9 项，并继续报告完整 logits 最大误差。旧的 0.8B strict contract 没有放宽。
+
 ## Case 语义
 
 每个 case 有 `prefill` 与 `decode` 两段 token ids。保存的 `step_logits[i]` 是输入
@@ -84,6 +91,15 @@ make compare \
 
 shared library、vectors 和报告都只生成在本目录的 `build/` 下；报告默认写入
 `reference/build/reference-report.json`（从仓库根目录看）。
+
+4B CUDA 的完整 8-case 比较使用：
+
+```sh
+make compare-cuda-4b
+```
+
+case 覆盖长度 1/2/16/64、短序列、prefix、thinking/non-thinking chat，并检查 fresh
+decode、chunk、checkpoint restore、Session cache 和 4-token greedy continuation。
 
 ## EvalScope reference server
 

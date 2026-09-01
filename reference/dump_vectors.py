@@ -15,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -46,7 +47,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
+    parser.add_argument(
+        "--dtype", default="float32",
+        choices=("float32", "bfloat16", "mixed-fp32"),
+        help="mixed-fp32 keeps checkpoint weights in BF16 storage but computes in FP32",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=8)
+    parser.add_argument(
+        "--case", action="append", choices=[name for name, _, _ in FIXED_CASES],
+        help="dump only selected fixed cases; may be repeated",
+    )
+    parser.add_argument("--skip-chat", action="store_true",
+                        help="omit tokenizer/chat-template cases for a focused diagnostic")
     parser.add_argument("--chat-template", type=Path,
                         help="optional runtime-owned Jinja template to validate")
     return parser.parse_args()
@@ -70,6 +82,56 @@ def hugging_face_revision(model: Path) -> str | None:
         return None
     revision = metadata.read_text(encoding="utf-8").splitlines()[0].strip()
     return revision or None
+
+
+def install_mixed_fp32_compute():
+    """Make the official eager model mirror qwen3x's BF16-weight/FP32 math.
+
+    Keeping parameters in BF16 avoids the 4B FP32 model's 16 GiB host/GPU
+    footprint. Each operator expands only the weight it is currently using.
+    This is a reference diagnostic, not a serving or performance path.
+    """
+    from transformers.models.qwen3_5 import modeling_qwen3_5 as qwen_model
+
+    def linear_forward(module, value):
+        bias = module.bias.float() if module.bias is not None else None
+        return F.linear(value.float(), module.weight.float(), bias)
+
+    def embedding_forward(module, token_ids):
+        # Text token embeddings have no max_norm or scale_grad_by_freq behavior.
+        return module.weight[token_ids].float()
+
+    def causal_conv1d_fn(hidden_states, weight, bias=None, activation=None, **_):
+        sequence_length = hidden_states.shape[-1]
+        padding = weight.shape[-1] - 1
+        output = F.conv1d(
+            hidden_states.float(), weight.float().unsqueeze(1),
+            bias.float() if bias is not None else None,
+            padding=padding, groups=hidden_states.shape[1],
+        )[:, :, :sequence_length]
+        if activation is not None:
+            output = qwen_model.ACT2FN[activation](output)
+        return output
+
+    def causal_conv1d_update(hidden_states, conv_state, weight,
+                             bias=None, activation=None):
+        sequence_length = hidden_states.shape[-1]
+        state_length = conv_state.shape[-1]
+        combined = torch.cat([conv_state.float(), hidden_states.float()], dim=-1)
+        conv_state.copy_(combined[:, :, -state_length:])
+        output = F.conv1d(
+            combined, weight.float().unsqueeze(1),
+            bias.float() if bias is not None else None,
+            groups=hidden_states.shape[1],
+        )[:, :, -sequence_length:]
+        if activation is not None:
+            output = qwen_model.ACT2FN[activation](output)
+        return output
+
+    torch.nn.Linear.forward = linear_forward
+    torch.nn.Embedding.forward = embedding_forward
+    qwen_model.causal_conv1d_fn = causal_conv1d_fn
+    qwen_model.causal_conv1d_update = causal_conv1d_update
 
 
 def add_case(arrays: dict[str, np.ndarray], metadata_cases: list[dict[str, object]], name: str,
@@ -152,24 +214,30 @@ def main() -> None:
                           (args.device == "auto" and torch.cuda.is_available()) else "cpu")
 
     # The two lines below are intentionally visible rather than hidden in a helper.
-    # FP32 official forward is the numerical gold standard for the C++ SIMD Engine.
+    # FP32 official forward is the numerical gold standard for the C++ Engine.
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if args.chat_template is not None:
         tokenizer.chat_template = args.chat_template.read_text(encoding="utf-8")
+    model_dtype = torch.float32 if args.dtype == "float32" else torch.bfloat16
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, dtype=torch.float32, attn_implementation="eager"
+        args.model, dtype=model_dtype, attn_implementation="eager"
     ).eval().to(device)
+    if args.dtype == "mixed-fp32":
+        install_mixed_fp32_compute()
 
     args.out.mkdir(parents=True, exist_ok=True)
     arrays: dict[str, np.ndarray] = {}
     cases: list[dict[str, object]] = []
+    selected_cases = set(args.case) if args.case else None
     for name, prefill, decode in FIXED_CASES:
+        if selected_cases is not None and name not in selected_cases:
+            continue
         add_case(arrays, cases, name, prefill, decode, model, device, args.max_new_tokens)
 
-    for name, enable_thinking in (
-        ("chat_non_thinking", False),
-        ("chat_thinking", True),
-    ):
+    chat_modes = () if args.skip_chat else (
+        ("chat_non_thinking", False), ("chat_thinking", True),
+    )
+    for name, enable_thinking in chat_modes:
         chat_ids = tokenizer.apply_chat_template(
             MESSAGES,
             tokenize=True,
@@ -189,7 +257,7 @@ def main() -> None:
         "version": 1,
         "model": str(args.model),
         "device": str(device),
-        "dtype": "float32 official model",
+        "dtype": f"{args.dtype} official model",
         "logit_contract": "each row is logits after feeding the same-index input token",
         "comparison_tolerances": {"cpu_max_abs_error": 5e-4, "cuda_max_abs_error": 5e-4},
         "vocab_size": VOCAB_SIZE,

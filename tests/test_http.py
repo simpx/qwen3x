@@ -86,10 +86,13 @@ def main():
         assert json.loads(data) == {"status": "ok"}
         assert first_headers["X-Request-Id"] != second_headers["X-Request-Id"]
         assert request(port, "GET", "/v1/models", authorized=False)[0] == 401
-        assert request(port, "GET", "/v1/models")[0] == 200
+        status, _, data = request(port, "GET", "/v1/models")
+        assert status == 200
+        served_model = json.loads(data)["data"][0]["id"]
+        assert served_model in ("qwen3.5-0.8b", "qwen3.5-4b")
 
         body = {
-            "model": "qwen3.5-0.8b",
+            "model": served_model,
             "messages": [{"role": "user", "content": "hello"}],
             "temperature": 0,
             "max_completion_tokens": 3,
@@ -113,7 +116,7 @@ def main():
             },
         }
         tool_body = {
-            "model": "qwen3.5-0.8b",
+            "model": served_model,
             "messages": [{"role": "user", "content": "read README.md"}],
             "tools": [tool],
             "stream": False,
@@ -146,7 +149,9 @@ def main():
         tool_body["stream"] = True
         status, _, data = request(
             port, "POST", "/v1/chat/completions", tool_body)
-        assert status == 400 and "streaming tool calls" in data
+        assert status == 200, data
+        assert "data: [DONE]\n\n" in data
+        assert '"role":"assistant"' in data
 
         body.update({
             "stream": True,

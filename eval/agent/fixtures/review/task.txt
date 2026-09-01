@@ -1,0 +1,2 @@
+Review the current git diff for correctness bugs. Report every issue you find with
+calculator.py and an exact line or function location. Do not modify files.

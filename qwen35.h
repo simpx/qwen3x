@@ -19,7 +19,7 @@ enum {
     Q35_BUSY = -2,
 };
 
-/* Engine: one loaded, read-only Qwen3.5-0.8B model. */
+/* Engine: one loaded, read-only supported Qwen3.5 model. */
 
 typedef enum {
     Q35_LOG_TRACE = -1,
@@ -59,6 +59,7 @@ typedef struct {
 int q35_engine_create(const q35_engine_options* options, q35_engine** out,
                       char* err, size_t errlen);
 void q35_engine_destroy(q35_engine* engine);
+uint32_t q35_engine_model_id(const q35_engine* engine);
 
 /*
  * Session: one mutable token timeline containing State, Work and logits.

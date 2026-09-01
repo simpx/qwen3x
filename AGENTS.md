@@ -6,7 +6,7 @@
 ## 项目目标
 
 qwen3x 是一个个人开发的、极简、本地优先的 Qwen C++ 推理引擎，用于教学、研究和 PoC。
-当前专注于完整支持 Qwen3.5-0.8B；基础稳定后再支持 Qwen3.8-27B。
+型号范围固定为 Qwen3.5-0.8B、2B、4B、9B 和 27B，不在本项目中扩展到其他架构或型号。
 
 项目希望用尽可能少的代码展示一条真实、完整、可运行的推理数据流。读者应当能从
 `main()` 出发，一直读到模型 forward：
@@ -67,6 +67,19 @@ log.cpp        进程级日志实现
   token 的过程。
 - 新模型优先复用清晰的数据流和工程结构，再针对真实差异扩展；模型兼容性本身不是抽象
   层数的理由。
+
+### 模型抽象原则
+
+- model bin 使用固定布局和 model ID 表达已支持型号；header、tensor 顺序、类型、alignment
+  和 EOF 检查保持唯一、明确。
+- `ModelConfig` 集中记录每个型号的固定 shape。同一 Qwen3.5 结构共享一份完整 CPU forward 和
+  一份 CUDA decode forward；只有计算结构或数值路径不同时才增加具名 forward/prefill。
+- forward 从 config 读取 `H、I、N、AH、KVH、VH`，完整展示 embedding、layer loop、
+  DeltaNet/Attention、FFN、final norm 和 logits。分支直接留在 backend 入口和 layer loop。
+- File/Reader、固定布局 loader、Model/Layer、State/Work、checkpoint、模型算子和 CUDA kernel
+  保持内聚、可组合，由完整 forward 直接编排。
+- 新型号依次加入 model ID、`ModelConfig`、packer 和 reference 测试；结构或数值路径不同时再
+  增加对应的 CPU/CUDA 主流程。
 
 ## 多语言边界
 

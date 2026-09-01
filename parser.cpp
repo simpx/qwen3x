@@ -54,9 +54,6 @@ public:
         if (!parse_template_options(root, &request.chat.options)) {
             return invalid(error_message_);
         }
-        if (request.stream && !request.chat.tools.empty()) {
-            return invalid("streaming tool calls are not supported yet");
-        }
         if (!validate_http_chat(request.chat)) return invalid(error_message_);
         output = std::move(request);
         return Status{};
@@ -600,6 +597,42 @@ Json chunk_base(const std::string& id, int64_t created,
                 {"created", created}, {"model", model}};
 }
 
+Json generated_argument(const ToolCall& call, const ToolArgument& argument,
+                        const std::vector<std::string>* tools) {
+    if (!tools) return argument.text;
+    for (const std::string& tool_text : *tools) {
+        const Json tool = Json::parse(tool_text, nullptr, false);
+        if (tool.is_discarded() || !tool.is_object()) continue;
+        const auto function = tool.find("function");
+        if (function == tool.end() || !function->is_object()) continue;
+        const auto name = function->find("name");
+        if (name == function->end() || !name->is_string() ||
+            name->get_ref<const std::string&>() != call.name) continue;
+        const auto parameters = function->find("parameters");
+        if (parameters == function->end() || !parameters->is_object()) break;
+        const auto properties = parameters->find("properties");
+        if (properties == parameters->end() || !properties->is_object()) break;
+        const auto property = properties->find(argument.name);
+        if (property == properties->end() || !property->is_object()) break;
+        const auto type = property->find("type");
+        if (type == property->end() || !type->is_string()) break;
+        const std::string& expected = type->get_ref<const std::string&>();
+        if (expected == "string") return argument.text;
+
+        Json parsed = Json::parse(argument.text, nullptr, false);
+        if (parsed.is_discarded()) return argument.text;
+        if ((expected == "integer" && parsed.is_number_integer() &&
+             !parsed.is_boolean()) ||
+            (expected == "number" && parsed.is_number()) ||
+            (expected == "boolean" && parsed.is_boolean()) ||
+            (expected == "object" && parsed.is_object()) ||
+            (expected == "array" && parsed.is_array()) ||
+            (expected == "null" && parsed.is_null())) return parsed;
+        return argument.text;
+    }
+    return argument.text;
+}
+
 }  // namespace
 
 std::string error_json(const std::string& message, const char* type,
@@ -623,7 +656,8 @@ std::string completion_json(const std::string& id, int64_t created,
                             bool include_reasoning,
                             const std::vector<ToolCall>& tool_calls,
                             const char* finish_reason,
-                            const CompletionUsage& usage) {
+                            const CompletionUsage& usage,
+                            const std::vector<std::string>* tools) {
     Json message{{"role", "assistant"},
                  {"content", tool_calls.empty() || !content.empty()
                      ? Json(content) : Json(nullptr)},
@@ -634,7 +668,8 @@ std::string completion_json(const std::string& id, int64_t created,
         for (const ToolCall& call : tool_calls) {
             Json arguments = Json::object();
             for (const ToolArgument& argument : call.arguments) {
-                arguments[argument.name] = argument.text;
+                arguments[argument.name] = generated_argument(
+                    call, argument, tools);
             }
             message["tool_calls"].push_back({
                 {"id", call.id},
@@ -667,6 +702,31 @@ std::string completion_chunk_json(const std::string& id, int64_t created,
                                          {"logprobs", nullptr},
                                          {"finish_reason", finish_reason
                                              ? Json(finish_reason) : Json(nullptr)}}});
+    return body.dump();
+}
+
+std::string completion_tool_call_chunk_json(
+    const std::string& id, int64_t created, const std::string& model,
+    int index, const ToolCall& call, const std::vector<std::string>* tools) {
+    Json arguments = Json::object();
+    for (const ToolArgument& argument : call.arguments) {
+        arguments[argument.name] = generated_argument(call, argument, tools);
+    }
+    Json body = chunk_base(id, created, model);
+    body["choices"] = Json::array({Json{
+        {"index", 0},
+        {"delta", {{"tool_calls", Json::array({Json{
+            {"index", index},
+            {"id", call.id},
+            {"type", "function"},
+            {"function", {
+                {"name", call.name},
+                {"arguments", arguments.dump()},
+            }},
+        }})}}},
+        {"logprobs", nullptr},
+        {"finish_reason", nullptr},
+    }});
     return body.dump();
 }
 

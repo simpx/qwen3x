@@ -69,6 +69,7 @@ struct Options {
     bool context_set = false;
     bool slots_set = false;
     bool log_level_set = false;
+    bool served_model_set = false;
     bool mock = false;
 };
 
@@ -189,7 +190,7 @@ bool integer(const std::string& text, Integer* output) {
     return true;
 }
 
-std::string sibling_file(const char* program, const char* name) {
+std::filesystem::path executable_path(const char* program) {
     std::error_code error;
     std::filesystem::path executable =
         std::filesystem::read_symlink("/proc/self/exe", error);
@@ -198,7 +199,11 @@ std::string sibling_file(const char* program, const char* name) {
         executable = std::filesystem::absolute(program, error);
         if (error) executable = program;
     }
-    return (executable.parent_path() / name).string();
+    return executable;
+}
+
+std::string sibling_file(const char* program, const char* name) {
+    return (executable_path(program).parent_path() / name).string();
 }
 
 bool option_value(int& index, int argc, char** argv,
@@ -260,6 +265,7 @@ bool parse_options(int argc, char** argv, Options* options,
             options->host = value;
         } else if (argument == "--served-model-name") {
             options->served_model = value;
+            options->served_model_set = true;
         } else if (argument == "--log-file") {
             options->log_file = value;
         } else if (argument == "--port") {
@@ -779,7 +785,7 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
             result.reasoning, content,
             request.chat.options.enable_thinking,
             tool_calls,
-            result.finish_reason.c_str(), usage));
+            result.finish_reason.c_str(), usage, &request.chat.tools));
         record_generation(access.get(), result);
         return false;
     }
@@ -825,8 +831,10 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
 
             GenerationResult result;
             std::string error;
+            const bool buffer_for_tools = !request.chat.tools.empty();
             const Publish publish = [&](const char* field,
                                         const std::string& text) {
+                if (buffer_for_tools) return sink.is_writable();
                 return send(q35_render::completion_chunk_json(
                     completion_id, created, runtime.options.served_model,
                     field, text));
@@ -853,6 +861,46 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
                     access->complete("error", "generation");
                 }
                 return false;
+            }
+            if (buffer_for_tools) {
+                std::vector<q35_render::ToolCall> tool_calls;
+                std::string content;
+                if (!q35_render::parse_generated_tool_calls(
+                        result.content, &content, &tool_calls, &error)) {
+                    LOG_WARN("stream tool output not parsed request_id=%s "
+                             "completion_id=%s error=%s",
+                             access->request_id.c_str(), completion_id.c_str(),
+                             error.c_str());
+                    content = result.content;
+                    tool_calls.clear();
+                }
+                if (request.chat.options.enable_thinking &&
+                    !result.reasoning.empty() &&
+                    !send(q35_render::completion_chunk_json(
+                        completion_id, created, runtime.options.served_model,
+                        "reasoning_content", result.reasoning))) {
+                    interrupted("stream_reasoning");
+                    return false;
+                }
+                if (!content.empty() &&
+                    !send(q35_render::completion_chunk_json(
+                        completion_id, created, runtime.options.served_model,
+                        "content", content))) {
+                    interrupted("stream_content");
+                    return false;
+                }
+                for (size_t index = 0; index < tool_calls.size(); ++index) {
+                    tool_calls[index].id = make_id("call_");
+                    if (!send(q35_render::completion_tool_call_chunk_json(
+                            completion_id, created,
+                            runtime.options.served_model,
+                            static_cast<int>(index), tool_calls[index],
+                            &request.chat.tools))) {
+                        interrupted("stream_tool_call");
+                        return false;
+                    }
+                }
+                if (!tool_calls.empty()) result.finish_reason = "tool_calls";
             }
             record_generation(access.get(), result);
             if (!send(q35_render::completion_chunk_json(
@@ -913,6 +961,19 @@ bool initialize(Runtime* runtime, std::string* error) {
                           native_error, sizeof(native_error)) != Q35_OK) {
         *error = native_error;
         return false;
+    }
+    if (!runtime->options.served_model_set) {
+        switch (q35_engine_model_id(runtime->engine)) {
+        case 800:
+            runtime->options.served_model = "qwen3.5-0.8b";
+            break;
+        case 4000:
+            runtime->options.served_model = "qwen3.5-4b";
+            break;
+        default:
+            *error = "loaded model has no served model name";
+            return false;
+        }
     }
     if (q35_session_manager_create(
             runtime->engine, runtime->options.slots, runtime->options.context,

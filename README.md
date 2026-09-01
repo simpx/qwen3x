@@ -29,12 +29,27 @@ Python 不参与部署或推理，只用于离线权重转换、render 数据生
 
 ## 构建和使用
 
-下载官方 checkpoint，并准备权重和开发阶段独立的 render 数据：
+0.8B 继续作为 CPU correctness 和协议 smoke 基线：
 
 ```sh
 make -C scripts checkpoint model render
 make -j4
 ```
+
+日常 coding agent 后端使用官方 Qwen3.5-4B BF16。它是目前在本机固定
+inspect/review/bugfix 场景全部通过的最小型号：
+
+```sh
+make -C scripts checkpoint-4b model-4b render
+make cuda -j4
+./build/qwen35-cuda --model build/qwen35-4b-model.bin \
+  --listen --host 127.0.0.1 --port 8000 \
+  --session-slots 1 --session-context 40960
+```
+
+同一个 `qwen35` 或 `qwen35-cuda` binary 根据 model bin 中的固定 model ID
+选择 0.8B 或 4B forward。加载 4B 后 API model id 自动设为 `qwen3.5-4b`；tokenizer
+仍复用 `qwen35-0.8b-render.bin`。`--served-model-name` 可覆盖对外名称。
 
 默认构建 `build/qwen35` CPU correctness engine。NVIDIA CUDA 版本使用同一套
 main/runtime/render，只替换 engine：
@@ -45,8 +60,9 @@ make cuda -j4
 ```
 
 CUDA 构建需要 CUDA Toolkit，当前在 CUDA 12.8 / compute capability 8.9 上验证。
-decode 使用显式单 token forward 的 CUDA Graph，prefill 按 128-token chunk 执行；完整
-优化过程、正确性阈值和 CPU/CUDA benchmark 见 [eval/cuda.md](eval/cuda.md)。
+decode 使用显式单 token forward 的 CUDA Graph，prefill 按 128-token chunk 执行。
+0.8B 的优化过程见 [eval/cuda.md](eval/cuda.md)，4B 的 reference 契约和三次稳态
+benchmark 见 [eval/cuda-4b.md](eval/cuda-4b.md)。
 
 所有下载和生成的文件都位于 `build/`。`make clean` 清理程序、render 和测试产物，
 但保留下载的 checkpoint 与 pack 后的模型权重。首次构建可以并行编译；之后直接运行
@@ -105,9 +121,48 @@ scripts/agent.py -y "Use bash to run pwd, then tell me the directory."
 ```
 
 `agent.py` 只提供 `read_file`、`write_file` 和 `bash`，默认在当前目录工作；
-`write_file` 和 `bash` 默认需要确认，`-y` 用于受控测试环境。当前 Agent 请求使用
-非流式 Chat Completions；普通文本 completion 已支持流式，流式 tool calls 后续补充。
+`write_file` 和 `bash` 默认需要确认，`-y` 用于受控测试环境。服务支持普通文本与
+tool-call SSE，包括同一轮多个 tool calls、usage 和 `finish_reason: tool_calls`。
+带 tools 的流式请求会在模型完成后一次发送解析后的 tool-call chunks，避免把 Qwen
+内部 XML 暴露为 content；因此工具调用没有逐参数增量输出。
 `read_file` 默认读取 200 行，也接受 `start_line` 和 `line_count`，让模型按段阅读大文件。
+
+真实 pi 0.84.4 可直接连接，不需要代理。该版本要求 Node >= 22.19。将下面内容放入隔离的
+`$PI_CODING_AGENT_DIR/models.json`（或合并到现有配置）：
+
+```json
+{
+  "providers": {
+    "qwen3x": {
+      "baseUrl": "http://127.0.0.1:8000/v1",
+      "api": "openai-completions",
+      "apiKey": "local",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "thinkingFormat": "qwen-chat-template"
+      },
+      "models": [{
+        "id": "qwen3.5-4b",
+        "reasoning": true,
+        "input": ["text"],
+        "contextWindow": 40960,
+        "maxTokens": 4096
+      }]
+    }
+  }
+}
+```
+
+然后运行：
+
+```sh
+pi --provider qwen3x --model qwen3.5-4b
+```
+
+pi 内置 `read` 的输出不带源文件行号。要求精确引用时，让 pi 用
+`bash` 执行 `nl -ba FILE | sed -n 'START,ENDp'`；该方式已在 257 行 inspect
+fixture 上验证。
 
 测量不含 HTTP、JSON、chat template、tokenizer 和 sampling 的 Session 性能：
 
@@ -121,7 +176,8 @@ session slot；`--session-slots` 可以复现服务所用的内存配置，但�
 Session，不代表并发吞吐量。
 
 `qwen35` 默认从可执行文件所在目录加载 `qwen35-0.8b-model.bin` 和
-`qwen35-0.8b-render.bin`。`--model` 和 `--render` 只在需要覆盖默认路径时使用。
+`qwen35-0.8b-render.bin`。其他型号通过 `--model` 选择对应 model bin；
+`--render` 只在需要覆盖默认 tokenizer 数据时使用。
 
 普通 completion：
 
@@ -172,5 +228,6 @@ build/              下载的 checkpoint、生成的模型和编译产物
 
 ## Roadmap
 
-1. 完整支持 Qwen3.5-0.8B。
-2. 完整支持 Qwen3.8-27B。
+1. 保持 Qwen3.5-0.8B correctness baseline。
+2. 以 Qwen3.5-4B 作为本机 coding agent 路线，按真实失败继续收敛。
+3. 只有 4B 的实际任务能力不足时，再评估 Qwen3.5-9B 或 27B。

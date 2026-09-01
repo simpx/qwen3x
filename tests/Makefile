@@ -18,9 +18,9 @@ THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(PROJECT)/third_party/spdlog/include
 SPDLOG_SRC := $(wildcard $(PROJECT)/third_party/spdlog/src/*.cpp)
 
-.PHONY: test parser-test runtime-test cli-test chat-test agent-test render-test http-test clean
+.PHONY: test parser-test runtime-test cli-test chat-test agent-test pack-test render-test http-test clean
 
-test: parser-test runtime-test cli-test chat-test agent-test
+test: parser-test runtime-test cli-test chat-test agent-test pack-test
 
 $(PARSER_TEST): parser_test.cpp $(PROJECT)/parser.cpp $(PROJECT)/render.cpp \
 		$(PROJECT)/render.h \
@@ -33,7 +33,8 @@ parser-test: $(PARSER_TEST)
 	$(PARSER_TEST)
 
 $(RUNTIME_TEST): runtime_test.cpp $(PROJECT)/engine.cpp $(PROJECT)/runtime.cpp \
-		$(PROJECT)/log.cpp $(PROJECT)/qwen35.h $(PROJECT)/internal.h $(SPDLOG_SRC)
+		$(PROJECT)/log.cpp $(PROJECT)/qwen35.h $(PROJECT)/internal.h \
+		$(PROJECT)/model_config.h $(SPDLOG_SRC)
 	mkdir -p "$(BUILD)"
 	$(CXX) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) -I$(PROJECT) \
 		$(PROJECT)/engine.cpp $(PROJECT)/runtime.cpp $(PROJECT)/log.cpp \
@@ -54,7 +55,11 @@ chat-test:
 
 agent-test:
 	cd "$(PROJECT)" && $(SYSTEM_PYTHON) -m unittest discover \
-		-s tests -p test_agent.py -v
+		-s tests -p 'test_agent*.py' -v
+
+pack-test:
+	cd "$(PROJECT)" && $(SYSTEM_PYTHON) -m unittest discover \
+		-s tests -p test_pack_weights.py -v
 
 $(RENDER_DRIVER): render_driver.cpp $(PROJECT)/render.cpp $(PROJECT)/parser.cpp \
 		$(PROJECT)/render.h $(PROJECT)/third_party/nlohmann/json.hpp

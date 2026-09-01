@@ -1,0 +1,20 @@
+{
+  "required_location": "calculator.py",
+  "issues": [
+    {
+      "id": "divide_by_zero_hidden",
+      "all_terms": ["safe_divide"],
+      "any_terms": ["zero", "0.0", "exception", "error"]
+    },
+    {
+      "id": "average_truncated",
+      "all_terms": ["average"],
+      "any_terms": ["floor", "truncat", "//", "integer"]
+    },
+    {
+      "id": "clamp_reversed",
+      "all_terms": ["clamp"],
+      "any_terms": ["revers", "bound", "min", "max"]
+    }
+  ]
+}

@@ -2,16 +2,18 @@
 """Minimal read/write/bash agent for a local qwen35 server."""
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
 
-DEFAULT_MODEL = "qwen3.5-0.8b"
+DEFAULT_MODEL = "qwen3.5-4b"
 DEFAULT_URL = "http://127.0.0.1:8000/v1/chat/completions"
 
 SYSTEM_PROMPT = """You are a small local coding agent.
@@ -97,7 +99,10 @@ def argument_parser():
     parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--max-turns", type=int, default=16)
     parser.add_argument("--command-timeout", type=float, default=30.0)
+    parser.add_argument("--request-timeout", type=float, default=60.0)
     parser.add_argument("--max-output", type=int, default=16000)
+    parser.add_argument("--max-read-lines", type=int, default=200)
+    parser.add_argument("--trace", help="write a machine-readable development trace")
     parser.add_argument("-y", "--yes", action="store_true",
                         help="approve write_file and bash without prompting")
     return parser
@@ -115,7 +120,7 @@ def request_body(args, messages):
     }
 
 
-def completion(args, messages):
+def completion_response(args, messages):
     body = json.dumps(
         request_body(args, messages), ensure_ascii=False,
         separators=(",", ":"),
@@ -124,23 +129,148 @@ def completion(args, messages):
     if args.api_key:
         headers["Authorization"] = "Bearer " + args.api_key
     request = urllib.request.Request(args.url, body, headers, method="POST")
+    started = time.monotonic()
+    first_byte = None
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=args.request_timeout) as response:
+            first_byte = time.monotonic()
             value = json.load(response)
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         raise AgentError(f"HTTP {error.code}: {detail.strip()}") from error
     except urllib.error.URLError as error:
         raise AgentError(f"request failed: {error.reason}") from error
+    except TimeoutError as error:
+        raise AgentError(f"request failed: {error}") from error
     except json.JSONDecodeError as error:
         raise AgentError(f"invalid response JSON: {error.msg}") from error
 
     if "error" in value:
         raise AgentError(value["error"].get("message", "server returned an error"))
+    completed = time.monotonic()
     try:
-        return value["choices"][0]["message"]
+        choice = value["choices"][0]
+        message = choice["message"]
     except (KeyError, IndexError, TypeError) as error:
         raise AgentError("response does not contain an assistant message") from error
+    metadata = {
+        "body": value,
+        "finish_reason": choice.get("finish_reason"),
+        "usage": value.get("usage"),
+        "ttft_ms": ((first_byte - started) * 1000
+                    if first_byte is not None else None),
+        "total_ms": (completed - started) * 1000,
+    }
+    return message, metadata
+
+
+def completion(args, messages):
+    return completion_response(args, messages)[0]
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+class TraceRecorder:
+    """Development-only request/tool trace; callers decide where to store it."""
+
+    def __init__(self, args, prompt=None):
+        self.value = {
+            "schema_version": 1,
+            "started_at": utc_now(),
+            "config": {
+                "endpoint": args.url,
+                "model": args.model,
+                "generation": {
+                    "stream": False,
+                    "temperature": 0,
+                    "max_completion_tokens": args.max_tokens,
+                    "max_turns": args.max_turns,
+                    "request_timeout": args.request_timeout,
+                    "max_output": args.max_output,
+                    "max_read_lines": args.max_read_lines,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                },
+            },
+            "prompt": prompt,
+            "turns": [],
+            "tools": [],
+            "result": None,
+        }
+
+    def record_turn(self, turn, messages, message, metadata, elapsed_ms):
+        self.value["turns"].append({
+            "turn": turn,
+            "request": {
+                "messages": messages,
+                "body": request_body_from_config(self.value, messages),
+            },
+            "response": {
+                "assistant": message,
+                "body": metadata.get("body"),
+                "finish_reason": metadata.get("finish_reason"),
+                "usage": metadata.get("usage"),
+            },
+            "timing": {
+                "ttft_ms": metadata.get("ttft_ms"),
+                "total_ms": metadata.get("total_ms", elapsed_ms),
+            },
+        })
+
+    def record_tool(self, turn, call_id, name, arguments, result, elapsed_ms):
+        self.value["tools"].append({
+            "turn": turn,
+            "tool_call_id": call_id,
+            "name": name,
+            "arguments": arguments,
+            "result": result,
+            "elapsed_ms": elapsed_ms,
+        })
+
+    def finish(self, status, answer=None, error=None, error_class=None):
+        self.value["completed_at"] = utc_now()
+        self.value["result"] = {
+            "status": status,
+            "answer": answer,
+            "error": error,
+            "error_class": error_class,
+        }
+
+    def write(self, path):
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(self.value, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+
+def request_body_from_config(trace, messages):
+    generation = trace["config"]["generation"]
+    return {
+        "model": trace["config"]["model"],
+        "messages": messages,
+        "tools": TOOLS,
+        "stream": generation["stream"],
+        "temperature": generation["temperature"],
+        "max_completion_tokens": generation["max_completion_tokens"],
+        "chat_template_kwargs": generation["chat_template_kwargs"],
+    }
+
+
+def classify_error(error):
+    message = str(error)
+    if message.startswith("HTTP "):
+        return "http_error"
+    if message.startswith("request failed:"):
+        return "connection_error"
+    if message.startswith("invalid response JSON:") or \
+            message.startswith("response does not contain"):
+        return "response_error"
+    if "exceeded" in message and "model turns" in message:
+        return "turn_limit"
+    return "agent_error"
 
 
 def resolve_path(cwd, value):
@@ -187,6 +317,10 @@ def execute_tool(args, name, arguments, input_fn=input):
         if (not isinstance(line_count, int) or isinstance(line_count, bool)
                 or line_count <= 0):
             raise AgentError("line_count must be a positive integer")
+        if line_count > args.max_read_lines:
+            raise AgentError(
+                f"line_count exceeds --max-read-lines ({args.max_read_lines})"
+            )
         try:
             lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         except (OSError, UnicodeError) as error:
@@ -202,7 +336,10 @@ def execute_tool(args, name, arguments, input_fn=input):
         relative = path.relative_to(Path(args.cwd).resolve())
         if total == 0:
             return f"{relative}: empty file"
-        content = "".join(selected)
+        content = "".join(
+            f"{line_number:6d}\t{line}"
+            for line_number, line in enumerate(selected, start=start_line)
+        )
         header = f"{relative}: lines {start_line}-{end_line} of {total}\n"
         footer = ""
         if end_line < total:
@@ -257,10 +394,25 @@ def execute_tool(args, name, arguments, input_fn=input):
     raise AgentError(f"unknown tool: {name}")
 
 
-def run_task(args, messages, prompt, complete=completion, input_fn=input):
+def run_task(args, messages, prompt, complete=None, input_fn=input, trace=None):
     messages.append({"role": "user", "content": prompt})
-    for _ in range(args.max_turns):
-        message = complete(args, messages)
+    for turn in range(1, args.max_turns + 1):
+        request_messages = json.loads(json.dumps(messages, ensure_ascii=False))
+        started = time.monotonic()
+        if complete is None:
+            message, metadata = completion_response(args, messages)
+        else:
+            completed = complete(args, messages)
+            if (isinstance(completed, tuple) and len(completed) == 2
+                    and isinstance(completed[1], dict)):
+                message, metadata = completed
+            else:
+                message, metadata = completed, {}
+        elapsed_ms = (time.monotonic() - started) * 1000
+        if trace is not None:
+            trace.record_turn(
+                turn, request_messages, message, metadata, elapsed_ms
+            )
         messages.append(message)
         calls = message.get("tool_calls") or []
         if not calls:
@@ -272,11 +424,18 @@ def run_task(args, messages, prompt, complete=completion, input_fn=input):
             name = function.get("name", "")
             raw_arguments = function.get("arguments", "{}")
             print(f"tool: {name}({raw_arguments})", file=sys.stderr)
+            tool_started = time.monotonic()
+            arguments = None
             try:
                 arguments = json.loads(raw_arguments)
                 result = execute_tool(args, name, arguments, input_fn)
             except (json.JSONDecodeError, AgentError) as error:
                 result = "ERROR: " + str(error)
+            if trace is not None:
+                trace.record_tool(
+                    turn, call_id, name, arguments, result,
+                    (time.monotonic() - tool_started) * 1000,
+                )
             messages.append({
                 "role": "tool",
                 "tool_call_id": call_id,
@@ -290,13 +449,30 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.max_tokens <= 0 or args.max_turns <= 0 or args.max_output <= 0:
         parser.error("limits must be positive")
+    if args.max_read_lines <= 0:
+        parser.error("--max-read-lines must be positive")
     if args.command_timeout <= 0:
         parser.error("--command-timeout must be positive")
+    if args.request_timeout <= 0:
+        parser.error("--request-timeout must be positive")
     try:
         args.cwd = str(Path(args.cwd).resolve(strict=True))
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         if args.prompt is not None:
-            answer = run_task(args, messages, args.prompt)
+            trace = TraceRecorder(args, args.prompt) if args.trace else None
+            try:
+                answer = run_task(args, messages, args.prompt, trace=trace)
+            except AgentError as error:
+                if trace is not None:
+                    trace.finish(
+                        "error", error=str(error),
+                        error_class=classify_error(error),
+                    )
+                    trace.write(args.trace)
+                raise
+            if trace is not None:
+                trace.finish("completed", answer=answer)
+                trace.write(args.trace)
             if answer:
                 print(answer)
             return 0

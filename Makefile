@@ -18,6 +18,7 @@ PROGRAM_DEP := $(PROGRAM_OBJ:.o=.d)
 CUDA_OBJ := $(BUILD)/obj/arch/cuda/engine.o
 CUDA_DEP := $(CUDA_OBJ:.o=.d)
 CUDA_ARCH ?= native
+CUDA_LIB_DIR ?= /usr/local/cuda/targets/x86_64-linux/lib
 NVCCFLAGS ?= -O3 -std=c++17 -arch=$(CUDA_ARCH) \
 	-Xcompiler=-fno-exceptions,-fno-rtti,-Wall,-Wextra
 
@@ -35,9 +36,10 @@ $(PROGRAM): $(PROGRAM_OBJ)
 
 $(CUDA_PROGRAM): $(CUDA_OBJ) $(COMMON_OBJ)
 	mkdir -p $(BUILD)
-	$(NVCC) $(NVCCFLAGS) $^ -Xcompiler=-pthread -o $@
+	$(NVCC) $(NVCCFLAGS) $^ -L$(CUDA_LIB_DIR) -lcublas \
+		-Xlinker -rpath -Xlinker $(CUDA_LIB_DIR) -Xcompiler=-pthread -o $@
 
-$(CUDA_OBJ): arch/cuda/engine.cu internal.h qwen35.h Makefile
+$(CUDA_OBJ): arch/cuda/engine.cu internal.h model_config.h qwen35.h Makefile
 	mkdir -p $(dir $@)
 	$(NVCC) $(NVCCFLAGS) -I. -MMD -MP -c $< -o $@
 

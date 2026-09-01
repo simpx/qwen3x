@@ -8,6 +8,7 @@ implements only the non-streaming chat-completions surface used by EvalScope.
 from __future__ import annotations
 
 import argparse
+import json
 import time
 import uuid
 from pathlib import Path
@@ -16,6 +17,12 @@ import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from transformers import AutoModelForCausalLM, AutoTokenizer, StaticCache
+
+from tool_calls import (
+    ToolCallParseError,
+    normalize_messages,
+    parse_generated_tool_calls,
+)
 
 
 STOP_TOKENS = {248044, 248046}
@@ -34,6 +41,10 @@ def parse_args() -> argparse.Namespace:
                         help="float32 is the correctness oracle; bfloat16 is faster but may diverge")
     parser.add_argument("--cache", choices=("dynamic", "static"), default="static",
                         help="static avoids one torch.cat allocation per generated token")
+    parser.add_argument(
+        "--attn-implementation", choices=("eager", "sdpa"), default="eager",
+        help="sdpa bounds attention workspace for long agent transcripts",
+    )
     parser.add_argument("--max-context-tokens", type=int, default=40960)
     return parser.parse_args()
 
@@ -83,7 +94,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         dtype=dtype,
-        attn_implementation="eager",
+        attn_implementation=args.attn_implementation,
     ).eval().to(device)
 
     app = FastAPI(title="Qwen3.5 Transformers reference")
@@ -92,12 +103,17 @@ def create_app(args: argparse.Namespace) -> FastAPI:
     def ready():
         return {"status": "ready", "backend": "transformers", "device": str(device),
                 "dtype": args.dtype, "cache": args.cache,
+                "attn_implementation": args.attn_implementation,
                 "max_context_tokens": args.max_context_tokens}
 
     @app.get("/v1/models")
     def models():
         return {"object": "list", "data": [{"id": args.served_model_name,
                 "object": "model", "created": 0, "owned_by": "transformers"}]}
+
+    @app.get("/metrics")
+    def metrics():
+        return getattr(app.state, "last_metrics", {})
 
     @app.post("/v1/chat/completions")
     def chat(body: dict):
@@ -110,14 +126,21 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             raise HTTPException(400, "messages must be a non-empty array")
         template_options = body.get("chat_template_kwargs") or {}
         enable_thinking = bool(template_options.get("enable_thinking", False))
-        prompt_ids = tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_dict=False,
-            enable_thinking=enable_thinking,
-            preserve_thinking=bool(template_options.get("preserve_thinking", True)),
-        )
+        try:
+            normalized_messages = normalize_messages(messages)
+            prompt_ids = tokenizer.apply_chat_template(
+                normalized_messages,
+                tools=body.get("tools"),
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=False,
+                enable_thinking=enable_thinking,
+                preserve_thinking=bool(
+                    template_options.get("preserve_thinking", True)
+                ),
+            )
+        except (ToolCallParseError, TypeError, ValueError) as error:
+            raise HTTPException(400, f"invalid chat request: {error}") from error
         max_tokens = int(body.get("max_completion_tokens", body.get("max_tokens", 128)))
         if max_tokens <= 0:
             raise HTTPException(400, "max_tokens must be positive")
@@ -126,6 +149,11 @@ def create_app(args: argparse.Namespace) -> FastAPI:
         seed = int(body.get("seed", 0))
         generator = torch.Generator(device=device).manual_seed(seed & ((1 << 63) - 1))
 
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
+        request_started = time.perf_counter()
         with torch.inference_mode():
             cache = None
             if args.cache == "static":
@@ -140,6 +168,9 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             )
             cache = output.past_key_values
             logits = output.logits[0, -1]
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            prefill_completed = time.perf_counter()
             generated: list[int] = []
             generated_set: set[int] = set()
             finish_reason = "length"
@@ -158,6 +189,10 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 cache = output.past_key_values
                 logits = output.logits[0, -1]
 
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        generation_completed = time.perf_counter()
+
         reasoning = None
         content_ids = generated
         if enable_thinking:
@@ -168,9 +203,46 @@ def create_app(args: argparse.Namespace) -> FastAPI:
             reasoning = tokenizer.decode(generated[:boundary], skip_special_tokens=True).strip()
             content_ids = generated[boundary + 1:] if boundary < len(generated) else []
         content = tokenizer.decode(content_ids, skip_special_tokens=True).lstrip()
+        calls = []
+        if body.get("tools"):
+            try:
+                content, calls = parse_generated_tool_calls(
+                    content, body.get("tools")
+                )
+            except ToolCallParseError:
+                calls = []
         message = {"role": "assistant", "content": content, "refusal": None}
+        if calls:
+            message["content"] = content if content else None
+            message["tool_calls"] = [{
+                "id": "call_" + uuid.uuid4().hex,
+                "type": "function",
+                "function": {
+                    "name": call["name"],
+                    "arguments": json.dumps(
+                        call["arguments"], ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                },
+            } for call in calls]
+            finish_reason = "tool_calls"
         if reasoning is not None:
             message["reasoning_content"] = reasoning
+        decode_seconds = generation_completed - prefill_completed
+        metrics_value = {
+            "prefill_ms": (prefill_completed - request_started) * 1000,
+            "ttft_ms": (prefill_completed - request_started) * 1000,
+            "decode_tps": len(generated) / decode_seconds if decode_seconds else 0,
+            "peak_cuda_allocated_bytes": (
+                torch.cuda.max_memory_allocated(device)
+                if device.type == "cuda" else 0
+            ),
+            "peak_cuda_reserved_bytes": (
+                torch.cuda.max_memory_reserved(device)
+                if device.type == "cuda" else 0
+            ),
+        }
+        app.state.last_metrics = metrics_value
         return {
             "id": "chatcmpl-ref-" + uuid.uuid4().hex,
             "object": "chat.completion",
@@ -184,6 +256,7 @@ def create_app(args: argparse.Namespace) -> FastAPI:
                 "total_tokens": len(prompt_ids) + len(generated),
                 "prompt_tokens_details": {"cached_tokens": 0},
             },
+            "x_qwen3x_eval": metrics_value,
         }
 
     return app

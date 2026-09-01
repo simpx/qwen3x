@@ -8,8 +8,12 @@ CHECKPOINT_REPO ?= Qwen/Qwen3.5-0.8B
 CHECKPOINT ?= $(BUILD)/models/Qwen3.5-0.8B
 CHECKPOINT_STAMP ?= $(BUILD)/.qwen3.5-0.8b-checkpoint
 MODEL_BIN ?= $(BUILD)/qwen35-0.8b-model.bin
+CHECKPOINT_4B_REPO ?= Qwen/Qwen3.5-4B
+CHECKPOINT_4B ?= $(BUILD)/models/Qwen3.5-4B
+CHECKPOINT_4B_STAMP ?= $(BUILD)/.qwen3.5-4b-checkpoint
+MODEL_4B_BIN ?= $(BUILD)/qwen35-4b-model.bin
 RENDER_BIN ?= $(BUILD)/qwen35-0.8b-render.bin
-.PHONY: all sync checkpoint model render clean
+.PHONY: all sync checkpoint checkpoint-4b model model-4b render clean
 
 all: model render
 
@@ -29,6 +33,20 @@ model: $(MODEL_BIN)
 $(MODEL_BIN): pack_weights.py $(CHECKPOINT_STAMP)
 	mkdir -p "$(BUILD)"
 	cd "$(PROJECT)" && $(PYTHON) -m scripts.pack_weights "$(CHECKPOINT)" "$@"
+
+checkpoint-4b: $(CHECKPOINT_4B_STAMP)
+
+$(CHECKPOINT_4B_STAMP):
+	mkdir -p "$(CHECKPOINT_4B)"
+	$(HF) download "$(CHECKPOINT_4B_REPO)" --local-dir "$(CHECKPOINT_4B)"
+	rm -rf "$(CHECKPOINT_4B)/.cache"
+	touch "$@"
+
+model-4b: $(MODEL_4B_BIN)
+
+$(MODEL_4B_BIN): pack_weights.py $(CHECKPOINT_4B_STAMP)
+	mkdir -p "$(BUILD)"
+	cd "$(PROJECT)" && $(PYTHON) -m scripts.pack_weights "$(CHECKPOINT_4B)" "$@"
 
 render: $(RENDER_BIN)
 

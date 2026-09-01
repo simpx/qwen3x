@@ -4,10 +4,10 @@ PROJECT ?= ..
 PROJECT := $(abspath $(PROJECT))
 SERVER ?= http://127.0.0.1:8000
 TOKENIZER ?= $(abspath ../build/models/Qwen3.5-0.8B)
-BIN ?= build/qwen35-0.8b-model.bin
+BIN ?= build/qwen35-4b-model.bin
 
 EVAL_DATASET ?= mmlu_pro
-EVAL_MODEL ?= qwen3.5-0.8b
+EVAL_MODEL ?= qwen3.5-4b
 EVAL_BACKEND ?= qwen35
 EVAL_ARTIFACT ?= $(BIN)
 EVAL_LIMIT ?=
@@ -19,6 +19,8 @@ EVAL_REQUEST_TIMEOUT ?= 7200
 EVAL_CONCURRENCY ?= 1
 EVAL_OUTPUT ?= $(EVAL_DIR)/results
 EVAL_RESUME ?=
+AGENT_SCENE ?= all
+AGENT_OUTPUT ?=
 
 REFERENCE_SERVER ?= http://127.0.0.1:8002
 ENGINE_RUN ?=
@@ -30,7 +32,7 @@ THINKING_ARG := $(if $(filter 1 true yes,$(EVAL_THINKING)),--thinking,)
 SMOKE_ARG := $(if $(filter 1 true yes,$(EVAL_SMOKE)),--smoke,)
 PYTHON := $(UV) run --project "$(EVAL_DIR)" --locked python
 
-.PHONY: test run smoke reference compare
+.PHONY: test run smoke reference compare agent-eval
 
 test:
 	cd "$(EVAL_DIR)" && $(PYTHON) -m unittest -v test_eval
@@ -70,3 +72,9 @@ compare:
 	@test -n "$(REFERENCE_RUN)" || { echo 'set REFERENCE_RUN'; exit 2; }
 	@cd "$(PROJECT)" && $(PYTHON) "$(EVAL_DIR)/compare.py" \
 		--engine "$(ENGINE_RUN)" --reference "$(REFERENCE_RUN)"
+
+agent-eval:
+	cd "$(PROJECT)" && python3 scripts/agent_eval.py "$(AGENT_SCENE)" \
+		--url "$(SERVER)/v1/chat/completions" \
+		--model "$(EVAL_MODEL)" \
+		$(if $(AGENT_OUTPUT),--output "$(AGENT_OUTPUT)",)

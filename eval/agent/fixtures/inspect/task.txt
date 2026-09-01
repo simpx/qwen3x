@@ -1,0 +1,4 @@
+Read all of pipeline.py in sections, then explain the serve_once request path. Cover
+parse_packet, normalize_request, run_request, HandlerRegistry.dispatch, and
+encode_response, including where errors become Response objects. Cite concrete
+function names and line numbers from the file.

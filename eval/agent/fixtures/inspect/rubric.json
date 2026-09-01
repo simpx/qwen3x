@@ -1,0 +1,23 @@
+{
+  "required_terms": [
+    "serve_once",
+    "parse_packet",
+    "normalize_request",
+    "run_request",
+    "HandlerRegistry.dispatch",
+    "encode_response"
+  ],
+  "expected_lines": {
+    "parse_packet": 61,
+    "normalize_request": 106,
+    "HandlerRegistry.dispatch": 159,
+    "run_request": 179,
+    "encode_response": 218,
+    "serve_once": 230
+  },
+  "aliases": {
+    "HandlerRegistry.dispatch": ["registry.dispatch"]
+  },
+  "minimum_successful_reads": 2,
+  "must_read_to_end": "pipeline.py"
+}

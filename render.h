@@ -139,12 +139,17 @@ std::string completion_json(const std::string& id, int64_t created,
                             bool include_reasoning,
                             const std::vector<ToolCall>& tool_calls,
                             const char* finish_reason,
-                            const CompletionUsage& usage);
+                            const CompletionUsage& usage,
+                            const std::vector<std::string>* tools = nullptr);
 std::string completion_chunk_json(const std::string& id, int64_t created,
                                   const std::string& model,
                                   const char* delta_field,
                                   const std::string& delta,
                                   const char* finish_reason = nullptr);
+std::string completion_tool_call_chunk_json(
+    const std::string& id, int64_t created, const std::string& model,
+    int index, const ToolCall& call,
+    const std::vector<std::string>* tools = nullptr);
 std::string completion_usage_chunk_json(const std::string& id,
                                         int64_t created,
                                         const std::string& model,
