@@ -437,6 +437,44 @@ printf 'hello\nworld'
     check(!q35_render::parse_generated_tool_calls(
               "<tool_call><function=bash>", &content, &calls, &error),
           "incomplete generated call should fail");
+    check(content.empty() && calls.empty(),
+          "incomplete generated call should not become content");
+
+    const std::string partial = R"(Let me check.
+<tool_call>
+<function=bash>
+<parameter=command>pwd</parameter>
+</function>
+</tool_call>
+<tool_call>
+<function=read>
+<parameter=path>README.md)";
+    check(!q35_render::parse_generated_tool_calls(
+              partial, &content, &calls, &error),
+          "partially generated tool calls should report failure");
+    check(content == "Let me check." && calls.size() == 1 &&
+          calls[0].name == "bash" && calls[0].arguments.size() == 1 &&
+          calls[0].arguments[0].text == "pwd",
+          "complete calls before an incomplete tail should be retained");
+
+    const std::string missing_wrapper = R"(<tool_call>
+<function=bash>
+<parameter=command>pwd</parameter>
+<broken>
+<tool_call>
+<function=read>
+<parameter=path>README.md</parameter>
+</function>
+</tool_call>)";
+    check(!q35_render::parse_generated_tool_calls(
+              missing_wrapper, &content, &calls, &error),
+          "a missing function wrapper should report failure");
+    check(calls.size() == 2 && calls[0].name == "bash" &&
+          calls[0].arguments.size() == 1 &&
+          calls[0].arguments[0].text == "pwd" &&
+          calls[1].name == "read" && calls[1].arguments.size() == 1 &&
+          calls[1].arguments[0].text == "README.md",
+          "a new tool wrapper should keep complete calls separate");
 }
 
 void test_completion_json() {

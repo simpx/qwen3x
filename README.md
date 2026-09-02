@@ -27,74 +27,74 @@ HTTP JSON
 
 Python 不参与部署或推理，只用于离线权重转换、render 数据生成、eval 和官方 reference。
 
-## 构建和使用
+## 使用
 
-0.8B 继续作为 CPU correctness 和协议 smoke 基线：
+日常只需要两个终端。
+
+终端一，在 qwen3x 中启动 4B 服务：
 
 ```sh
-make -C scripts checkpoint model render
+make serve-4b
+```
+
+终端二，进入希望 pi 操作的项目，然后运行 qwen3x 自带的启动脚本：
+
+```sh
+cd /path/to/project
+/path/to/qwen3x/scripts/pi.sh
+```
+
+`pi.sh` 保持当前工作目录不变，自动创建隔离的 pi 配置，检查 qwen3x 是否 ready，然后以
+`qwen3.5-4b` 和默认 thinking 启动 pi。配置模板是
+[`scripts/pi-models.json`](scripts/pi-models.json)；40k context 使用的压缩余量在
+[`scripts/pi-settings.json`](scripts/pi-settings.json)。
+
+首次使用需要先准备模型：
+
+```sh
+make model-4b
+```
+
+它下载官方 Qwen3.5-4B checkpoint，并在 `build/` 生成 4B BF16 model bin 和共享的
+Qwen3.5 render 数据。构建由 `make serve-4b` 自动完成。环境需要 CUDA Toolkit、
+[uv](https://docs.astral.sh/uv/)、Node >= 22.19 和 pi 0.84.4。
+
+当前路线在 RTX 4080 SUPER 16 GiB、CUDA 12.8、Node 22.19.0 上验证，使用 40960
+context。pi 可以流式 thinking 和 tool calls，完成分段读文件、review diff、修改文件和
+运行测试；真实修改仍应限定范围并人工 review。
+
+不用 pi 时可以直接请求同一个服务：
+
+```sh
+scripts/chat.py -m qwen3.5-4b -u "你好"
+```
+
+或者使用 OpenAI-compatible HTTP：
+
+```sh
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3.5-4b","messages":[{"role":"user","content":"你好"}]}'
+```
+
+完整启动参数可以用 `make -n serve-4b` 查看。这个目标固定监听 `127.0.0.1:8000`，使用
+40960 context；需要其他参数时直接运行 `build/qwen35-cuda`。
+
+## 开发和其他接口
+
+0.8B 作为 CPU correctness 和协议 smoke 基线：
+
+```sh
+make -C scripts model render
 make -j4
+./build/qwen35 --prompt "hello" --max-tokens 128
 ```
-
-日常 coding agent 后端使用官方 Qwen3.5-4B BF16。它是目前在本机固定
-inspect/review/bugfix 场景全部通过的最小型号：
-
-```sh
-make -C scripts checkpoint-4b model-4b render
-make cuda -j4
-./build/qwen35-cuda --model build/qwen35-4b-model.bin \
-  --listen --host 127.0.0.1 --port 8000 \
-  --session-slots 1 --session-context 40960
-```
-
-同一个 `qwen35` 或 `qwen35-cuda` binary 根据 model bin 中的固定 model ID
-选择 0.8B 或 4B forward。加载 4B 后 API model id 自动设为 `qwen3.5-4b`；tokenizer
-仍复用 `qwen35-0.8b-render.bin`。`--served-model-name` 可覆盖对外名称。
-
-默认构建 `build/qwen35` CPU correctness engine。NVIDIA CUDA 版本使用同一套
-main/runtime/render，只替换 engine：
-
-```sh
-make cuda -j4
-./build/qwen35-cuda --prompt "hello"
-```
-
-CUDA 构建需要 CUDA Toolkit，当前在 CUDA 12.8 / compute capability 8.9 上验证。
-decode 使用显式单 token forward 的 CUDA Graph，prefill 按 128-token chunk 执行。
-0.8B 的优化过程见 [eval/cuda.md](eval/cuda.md)，4B 的 reference 契约和三次稳态
-benchmark 见 [eval/cuda-4b.md](eval/cuda-4b.md)。
-
-所有下载和生成的文件都位于 `build/`。`make clean` 清理程序、render 和测试产物，
-但保留下载的 checkpoint 与 pack 后的模型权重。首次构建可以并行编译；之后直接运行
-`make` 只会重编发生变化的源码及其依赖。
-
-直接完成一次请求：
-
-```sh
-./build/qwen35 --prompt "hello" \
-  --max-tokens 128
-```
-
-`--prompt` 直接构造结构化的 chat request，不经过 JSON。启动服务则使用
-`--listen`：
-
-```sh
-./build/qwen35 \
-  --listen \
-  --host 127.0.0.1 \
-  --port 8000 \
-  --session-slots 1 \
-  --session-context 262144
-```
-
-设置 `QWEN_API_KEY` 会为 `/v1/models` 和 `/v1/chat/completions` 启用 Bearer
-鉴权。
 
 日常请求可以使用零依赖的薄客户端，不需要手写 JSON：
 
 ```sh
-scripts/chat.py -u "你好"
-scripts/chat.py -s "回答简短" -u "你好" -a "你好！" -u "你是谁？"
+scripts/chat.py -m qwen3.5-4b -u "你好"
+scripts/chat.py -m qwen3.5-4b -s "回答简短" -u "你好" -a "你好！" -u "你是谁？"
 ```
 
 `-c ID NAME ARGUMENTS` 表示 assistant tool call，`-t ID CONTENT` 用同一个
@@ -102,6 +102,7 @@ ID 返回工具结果。连续的 `-c` 属于同一条 assistant 消息：
 
 ```sh
 scripts/chat.py \
+  -m qwen3.5-4b \
   -u "杭州天气怎么样？" \
   -c call_weather weather '{"city":"杭州"}' \
   -t call_weather "晴，28°C"
@@ -111,7 +112,7 @@ scripts/chat.py \
 curl，不发送请求：
 
 ```sh
-scripts/chat.py -u "你好" --dry-run
+scripts/chat.py -m qwen3.5-4b -u "你好" --dry-run
 ```
 
 用最小 Agent 闭环测试原生工具调用：
@@ -127,47 +128,12 @@ tool-call SSE，包括同一轮多个 tool calls、usage 和 `finish_reason: too
 内部 XML 暴露为 content；因此工具调用没有逐参数增量输出。
 `read_file` 默认读取 200 行，也接受 `start_line` 和 `line_count`，让模型按段阅读大文件。
 
-真实 pi 0.84.4 可直接连接，不需要代理。该版本要求 Node >= 22.19。将下面内容放入隔离的
-`$PI_CODING_AGENT_DIR/models.json`（或合并到现有配置）：
-
-```json
-{
-  "providers": {
-    "qwen3x": {
-      "baseUrl": "http://127.0.0.1:8000/v1",
-      "api": "openai-completions",
-      "apiKey": "local",
-      "compat": {
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false,
-        "thinkingFormat": "qwen-chat-template"
-      },
-      "models": [{
-        "id": "qwen3.5-4b",
-        "reasoning": true,
-        "input": ["text"],
-        "contextWindow": 40960,
-        "maxTokens": 4096
-      }]
-    }
-  }
-}
-```
-
-然后运行：
-
-```sh
-pi --provider qwen3x --model qwen3.5-4b
-```
-
-pi 内置 `read` 的输出不带源文件行号。要求精确引用时，让 pi 用
-`bash` 执行 `nl -ba FILE | sed -n 'START,ENDp'`；该方式已在 257 行 inspect
-fixture 上验证。
-
 测量不含 HTTP、JSON、chat template、tokenizer 和 sampling 的 Session 性能：
 
 ```sh
-./build/qwen35 --bench 512 128
+./build/qwen35-cuda \
+  --model build/qwen35-4b-model.bin \
+  --bench 4096 32 --session-context 40960
 ```
 
 两个数字依次是 prefill token 数和 decode token 数。默认 Session context 是两者
@@ -185,7 +151,7 @@ Session，不代表并发吞吐量。
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model":"qwen3.5-0.8b",
+    "model":"qwen3.5-4b",
     "messages":[{"role":"user","content":"你好"}],
     "temperature":0,
     "max_completion_tokens":128
@@ -201,6 +167,17 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 服务还提供 `/healthz`、`/readyz` 和 `/v1/models`。`--listen` 默认使用 `info`
 日志，prompt 和 benchmark 默认使用 `error`；显式 `--log-level` 会覆盖模式默认值。
 指定 `--log-file build/qwen35.log` 后，滚动文件会替代 stderr 成为日志输出位置。
+
+`make serve-4b` 默认把完整 audit 写入独立的本地文件：
+
+```sh
+build/qwen35-audit.log
+```
+
+audit 按事件记录原始请求、render prompt、模型输出、工具解析和实际 HTTP/SSE 输出。
+`request_id` 关联完整请求，`session_id` 关联复用同一个缓存 Session 的请求；服务同时通过
+`X-Request-Id` 和 `X-Session-Id` 响应头输出这两个 ID。文件权限为 `0600`，内容包含完整
+对话和工具参数。手动启动 `qwen35` 时 audit 默认关闭，通过 `--audit-log PATH` 显式开启。
 
 ## 目录
 

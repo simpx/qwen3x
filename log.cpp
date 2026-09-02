@@ -1,13 +1,16 @@
 // log.cpp -- process-wide logging shared by every native component.
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "spdlog/logger.h"
+#include "spdlog/sinks/basic_file_sink.h"
 #include "spdlog/sinks/rotating_file_sink.h"
 #include "spdlog/sinks/stdout_color_sinks.h"
 
@@ -19,6 +22,7 @@ q35_log_callback log_callback = nullptr;
 void* log_user_data = nullptr;
 q35_log_level log_level = Q35_LOG_INFO;
 std::shared_ptr<spdlog::logger> process_logger;
+std::shared_ptr<spdlog::logger> audit_logger;
 
 const char* file_name(const char* path) {
     if (!path) return "?";
@@ -37,6 +41,32 @@ spdlog::level::level_enum spd_level(q35_log_level level) {
         case Q35_LOG_ERROR: return spdlog::level::err;
         default: return spdlog::level::info;
     }
+}
+
+bool prepare_file(const char* file, const char* kind,
+                  char* err, size_t errlen) {
+    const std::filesystem::path path(file);
+    std::error_code filesystem_error;
+    if (!path.parent_path().empty()) {
+        std::filesystem::create_directories(
+            path.parent_path(), filesystem_error);
+    }
+    if (filesystem_error) {
+        if (err && errlen) {
+            std::snprintf(err, errlen, "cannot create %s directory: %s", kind,
+                          path.parent_path().string().c_str());
+        }
+        return false;
+    }
+    std::FILE* probe = std::fopen(file, "ab");
+    if (!probe) {
+        if (err && errlen) {
+            std::snprintf(err, errlen, "cannot open %s file: %s", kind, file);
+        }
+        return false;
+    }
+    std::fclose(probe);
+    return true;
 }
 
 }  // namespace
@@ -68,27 +98,7 @@ bool log_configure(q35_log_level level, const char* file,
     if (file && file[0]) {
         // With exceptions disabled spdlog treats an open failure as fatal.
         // Probe it first so ordinary path/permission errors remain recoverable.
-        const std::filesystem::path path(file);
-        std::error_code directory_error;
-        if (!path.parent_path().empty()) {
-            std::filesystem::create_directories(
-                path.parent_path(), directory_error);
-        }
-        if (directory_error) {
-            if (err && errlen) {
-                std::snprintf(err, errlen, "cannot create log directory: %s",
-                              path.parent_path().string().c_str());
-            }
-            return false;
-        }
-        std::FILE* probe = std::fopen(file, "ab");
-        if (!probe) {
-            if (err && errlen) {
-                std::snprintf(err, errlen, "cannot open log file: %s", file);
-            }
-            return false;
-        }
-        std::fclose(probe);
+        if (!prepare_file(file, "log", err, errlen)) return false;
         sinks.push_back(
             std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
                 file, max_bytes, backups));
@@ -113,6 +123,63 @@ bool log_configure(q35_log_level level, const char* file,
 void log_shutdown() {
     if (process_logger) process_logger->flush();
     process_logger.reset();
+}
+
+bool audit_configure(const char* file, char* err, size_t errlen) {
+    if (err && errlen) err[0] = '\0';
+    if (!file || !file[0]) return true;
+    if (!prepare_file(file, "audit", err, errlen)) return false;
+    const std::filesystem::path path(file);
+    std::error_code filesystem_error;
+    std::filesystem::permissions(
+        path,
+        std::filesystem::perms::owner_read |
+            std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace, filesystem_error);
+    if (filesystem_error) {
+        if (err && errlen) {
+            std::snprintf(err, errlen,
+                          "cannot set audit log permissions: %s", file);
+        }
+        return false;
+    }
+    auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(file, false);
+    audit_logger = std::make_shared<spdlog::logger>("audit", std::move(sink));
+    audit_logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] %v");
+    audit_logger->set_level(spdlog::level::info);
+    audit_logger->flush_on(spdlog::level::info);
+    audit_logger->set_error_handler([](const std::string& message) {
+        std::fprintf(stderr, "qwen35: audit logging error: %s\n",
+                     message.c_str());
+    });
+    return true;
+}
+
+void audit_shutdown() {
+    if (audit_logger) audit_logger->flush();
+    audit_logger.reset();
+}
+
+void audit_write(const char* event, const char* request_id,
+                 const char* session_id, const char* detail,
+                 const char* payload, size_t payload_size) {
+    if (!audit_logger) return;
+    char header[2048];
+    const int length = std::snprintf(
+        header, sizeof(header),
+        "event=%s request_id=%s session_id=%s%s%s bytes=%zu",
+        event ? event : "-",
+        request_id ? request_id : "-", session_id ? session_id : "-",
+        detail && detail[0] ? " " : "", detail && detail[0] ? detail : "",
+        payload_size);
+    if (length < 0) return;
+    std::string message(header, static_cast<size_t>(
+        std::min<int>(length, sizeof(header) - 1)));
+    if (payload_size && payload) {
+        message.push_back('\n');
+        message.append(payload, payload_size);
+    }
+    audit_logger->info(message);
 }
 
 void logf(q35_log_level level, const char* file, int line,

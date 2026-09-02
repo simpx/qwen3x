@@ -14,6 +14,8 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <random>
+#include <string>
 #include <vector>
 
 #include "internal.h"
@@ -24,11 +26,10 @@ constexpr int IM_END_TOKEN = 248046;
 constexpr int THINK_START_TOKEN = 248068;
 constexpr int THINK_END_TOKEN = 248069;
 constexpr int NEWLINE_TOKEN = 198;
-constexpr int DOUBLE_NEWLINE_TOKEN = 271;
 constexpr int MOCK_REASONING_TOKEN = 26003;
 constexpr std::array<int, 15> MOCK_TARGET_TOKENS = {
     15, 16, 17, 18, 19, 20, 21, 22, 23, 24, IM_END_TOKEN,
-    MOCK_REASONING_TOKEN, NEWLINE_TOKEN, THINK_END_TOKEN, DOUBLE_NEWLINE_TOKEN,
+    MOCK_REASONING_TOKEN, NEWLINE_TOKEN, IM_END_TOKEN, IM_END_TOKEN,
 };
 
 enum class EntryState {
@@ -48,6 +49,32 @@ struct PrefixMatch {
     int reused = 0;
     bool use_checkpoint = false;
 };
+
+std::string make_uuid() {
+    std::array<uint8_t, 16> bytes;
+    std::random_device random;
+    for (size_t index = 0; index < bytes.size(); index += 4) {
+        const uint32_t value = random();
+        for (size_t offset = 0; offset < 4; ++offset) {
+            bytes[index + offset] = static_cast<uint8_t>(value >> (offset * 8));
+        }
+    }
+    bytes[6] = static_cast<uint8_t>((bytes[6] & 0x0f) | 0x40);
+    bytes[8] = static_cast<uint8_t>((bytes[8] & 0x3f) | 0x80);
+
+    static constexpr char HEX[] = "0123456789abcdef";
+    char text[37];
+    size_t output = 0;
+    for (size_t index = 0; index < bytes.size(); ++index) {
+        if (index == 4 || index == 6 || index == 8 || index == 10) {
+            text[output++] = '-';
+        }
+        text[output++] = HEX[bytes[index] >> 4];
+        text[output++] = HEX[bytes[index] & 0x0f];
+    }
+    text[output] = '\0';
+    return text;
+}
 
 void write_error(char* output, size_t capacity, const char* message) {
     if (!output || capacity == 0) return;
@@ -180,6 +207,7 @@ struct q35_engine {
 };
 
 struct q35_session {
+    const std::string id = make_uuid();
     q35_engine* engine;
     q35_backend::State* state = nullptr;
     int capacity;
@@ -389,13 +417,21 @@ int q35_session_create(q35_engine* engine, int context_size, q35_session** out,
         return fail(err, errlen, "context_size is outside 1..262144");
     }
     *out = new q35_session(engine, context_size);
-    LOG_DEBUG("session created context_size=%d", context_size);
+    LOG_DEBUG("session created session_id=%s context_size=%d",
+              (*out)->id.c_str(), context_size);
     return succeed(err, errlen);
 }
 
 void q35_session_destroy(q35_session* session) {
-    if (session) LOG_DEBUG("session closing position=%d", session->position());
+    if (session) {
+        LOG_DEBUG("session closing session_id=%s position=%d",
+                  session->id.c_str(), session->position());
+    }
     delete session;
+}
+
+const char* q35_session_id(const q35_session* session) {
+    return session ? session->id.c_str() : nullptr;
 }
 
 int q35_session_reset(q35_session* session, char* err, size_t errlen) {
@@ -728,9 +764,11 @@ int q35_session_manager_acquire(q35_session_manager* manager,
     *out = selected->session;
     write_error(err, errlen, "");
     lock.unlock();
-    LOG_INFO("session acquire slot=%d selection=%s prompt_tokens=%d "
+    LOG_INFO("session acquire session_id=%s slot=%d selection=%s "
+             "prompt_tokens=%d "
              "live_state_tokens=%d checkpoint_state_tokens=%d "
              "cache_result=%s cache_hit_tokens=%d to_prefill_tokens=%d",
+             selected->session->id.c_str(),
              slot, selection, count, live_state_tokens, checkpoint_state_tokens,
              cache_result, selected_cache_hit_tokens, to_prefill_tokens);
     return Q35_OK;
@@ -753,8 +791,10 @@ void q35_session_manager_release(q35_session_manager* manager,
     const int checkpoint_state_tokens =
         q35_internal::session_checkpoint_state_tokens(entry->session);
     lock.unlock();
-    LOG_DEBUG("session release slot=%d result=%s live_state_tokens=%d "
-             "checkpoint_state_tokens=%d",
-             slot, keep ? "kept" : "cleared", live_state_tokens,
-             checkpoint_state_tokens);
+    LOG_DEBUG("session release session_id=%s slot=%d result=%s "
+              "live_state_tokens=%d "
+              "checkpoint_state_tokens=%d",
+              session->id.c_str(), slot,
+              keep ? "kept" : "cleared", live_state_tokens,
+              checkpoint_state_tokens);
 }

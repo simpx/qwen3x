@@ -193,6 +193,8 @@ qwen35-0.8b-render.bin
   per-token/forward 细节。prompt/benchmark 默认安静，listen 模式默认展示服务状态。
 - 日志通过 request ID 关联完整流程并记录指标；prompt、生成内容、API key 等敏感数据留在
   日志之外。
+- 显式 `--audit-log` 将完整请求、模型输入输出和 HTTP/SSE 输出写入独立 audit 文件；
+  request ID 关联请求，session ID 关联复用的 Session。audit 不进入普通日志且默认关闭。
 
 ## 修改、测试与提交
 

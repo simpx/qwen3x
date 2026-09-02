@@ -9,6 +9,7 @@ import socket
 import subprocess
 import tempfile
 import time
+import uuid
 
 
 def request(port, method, path, body=None, *, authorized=True):
@@ -64,10 +65,11 @@ def main():
     environment = dict(os.environ, QWEN_API_KEY="test")
     server_logs = tempfile.TemporaryDirectory()
     server_log = os.path.join(server_logs.name, "server.log")
+    audit_log = os.path.join(server_logs.name, "audit.log")
     process = subprocess.Popen(
         [args.program, "--listen", "--host", "127.0.0.1", "--port", str(port),
          "--session-slots", "2", "--session-context", "1024", "--mock",
-         "--log-file", server_log],
+         "--log-file", server_log, "--audit-log", audit_log],
         env=environment,
     )
     try:
@@ -97,11 +99,42 @@ def main():
             "temperature": 0,
             "max_completion_tokens": 3,
         }
-        status, _, data = request(port, "POST", "/v1/chat/completions", body)
+        status, headers, data = request(
+            port, "POST", "/v1/chat/completions", body)
         assert status == 200, data
+        session_id = headers["X-Session-Id"]
+        assert uuid.UUID(session_id).version == 4
         completion = json.loads(data)
         assert completion["choices"][0]["message"]["content"]
         assert completion["usage"]["completion_tokens"] == 3
+        status, headers, _ = request(
+            port, "POST", "/v1/chat/completions", body)
+        assert status == 200
+        assert headers["X-Session-Id"] == session_id
+
+        thinking_body = {
+            "model": served_model,
+            "messages": [{"role": "user", "content": "hello"}],
+            "chat_template_kwargs": {"enable_thinking": True},
+            "stream": True,
+            "temperature": 0,
+            "max_completion_tokens": 32,
+        }
+        status, thinking_headers, data = request(
+            port, "POST", "/v1/chat/completions", thinking_body)
+        assert status == 200, data
+        events = [json.loads(line[6:]) for line in data.splitlines()
+                  if line.startswith("data: {")]
+        assert events[-1]["error"]["code"] == "incomplete_generation"
+        assert "please retry your request" in events[-1]["error"]["message"]
+        assert "data: [DONE]" not in data
+
+        status, retry_headers, retry_data = request(
+            port, "POST", "/v1/chat/completions", thinking_body)
+        assert status == 200
+        assert retry_headers["X-Session-Id"] == thinking_headers["X-Session-Id"]
+        assert '"code":"incomplete_generation"' in retry_data
+        assert "data: [DONE]" not in retry_data
 
         tool = {
             "type": "function",
@@ -184,6 +217,27 @@ def main():
         assert logs.count("access started request_id=") == \
             logs.count("access completed request_id=")
         assert "request accepted" not in logs
+        assert "event=request" not in logs
+    assert os.stat(audit_log).st_mode & 0o777 == 0o600
+    with open(audit_log, encoding="utf-8") as stream:
+        audit = stream.read()
+        assert "event=request" in audit and '"content": "hello"' in audit
+        assert "event=render" in audit
+        assert f"event=session_acquired" in audit
+        assert f"session_id={session_id}" in audit
+        assert "event=generation_end" in audit and "stop_cause=" in audit
+        retryable_generations = [
+            line for line in audit.splitlines()
+            if "event=generation_end" in line and
+               "stop_cause=incomplete_generation" in line
+        ]
+        assert len(retryable_generations) == 2
+        assert all("retryable=1" in line for line in retryable_generations)
+        assert "cached_tokens=0" not in retryable_generations[1]
+        assert "event=tool_parse" in audit
+        assert "event=response_chunk" in audit and "data: [DONE]" in audit
+        assert "event=response_end" in audit
+        assert "Bearer test" not in audit
     server_logs.cleanup()
     print("http-test: ok")
 

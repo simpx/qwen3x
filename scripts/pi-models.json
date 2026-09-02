@@ -1,0 +1,21 @@
+{
+  "providers": {
+    "qwen3x": {
+      "baseUrl": "http://127.0.0.1:8000/v1",
+      "api": "openai-completions",
+      "apiKey": "local",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false,
+        "thinkingFormat": "qwen-chat-template"
+      },
+      "models": [{
+        "id": "qwen3.5-4b",
+        "reasoning": true,
+        "input": ["text"],
+        "contextWindow": 40960,
+        "maxTokens": 4096
+      }]
+    }
+  }
+}

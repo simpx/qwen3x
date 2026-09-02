@@ -42,6 +42,13 @@ bool log_configure(q35_log_level level, const char* file,
                    char* err, size_t errlen);
 void log_shutdown();
 
+// Full request/response audit is opt-in and always uses a separate file.
+bool audit_configure(const char* file, char* err, size_t errlen);
+void audit_shutdown();
+void audit_write(const char* event, const char* request_id,
+                 const char* session_id, const char* detail,
+                 const char* payload, size_t payload_size);
+
 // Format one log message and synchronously pass it to the host callback.
 void logf(q35_log_level level, const char* file, int line,
           const char* format, ...);

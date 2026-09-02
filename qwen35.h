@@ -71,6 +71,9 @@ int q35_session_create(q35_engine* engine, int context_size, q35_session** out,
                        char* err, size_t errlen);
 void q35_session_destroy(q35_session* session);
 
+/* Stable UUID for this Session's lifetime; pointer dies with the Session. */
+const char* q35_session_id(const q35_session* session);
+
 /* Clear the token timeline while retaining all allocated buffers. */
 int q35_session_reset(q35_session* session, char* err, size_t errlen);
 

@@ -56,10 +56,11 @@ struct Options {
     std::string host = "127.0.0.1";
     std::string served_model = "qwen3.5-0.8b";
     std::string log_file;
+    std::string audit_file;
     q35_log_level log_level = Q35_LOG_ERROR;
     int port = 8000;
     int slots = 1;
-    int context = q35_backend::max_context();
+    int context = 40960;
     int max_tokens = 128;
     int bench_prefill = 0;
     int bench_decode = 0;
@@ -102,6 +103,9 @@ struct GenerationResult {
     std::string reasoning;
     std::string content;
     std::string finish_reason = "length";
+    std::string stop_cause = "max_tokens";
+    int stop_token = -1;
+    bool retryable = false;
     int cached_tokens = 0;
     double prefill_seconds = 0.0;
     double ttft_seconds = 0.0;
@@ -115,9 +119,34 @@ double elapsed_since(Clock::time_point started) {
     return std::chrono::duration<double>(Clock::now() - started).count();
 }
 
+std::string retryable_error(const std::string& message) {
+    return message + "; please retry your request";
+}
+
+void audit_record(const char* event, const std::string& request_id,
+                  const std::string& session_id,
+                  const std::string& detail = {},
+                  const std::string& payload = {}) {
+    q35_internal::audit_write(
+        event, request_id.c_str(), session_id.empty() ? "-" : session_id.c_str(),
+        detail.c_str(), payload.data(), payload.size());
+}
+
+void audit_response_end(const std::string& request_id,
+                        const std::string& session_id, int status,
+                        const char* result, const char* stage,
+                        size_t chunks, size_t bytes) {
+    char detail[256];
+    std::snprintf(detail, sizeof(detail),
+                  "status=%d result=%s stage=%s chunks=%zu response_bytes=%zu",
+                  status, result, stage, chunks, bytes);
+    audit_record("response_end", request_id, session_id, detail);
+}
+
 struct AccessLog {
     std::string request_id;
     std::string completion_id = "-";
+    std::string session_id;
     std::string remote;
     std::string method;
     std::string path;
@@ -131,6 +160,7 @@ struct AccessLog {
     int status = 500;
     size_t request_bytes = 0;
     size_t response_bytes = 0;
+    size_t response_chunks = 0;
     size_t messages = 0;
     size_t prompt_tokens = 0;
     int cached_tokens = 0;
@@ -146,7 +176,10 @@ struct AccessLog {
     void complete(const char* result, const char* stage) {
         if (completed.exchange(true)) return;
         const int inflight_end = inflight->fetch_sub(1) - 1;
-        LOG_INFO("access completed request_id=%s completion_id=%s remote=%s "
+        audit_response_end(request_id, session_id, status, result, stage,
+                           response_chunks, response_bytes);
+        LOG_INFO("access completed request_id=%s completion_id=%s "
+                 "session_id=%s remote=%s "
                  "method=%s path=%s status=%d result=%s stage=%s model=%s "
                  "stream=%d inflight_start=%d inflight_end=%d slots=%d "
                  "request_bytes=%zu response_bytes=%zu messages=%zu "
@@ -154,7 +187,8 @@ struct AccessLog {
                  "finish_reason=%s parse_ms=%.3f render_ms=%.3f "
                  "prefill_ms=%.3f ttft_ms=%.3f duration_ms=%.3f "
                  "decode_tps=%.2f",
-                 request_id.c_str(), completion_id.c_str(), remote.c_str(),
+                 request_id.c_str(), completion_id.c_str(),
+                 session_id.empty() ? "-" : session_id.c_str(), remote.c_str(),
                  method.c_str(), path.c_str(), status, result, stage,
                  model.c_str(), stream, inflight_start, inflight_end, slots,
                  request_bytes, response_bytes, messages, prompt_tokens,
@@ -176,6 +210,24 @@ void record_generation(AccessLog* access, const GenerationResult& result) {
     access->ttft_ms = result.ttft_seconds * 1000.0;
     access->decode_tps = result.decode_seconds > 0.0
         ? access->completion_tokens / result.decode_seconds : 0.0;
+}
+
+void audit_generation(const AccessLog& access, const GenerationResult& result,
+                      const std::string& error) {
+    char detail[1024];
+    std::snprintf(detail, sizeof(detail),
+                  "completion_id=%s tokens=%zu stop_cause=%s stop_token=%d "
+                  "retryable=%d cached_tokens=%d error=%s reasoning_bytes=%zu "
+                  "content_bytes=%zu",
+                  access.completion_id.c_str(), result.tokens.size(),
+                  result.stop_cause.c_str(), result.stop_token,
+                  result.retryable, result.cached_tokens,
+                  error.empty() ? "-" : error.c_str(),
+                  result.reasoning.size(), result.content.size());
+    std::string payload = "reasoning:\n" + result.reasoning +
+                          "\ncontent:\n" + result.content;
+    audit_record("generation_end", access.request_id, access.session_id,
+                 detail, payload);
 }
 
 template <typename Integer>
@@ -268,6 +320,8 @@ bool parse_options(int argc, char** argv, Options* options,
             options->served_model_set = true;
         } else if (argument == "--log-file") {
             options->log_file = value;
+        } else if (argument == "--audit-log") {
+            options->audit_file = value;
         } else if (argument == "--port") {
             if (!integer(value, &options->port) ||
                 options->port <= 0 || options->port > 65535) {
@@ -340,6 +394,10 @@ bool parse_options(int argc, char** argv, Options* options,
         *error = "-r/--render is required";
         return false;
     }
+    if (!options->audit_file.empty() && options->mode != Mode::Listen) {
+        *error = "--audit-log requires --listen";
+        return false;
+    }
     if (!options->log_level_set && options->mode == Mode::Listen) {
         options->log_level = Q35_LOG_INFO;
     }
@@ -368,7 +426,8 @@ void usage(const char* program) {
         "  %s [-m MODEL] --bench PREFILL_TOKENS DECODE_TOKENS\n"
         "common: [--session-slots N] [--session-context N] [--mock]\n"
         "        [--log-level trace|debug|info|warn|error] [--log-file PATH]\n"
-        "defaults: 1 session slot, 262144-token context\n"
+        "listen: [--audit-log PATH]\n"
+        "defaults: 1 session slot, 40960-token context\n"
         "        log default: info for --listen, error otherwise\n"
         "defaults beside qwen35: %s and %s\n", program, program, program,
         DEFAULT_MODEL, DEFAULT_RENDER);
@@ -385,6 +444,11 @@ std::string make_id(const char* prefix) {
                   static_cast<unsigned long long>(random_prefix),
                   static_cast<unsigned long long>(next.fetch_add(1)));
     return text;
+}
+
+std::string session_id(const q35_session* session) {
+    const char* id = q35_session_id(session);
+    return id ? id : "-";
 }
 
 uint64_t random_seed() {
@@ -410,7 +474,9 @@ void json_response(httplib::Response& response, int status,
 }
 
 void request_id(httplib::Response& response) {
-    response.set_header("X-Request-Id", make_id("req-"));
+    if (!response.has_header("X-Request-Id")) {
+        response.set_header("X-Request-Id", make_id("req-"));
+    }
 }
 
 void api_error(httplib::Response& response, int status,
@@ -502,6 +568,7 @@ bool generate(Runtime& runtime, const q35_render::CompletionRequest& request,
     if (q35_session_sync(session, prompt.data(), static_cast<int>(prompt.size()),
                          static_cast<int>(prompt.size()), &result->cached_tokens,
                          native_error, sizeof(native_error)) != Q35_OK) {
+        result->stop_cause = "generation_error";
         *error = native_error;
         return false;
     }
@@ -516,6 +583,7 @@ bool generate(Runtime& runtime, const q35_render::CompletionRequest& request,
     while (static_cast<int>(result->tokens.size()) < request.max_tokens) {
         if (std::chrono::steady_clock::now() - started >
             std::chrono::seconds(runtime.options.request_timeout)) {
+            result->stop_cause = "timeout";
             *error = "generation request timed out";
             return false;
         }
@@ -528,11 +596,27 @@ bool generate(Runtime& runtime, const q35_render::CompletionRequest& request,
                 penalty_tokens.empty() ? nullptr : penalty_tokens.data(),
                 static_cast<int>(penalty_tokens.size()), &rng);
         if (token < 0) {
+            result->stop_cause = "generation_error";
             *error = "sampling failed";
             return false;
         }
         if (q35_token_is_stop(token)) {
+            const bool thinking_open =
+                request.chat.options.enable_thinking &&
+                std::find(result->tokens.begin(), result->tokens.end(),
+                          runtime.think_end_token) == result->tokens.end();
+            if (thinking_open || result->tokens.empty() ||
+                (request.chat.options.enable_thinking &&
+                 result->content.empty())) {
+                result->stop_cause = "incomplete_generation";
+                result->stop_token = token;
+                result->retryable = true;
+                *error = "model stopped before completing its response";
+                return false;
+            }
             result->finish_reason = "stop";
+            result->stop_cause = "model_stop_token";
+            result->stop_token = token;
             break;
         }
 
@@ -542,7 +626,10 @@ bool generate(Runtime& runtime, const q35_render::CompletionRequest& request,
         }
         if (penalty_seen.insert(token).second) penalty_tokens.push_back(token);
         if (!split_output(runtime, request, result->tokens,
-                          &result->reasoning, &result->content, error)) return false;
+                          &result->reasoning, &result->content, error)) {
+            result->stop_cause = "generation_error";
+            return false;
+        }
 
         const std::string reasoning = stable_text(result->reasoning);
         const auto visible = stop_view(result->content, request.stops, false);
@@ -552,17 +639,20 @@ bool generate(Runtime& runtime, const q35_render::CompletionRequest& request,
             content.compare(0, published_content.size(),
                             published_content) != 0) {
             *error = "tokenizer rewrote streamed text";
+            result->stop_cause = "generation_error";
             return false;
         }
         if (reasoning.size() > published_reasoning.size() &&
             !publish("reasoning_content",
                      reasoning.substr(published_reasoning.size()))) {
             *error = "client disconnected";
+            result->stop_cause = "client_disconnected";
             return false;
         }
         if (content.size() > published_content.size() &&
             !publish("content", content.substr(published_content.size()))) {
             *error = "client disconnected";
+            result->stop_cause = "client_disconnected";
             return false;
         }
         published_reasoning = reasoning;
@@ -570,37 +660,48 @@ bool generate(Runtime& runtime, const q35_render::CompletionRequest& request,
 
         if (visible.second) {
             result->finish_reason = "stop";
+            result->stop_cause = "request_stop_string";
             break;
         }
         if (static_cast<int>(result->tokens.size()) == request.max_tokens) break;
         if (q35_session_eval(session, token,
                              native_error, sizeof(native_error)) != Q35_OK) {
+            result->stop_cause = "generation_error";
             *error = native_error;
             return false;
         }
     }
 
     if (!split_output(runtime, request, result->tokens,
-                      &result->reasoning, &result->content, error)) return false;
+                      &result->reasoning, &result->content, error)) {
+        result->stop_cause = "generation_error";
+        return false;
+    }
     const auto final_content = stop_view(result->content, request.stops, true);
     result->content = final_content.first;
-    if (final_content.second) result->finish_reason = "stop";
+    if (final_content.second) {
+        result->finish_reason = "stop";
+        result->stop_cause = "request_stop_string";
+    }
     if (result->reasoning.compare(0, published_reasoning.size(),
                                   published_reasoning) != 0 ||
         result->content.compare(0, published_content.size(),
                                 published_content) != 0) {
         *error = "tokenizer rewrote streamed text";
+        result->stop_cause = "generation_error";
         return false;
     }
     if (result->reasoning.size() > published_reasoning.size() &&
         !publish("reasoning_content",
                  result->reasoning.substr(published_reasoning.size()))) {
         *error = "client disconnected";
+        result->stop_cause = "client_disconnected";
         return false;
     }
     if (result->content.size() > published_content.size() &&
         !publish("content", result->content.substr(published_content.size()))) {
         *error = "client disconnected";
+        result->stop_cause = "client_disconnected";
         return false;
     }
     result->elapsed_seconds = elapsed_since(started);
@@ -711,8 +812,10 @@ q35_session* acquire(Runtime& runtime, const std::string& request_id,
                   "server_error");
         return nullptr;
     }
-    LOG_DEBUG("session acquired request_id=%s prompt_tokens=%zu elapsed=%.3fs",
-              request_id.c_str(), prompt.size(), elapsed_since(started));
+    LOG_DEBUG("session acquired request_id=%s session_id=%s prompt_tokens=%zu "
+              "elapsed=%.3fs",
+              request_id.c_str(), session_id(session).c_str(), prompt.size(),
+              elapsed_since(started));
     return session;
 }
 
@@ -727,6 +830,9 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
     q35_render::RenderedPrompt prompt;
     if (!prepare_request(runtime, access.get(), http, response,
                          &request, &prompt)) return false;
+    audit_record("render", access->request_id, "",
+                 "prompt_tokens=" + std::to_string(prompt.tokens.size()),
+                 prompt.text);
 
     access->stage = "session";
     q35_session* session = acquire(
@@ -735,14 +841,18 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
     auto lease = std::make_shared<SessionLease>();
     lease->manager = runtime.manager;
     lease->session = session;
+    access->session_id = session_id(session);
+    response.set_header("X-Session-Id", access->session_id);
+    audit_record("session_acquired", access->request_id, access->session_id);
 
     const std::string completion_id = make_id("chatcmpl-");
     access->completion_id = completion_id;
     access->stage = "generation";
     const int64_t created = static_cast<int64_t>(std::time(nullptr));
-    LOG_INFO("generation started request_id=%s completion_id=%s "
+    LOG_INFO("generation started request_id=%s completion_id=%s session_id=%s "
              "prompt_tokens=%zu max_tokens=%d stream=%d",
              access->request_id.c_str(), completion_id.c_str(),
+             access->session_id.c_str(),
              prompt.tokens.size(), request.max_tokens, request.stream);
 
     if (!request.stream) {
@@ -751,14 +861,20 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
         const Publish discard = [](const char*, const std::string&) { return true; };
         if (!generate(runtime, request, prompt.tokens, session, discard,
                       &result, &error)) {
+            audit_generation(*access, result, error);
             record_generation(access.get(), result);
+            lease->keep = result.retryable;
             LOG_ERROR("request failed request_id=%s completion_id=%s "
                       "stage=generation status=500 error=%s",
                       access->request_id.c_str(), completion_id.c_str(),
                       error.c_str());
-            api_error(response, 500, error, "server_error");
+            api_error(response, 500,
+                      result.retryable ? retryable_error(error) : error,
+                      "server_error", nullptr,
+                      result.retryable ? "incomplete_generation" : nullptr);
             return false;
         }
+        audit_generation(*access, result, "");
         lease->keep = true;
         q35_render::CompletionUsage usage{
             static_cast<int>(prompt.tokens.size()), result.cached_tokens,
@@ -766,14 +882,22 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
         std::vector<q35_render::ToolCall> tool_calls;
         std::string content = result.content;
         if (!request.chat.tools.empty()) {
-            if (!q35_render::parse_generated_tool_calls(
-                    result.content, &content, &tool_calls, &error)) {
+            const bool parsed = q35_render::parse_generated_tool_calls(
+                result.content, &content, &tool_calls, &error);
+            const std::string detail = "completion_id=" + completion_id +
+                " ok=" + (parsed ? "1" : "0") +
+                " error=" + (error.empty() ? "-" : error);
+            audit_record("tool_parse", access->request_id,
+                         access->session_id, detail);
+            if (!parsed) {
                 LOG_WARN("tool output not parsed request_id=%s completion_id=%s "
                          "error=%s",
                          access->request_id.c_str(), completion_id.c_str(),
                          error.c_str());
-                content = result.content;
-                tool_calls.clear();
+                record_generation(access.get(), result);
+                api_error(response, 500, retryable_error(error),
+                          "server_error", nullptr, "incomplete_tool_call");
+                return false;
             }
         }
         for (q35_render::ToolCall& call : tool_calls) {
@@ -799,6 +923,8 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
          lease, access, completion_id,
          created](size_t offset, httplib::DataSink& sink) mutable {
             if (offset != 0) return false;
+            audit_record("response_start", access->request_id,
+                         access->session_id, "status=200 stream=1");
             auto release = [&](bool keep) {
                 if (!lease->session) return;
                 q35_session_manager_release(
@@ -818,7 +944,18 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
             auto send = [&](const std::string& text) {
                 const std::string event = "data: " + text + "\n\n";
                 if (!sink.is_writable() ||
-                    !sink.write(event.data(), event.size())) return false;
+                    !sink.write(event.data(), event.size())) {
+                    audit_record(
+                        "response_write_failed", access->request_id,
+                        access->session_id,
+                        "seq=" + std::to_string(access->response_chunks),
+                        event);
+                    return false;
+                }
+                audit_record(
+                    "response_chunk", access->request_id, access->session_id,
+                    "seq=" + std::to_string(access->response_chunks), event);
+                ++access->response_chunks;
                 access->response_bytes += event.size();
                 return true;
             };
@@ -841,6 +978,7 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
             };
             if (!generate(runtime, request, prompt.tokens, lease->session,
                           publish, &result, &error)) {
+                audit_generation(*access, result, error);
                 record_generation(access.get(), result);
                 if (error == "client disconnected") {
                     interrupted("generation");
@@ -850,29 +988,50 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
                               access->request_id.c_str(), completion_id.c_str(),
                               error.c_str());
                 }
-                if (error != "client disconnected" && sink.is_writable()) {
-                    send(q35_render::error_json(error, "server_error"));
-                    send("[DONE]");
+                if (error == "client disconnected") return false;
+                if (!sink.is_writable() || !send(q35_render::error_json(
+                        result.retryable ? retryable_error(error) : error,
+                        "server_error", nullptr,
+                        result.retryable ? "incomplete_generation" : nullptr))) {
+                    interrupted("stream_error");
+                    return false;
                 }
-                if (error != "client disconnected") {
-                    release(false);
-                    access->status = 200;
-                    access->stage = "generation";
-                    access->complete("error", "generation");
-                }
-                return false;
+                sink.done();
+                release(result.retryable);
+                access->status = 200;
+                access->stage = "generation";
+                access->complete("error", "generation");
+                return true;
             }
+            audit_generation(*access, result, "");
             if (buffer_for_tools) {
                 std::vector<q35_render::ToolCall> tool_calls;
                 std::string content;
-                if (!q35_render::parse_generated_tool_calls(
-                        result.content, &content, &tool_calls, &error)) {
+                const bool parsed = q35_render::parse_generated_tool_calls(
+                    result.content, &content, &tool_calls, &error);
+                const std::string detail = "completion_id=" + completion_id +
+                    " ok=" + (parsed ? "1" : "0") +
+                    " error=" + (error.empty() ? "-" : error);
+                audit_record("tool_parse", access->request_id,
+                             access->session_id, detail);
+                if (!parsed) {
                     LOG_WARN("stream tool output not parsed request_id=%s "
                              "completion_id=%s error=%s",
                              access->request_id.c_str(), completion_id.c_str(),
                              error.c_str());
-                    content = result.content;
-                    tool_calls.clear();
+                    record_generation(access.get(), result);
+                    if (!send(q35_render::error_json(
+                            retryable_error(error), "server_error", nullptr,
+                            "incomplete_tool_call"))) {
+                        interrupted("tool_parse_error");
+                        return false;
+                    }
+                    sink.done();
+                    release(true);
+                    access->status = 200;
+                    access->stage = "tool_parse";
+                    access->complete("error", "tool_parse");
+                    return true;
                 }
                 if (request.chat.options.enable_thinking &&
                     !result.reasoning.empty() &&
@@ -1155,6 +1314,10 @@ int serve(Runtime& runtime, std::string* error) {
         access->slots = runtime.options.slots;
         access->request_bytes = request.body.size();
         response.set_header("X-Request-Id", access->request_id);
+        const std::string audit_detail = "remote=" + access->remote +
+            " method=" + access->method + " path=" + access->path;
+        audit_record("request", access->request_id, "", audit_detail,
+                     request.body);
         LOG_INFO("access started request_id=%s remote=%s method=%s path=%s "
                  "inflight=%d slots=%d request_bytes=%zu",
                  access->request_id.c_str(), access->remote.c_str(),
@@ -1169,6 +1332,17 @@ int serve(Runtime& runtime, std::string* error) {
         } else {
             access->status = response.status;
             access->response_bytes = response.body.size();
+            audit_record("response_start", access->request_id,
+                         access->session_id,
+                         "status=" + std::to_string(response.status) +
+                             " stream=0");
+            if (!response.body.empty()) {
+                audit_record(
+                    "response_chunk", access->request_id, access->session_id,
+                    "seq=" + std::to_string(access->response_chunks),
+                    response.body);
+                ++access->response_chunks;
+            }
             const char* result = response.status >= 500 ? "error"
                 : response.status >= 400 ? "rejected" : "ok";
             access->complete(result, access->stage.c_str());
@@ -1217,6 +1391,12 @@ int main(int argc, char** argv) {
     }
 
     int result = 1;
+    if (!options.audit_file.empty() && !q35_internal::audit_configure(
+            options.audit_file.c_str(), log_error, sizeof(log_error))) {
+        std::fprintf(stderr, "qwen35: %s\n", log_error);
+        q35_internal::log_shutdown();
+        return 1;
+    }
     if (options.mode == Mode::Bench) {
         result = run_benchmark(options, &error);
     } else {
@@ -1231,6 +1411,7 @@ int main(int argc, char** argv) {
         }
     }
     if (result != 0) LOG_ERROR("%s", error.c_str());
+    q35_internal::audit_shutdown();
     q35_internal::log_shutdown();
     return result;
 }

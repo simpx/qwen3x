@@ -4,6 +4,7 @@ CXX ?= c++
 UV ?= uv
 PYTHON ?= $(UV) run --project "$(PROJECT)/scripts" --locked python
 SYSTEM_PYTHON ?= python3
+PI ?= pi
 
 PROGRAM ?= $(BUILD)/qwen35
 CHECKPOINT ?= $(BUILD)/models/Qwen3.5-0.8B
@@ -18,7 +19,7 @@ THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(PROJECT)/third_party/spdlog/include
 SPDLOG_SRC := $(wildcard $(PROJECT)/third_party/spdlog/src/*.cpp)
 
-.PHONY: test parser-test runtime-test cli-test chat-test agent-test pack-test render-test http-test clean
+.PHONY: test parser-test runtime-test cli-test chat-test agent-test pack-test render-test http-test pi-retry-test clean
 
 test: parser-test runtime-test cli-test chat-test agent-test pack-test
 
@@ -81,7 +82,10 @@ $(PROGRAM):
 
 http-test: $(PROGRAM) $(RENDER_BIN)
 	cd "$(PROJECT)" && $(SYSTEM_PYTHON) tests/test_http.py \
-		--program "$(PROGRAM)"
+			--program "$(PROGRAM)"
+
+pi-retry-test:
+	cd "$(PROJECT)" && $(SYSTEM_PYTHON) tests/test_pi_retry.py --pi "$(PI)"
 
 clean:
 	rm -f "$(PARSER_TEST)" "$(RUNTIME_TEST)" "$(RENDER_DRIVER)"

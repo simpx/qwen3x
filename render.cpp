@@ -1145,14 +1145,26 @@ bool parse_generated_tool_calls(const std::string& text,
         content->pop_back();
     }
 
+    bool recovered_wrapper = false;
     size_t cursor = first;
     while (true) {
         const size_t function = text.find(FUNCTION_START, cursor);
         if (function == std::string::npos) break;
         const size_t name_begin = function + sizeof(FUNCTION_START) - 1;
         const size_t name_end = text.find('>', name_begin);
-        const size_t function_end = name_end == std::string::npos
+        size_t function_end = name_end == std::string::npos
             ? std::string::npos : text.find(FUNCTION_END, name_end + 1);
+        size_t next_function = std::string::npos;
+        const size_t next_tool = name_end == std::string::npos
+            ? std::string::npos : text.find(TOOL_START, name_end + 1);
+        if (next_tool != std::string::npos && next_tool < function_end) {
+            next_function = text.find(FUNCTION_START, next_tool + 1);
+            if (next_function != std::string::npos &&
+                next_function < function_end) {
+                function_end = next_tool;
+                recovered_wrapper = true;
+            }
+        }
         if (name_end == std::string::npos || function_end == std::string::npos) {
             return fail(error, "incomplete generated tool call");
         }
@@ -1212,10 +1224,14 @@ bool parse_generated_tool_calls(const std::string& text,
             call.arguments.push_back(std::move(item));
         }
         calls->push_back(std::move(call));
-        cursor = function_end + sizeof(FUNCTION_END) - 1;
+        cursor = next_function == std::string::npos
+            ? function_end + sizeof(FUNCTION_END) - 1 : next_function;
     }
 
     if (calls->empty()) return fail(error, "generated tool wrapper has no function");
+    if (recovered_wrapper) {
+        return fail(error, "incomplete generated tool wrapper");
+    }
     if (text.compare(first, sizeof(TOOL_START) - 1, TOOL_START) == 0 &&
         text.rfind(TOOL_END) == std::string::npos) {
         return fail(error, "incomplete generated tool wrapper");

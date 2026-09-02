@@ -1,4 +1,6 @@
 #include <cstdio>
+#include <cstring>
+#include <string>
 #include <vector>
 
 #include "qwen35.h"
@@ -32,6 +34,12 @@ int main() {
     check(q35_session_manager_acquire(manager, prompt.data(), prompt.size(),
                                       &first, error, sizeof(error)) == Q35_OK,
           "acquire first Session");
+    const std::string first_id = q35_session_id(first);
+    check(first_id.size() == 36 && first_id[8] == '-' &&
+              first_id[13] == '-' && first_id[14] == '4' &&
+              first_id[18] == '-' && first_id[23] == '-' &&
+              std::strchr("89ab", first_id[19]),
+          "Session has a UUID v4");
     int cached = -1;
     check(q35_session_sync(first, prompt.data(), prompt.size(), prompt.size(),
                            &cached, error, sizeof(error)) == Q35_OK && cached == 0,
@@ -54,6 +62,8 @@ int main() {
     check(q35_session_manager_acquire(manager, prompt.data(), prompt.size(),
                                       &reused, error, sizeof(error)) == Q35_OK,
           "reacquire cached Session");
+    check(q35_session_id(reused) == first_id,
+          "reused Session keeps its ID");
     check(q35_session_sync(reused, prompt.data(), prompt.size(), prompt.size(),
                            &cached, error, sizeof(error)) == Q35_OK &&
           cached == static_cast<int>(prompt.size()),
@@ -64,6 +74,8 @@ int main() {
     check(q35_session_manager_acquire(manager, prompt.data(), prompt.size(),
                                       &second, error, sizeof(error)) == Q35_OK,
           "acquire second slot");
+    check(first_id != q35_session_id(second),
+          "different Sessions have different UUIDs");
     check(q35_session_manager_acquire(manager, prompt.data(), prompt.size(),
                                       &unavailable, error, sizeof(error)) == Q35_BUSY,
           "all busy returns Q35_BUSY");
