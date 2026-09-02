@@ -11,6 +11,7 @@ CHECKPOINT ?= $(BUILD)/models/Qwen3.5-0.8B
 RENDER_BIN ?= $(BUILD)/qwen35-0.8b-render.bin
 PARSER_TEST ?= $(BUILD)/parser-test
 RUNTIME_TEST ?= $(BUILD)/runtime-test
+Q8_CPU_TEST ?= $(BUILD)/q8-cpu-test
 RENDER_DRIVER ?= $(BUILD)/render-test
 
 CXXFLAGS ?= -O3 -std=c++17 -fno-exceptions -fno-rtti \
@@ -19,9 +20,9 @@ THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(PROJECT)/third_party/spdlog/include
 SPDLOG_SRC := $(wildcard $(PROJECT)/third_party/spdlog/src/*.cpp)
 
-.PHONY: test parser-test runtime-test cli-test chat-test agent-test pack-test render-test http-test pi-retry-test clean
+.PHONY: test parser-test runtime-test q8-cpu-test cli-test chat-test agent-test pack-test render-test http-test pi-retry-test clean
 
-test: parser-test runtime-test cli-test chat-test agent-test pack-test
+test: parser-test runtime-test q8-cpu-test cli-test chat-test agent-test pack-test
 
 $(PARSER_TEST): parser_test.cpp $(PROJECT)/parser.cpp $(PROJECT)/render.cpp \
 		$(PROJECT)/render.h \
@@ -43,6 +44,15 @@ $(RUNTIME_TEST): runtime_test.cpp $(PROJECT)/engine.cpp $(PROJECT)/runtime.cpp \
 
 runtime-test: $(RUNTIME_TEST)
 	$(RUNTIME_TEST)
+
+$(Q8_CPU_TEST): q8_cpu_test.cpp $(PROJECT)/engine.cpp $(PROJECT)/log.cpp \
+		$(PROJECT)/q8.h $(PROJECT)/model_config.h $(PROJECT)/internal.h $(SPDLOG_SRC)
+	mkdir -p "$(BUILD)"
+	$(CXX) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) -I$(PROJECT) \
+		q8_cpu_test.cpp $(PROJECT)/log.cpp $(SPDLOG_SRC) -pthread -o "$@"
+
+q8-cpu-test: $(Q8_CPU_TEST)
+	$(Q8_CPU_TEST)
 
 cli-test: $(PROGRAM)
 	@output=`$(PROGRAM) --mock --bench 8 4` && \
@@ -88,4 +98,4 @@ pi-retry-test:
 	cd "$(PROJECT)" && $(SYSTEM_PYTHON) tests/test_pi_retry.py --pi "$(PI)"
 
 clean:
-	rm -f "$(PARSER_TEST)" "$(RUNTIME_TEST)" "$(RENDER_DRIVER)"
+	rm -f "$(PARSER_TEST)" "$(RUNTIME_TEST)" "$(Q8_CPU_TEST)" "$(RENDER_DRIVER)"

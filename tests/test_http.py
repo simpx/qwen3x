@@ -91,7 +91,7 @@ def main():
         status, _, data = request(port, "GET", "/v1/models")
         assert status == 200
         served_model = json.loads(data)["data"][0]["id"]
-        assert served_model in ("qwen3.5-0.8b", "qwen3.5-4b")
+        assert served_model in ("qwen3.5-0.8b", "qwen3.5-4b", "qwen3.5-9b")
 
         body = {
             "model": served_model,

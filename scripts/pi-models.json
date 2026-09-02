@@ -9,13 +9,22 @@
         "supportsReasoningEffort": false,
         "thinkingFormat": "qwen-chat-template"
       },
-      "models": [{
-        "id": "qwen3.5-4b",
-        "reasoning": true,
-        "input": ["text"],
-        "contextWindow": 40960,
-        "maxTokens": 4096
-      }]
+      "models": [
+        {
+          "id": "qwen3.5-4b",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 40960,
+          "maxTokens": 4096
+        },
+        {
+          "id": "qwen3.5-9b",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 40960,
+          "maxTokens": 4096
+        }
+      ]
     }
   }
 }

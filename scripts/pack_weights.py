@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pack an official Qwen3.5-0.8B or Qwen3.5-4B text backbone.
+"""Pack a supported official Qwen3.5 text backbone.
 
 The output is a deliberately small sequential format: a fixed metadata header
 followed by tensors in the exact order consumed by engine.cpp. The 4B
@@ -13,11 +13,19 @@ import json
 import struct
 from pathlib import Path
 
+import numpy as np
+
 ALIGNMENT = 64
 MAGIC = b"Q35MODL\0"
 FORMAT_VERSION = 2
 HEADER = struct.Struct("<8sII16I")
 MAX_CONTEXT = 262144
+Q8_BLOCK_SIZE = 32
+Q8_DTYPE = np.dtype([
+    ("scale", "<f2"),
+    ("values", "i1", (Q8_BLOCK_SIZE,)),
+], align=False)
+assert Q8_DTYPE.itemsize == 34
 
 SUPPORTED_MODELS = (
     {
@@ -29,6 +37,7 @@ SUPPORTED_MODELS = (
         "linear_num_key_heads": 16, "linear_num_value_heads": 16,
         "linear_key_head_dim": 128, "linear_value_head_dim": 128,
         "linear_conv_kernel_dim": 4,
+        "matrix_type": "BF16", "tie_word_embeddings": True,
     },
     {
         "name": "Qwen3.5-4B", "model_id": 4000,
@@ -39,11 +48,23 @@ SUPPORTED_MODELS = (
         "linear_num_key_heads": 16, "linear_num_value_heads": 32,
         "linear_key_head_dim": 128, "linear_value_head_dim": 128,
         "linear_conv_kernel_dim": 4,
+        "matrix_type": "BF16", "tie_word_embeddings": True,
+    },
+    {
+        "name": "Qwen3.5-9B", "model_id": 9000,
+        "vocab_size": 248320, "hidden_size": 4096,
+        "intermediate_size": 12288, "num_hidden_layers": 32,
+        "full_attention_interval": 4, "num_attention_heads": 16,
+        "num_key_value_heads": 4, "head_dim": 256, "rotary_dim": 64,
+        "linear_num_key_heads": 16, "linear_num_value_heads": 32,
+        "linear_key_head_dim": 128, "linear_value_head_dim": 128,
+        "linear_conv_kernel_dim": 4,
+        "matrix_type": "Q8_0", "tie_word_embeddings": False,
     },
 )
 
 
-def select_model(text_config):
+def select_model(text_config, tie_word_embeddings=None):
     """Return the one supported shape that exactly matches structural fields."""
     rope = text_config.get("rope_parameters", {})
     for model in SUPPORTED_MODELS:
@@ -63,15 +84,21 @@ def select_model(text_config):
             "linear_value_head_dim": model["linear_value_head_dim"],
             "linear_conv_kernel_dim": model["linear_conv_kernel_dim"],
             "max_position_embeddings": MAX_CONTEXT,
-            "tie_word_embeddings": True,
+            "tie_word_embeddings": model["tie_word_embeddings"],
             "dtype": "bfloat16",
         }
-        if all(text_config.get(key) == value for key, value in contract.items()):
+        actual_tie = text_config.get("tie_word_embeddings", tie_word_embeddings)
+        matches = all(
+            (actual_tie if key == "tie_word_embeddings" else text_config.get(key)) == value
+            for key, value in contract.items()
+        )
+        if matches:
             partial = rope.get("partial_rotary_factor")
             if partial == model["rotary_dim"] / model["head_dim"]:
                 return model
     raise ValueError(
-        "only official Qwen3.5-0.8B and Qwen3.5-4B text configurations are supported"
+        "only official Qwen3.5-0.8B, Qwen3.5-4B and Qwen3.5-9B "
+        "text configurations are supported"
     )
 
 
@@ -105,35 +132,59 @@ def expected_tensors(model):
     conv = model["linear_conv_kernel_dim"]
     dqkv = 2 * key_heads * key_dim + value_heads * value_dim
 
-    yield "model.language_model.embed_tokens.weight", "BF16", (vocab, hidden)
-    yield "model.language_model.norm.weight", "BF16", (hidden,)
+    yield "model.language_model.embed_tokens.weight", "BF16", (vocab, hidden), True
+    if not model["tie_word_embeddings"]:
+        yield "lm_head.weight", "BF16", (vocab, hidden), True
+    yield "model.language_model.norm.weight", "BF16", (hidden,), False
     for layer, is_delta in linear_layers(model):
         layer_prefix = f"model.language_model.layers.{layer}."
-        yield layer_prefix + "input_layernorm.weight", "BF16", (hidden,)
+        yield layer_prefix + "input_layernorm.weight", "BF16", (hidden,), False
         if is_delta:
             prefix = layer_prefix + "linear_attn."
-            yield prefix + "in_proj_qkv.weight", "BF16", (dqkv, hidden)
-            yield prefix + "in_proj_z.weight", "BF16", (value_heads * value_dim, hidden)
-            yield prefix + "in_proj_a.weight", "BF16", (value_heads, hidden)
-            yield prefix + "in_proj_b.weight", "BF16", (value_heads, hidden)
-            yield prefix + "conv1d.weight", "BF16", (dqkv, 1, conv)
-            yield prefix + "A_log", "F32", (value_heads,)
-            yield prefix + "dt_bias", "BF16", (value_heads,)
-            yield prefix + "norm.weight", "F32", (value_dim,)
-            yield prefix + "out_proj.weight", "BF16", (hidden, value_heads * value_dim)
+            yield prefix + "in_proj_qkv.weight", "BF16", (dqkv, hidden), True
+            yield prefix + "in_proj_z.weight", "BF16", (value_heads * value_dim, hidden), True
+            yield prefix + "in_proj_a.weight", "BF16", (value_heads, hidden), True
+            yield prefix + "in_proj_b.weight", "BF16", (value_heads, hidden), True
+            yield prefix + "conv1d.weight", "BF16", (dqkv, 1, conv), False
+            yield prefix + "A_log", "F32", (value_heads,), False
+            yield prefix + "dt_bias", "BF16", (value_heads,), False
+            yield prefix + "norm.weight", "F32", (value_dim,), False
+            yield prefix + "out_proj.weight", "BF16", (hidden, value_heads * value_dim), True
         else:
             prefix = layer_prefix + "self_attn."
-            yield prefix + "q_proj.weight", "BF16", (2 * attention_heads * attention_dim, hidden)
-            yield prefix + "k_proj.weight", "BF16", (kv_heads * attention_dim, hidden)
-            yield prefix + "v_proj.weight", "BF16", (kv_heads * attention_dim, hidden)
-            yield prefix + "q_norm.weight", "BF16", (attention_dim,)
-            yield prefix + "k_norm.weight", "BF16", (attention_dim,)
-            yield prefix + "o_proj.weight", "BF16", (hidden, attention_heads * attention_dim)
+            yield prefix + "q_proj.weight", "BF16", (2 * attention_heads * attention_dim, hidden), True
+            yield prefix + "k_proj.weight", "BF16", (kv_heads * attention_dim, hidden), True
+            yield prefix + "v_proj.weight", "BF16", (kv_heads * attention_dim, hidden), True
+            yield prefix + "q_norm.weight", "BF16", (attention_dim,), False
+            yield prefix + "k_norm.weight", "BF16", (attention_dim,), False
+            yield prefix + "o_proj.weight", "BF16", (hidden, attention_heads * attention_dim), True
 
-        yield layer_prefix + "post_attention_layernorm.weight", "BF16", (hidden,)
-        yield layer_prefix + "mlp.gate_proj.weight", "BF16", (intermediate, hidden)
-        yield layer_prefix + "mlp.up_proj.weight", "BF16", (intermediate, hidden)
-        yield layer_prefix + "mlp.down_proj.weight", "BF16", (hidden, intermediate)
+        yield layer_prefix + "post_attention_layernorm.weight", "BF16", (hidden,), False
+        yield layer_prefix + "mlp.gate_proj.weight", "BF16", (intermediate, hidden), True
+        yield layer_prefix + "mlp.up_proj.weight", "BF16", (intermediate, hidden), True
+        yield layer_prefix + "mlp.down_proj.weight", "BF16", (hidden, intermediate), True
+
+
+def quantize_q8_0(data):
+    """Convert little-endian BF16 rows, already split on 32-value blocks."""
+    if len(data) % (Q8_BLOCK_SIZE * 2):
+        raise ValueError("Q8_0 input does not contain complete 32-value blocks")
+    bits = np.frombuffer(data, dtype="<u2").astype("<u4")
+    bits <<= 16
+    values = bits.view("<f4").reshape(-1, Q8_BLOCK_SIZE)
+    if not np.isfinite(values).all():
+        raise ValueError("Q8_0 input contains non-finite weight")
+    maximum = np.max(np.abs(values), axis=1)
+    scale = maximum / np.float32(127.0)
+    inverse = np.zeros_like(scale)
+    np.divide(np.float32(1.0), scale, out=inverse, where=scale != 0)
+    normalized = values * inverse[:, None]
+    rounded = np.copysign(np.floor(np.abs(normalized) + np.float32(0.5)), normalized)
+    quants = np.clip(rounded, -127, 127).astype(np.int8)
+    blocks = np.empty(scale.size, dtype=Q8_DTYPE)
+    blocks["scale"] = scale.astype("<f2")
+    blocks["values"] = quants
+    return blocks.tobytes()
 
 
 def pad_to_alignment(output):
@@ -164,7 +215,7 @@ class SafetensorsShard:
     def __exit__(self, *_):
         self.file.close()
 
-    def copy_tensor(self, name, dtype, shape, output):
+    def copy_tensor(self, name, dtype, shape, quantized, output):
         info = self.header.get(name)
         if info is None:
             raise ValueError(f"{name}: absent from {self.path.name}")
@@ -181,6 +232,18 @@ class SafetensorsShard:
             raise ValueError(f"{name}: invalid safetensors data_offsets")
 
         self.file.seek(self.data_start + start)
+        if quantized:
+            if dtype != "BF16" or len(shape) != 2 or shape[1] % Q8_BLOCK_SIZE:
+                raise ValueError(f"{name}: invalid Q8_0 matrix shape {shape}")
+            row_bytes = shape[1] * 2
+            rows_per_chunk = max(1, (8 * 1024 * 1024) // row_bytes)
+            for row in range(0, shape[0], rows_per_chunk):
+                count = min(rows_per_chunk, shape[0] - row)
+                block = self.file.read(count * row_bytes)
+                if len(block) != count * row_bytes:
+                    raise ValueError(f"{name}: truncated {self.path.name}")
+                output.write(quantize_q8_0(block))
+            return
         remaining = end - start
         while remaining:
             block = self.file.read(min(8 * 1024 * 1024, remaining))
@@ -195,14 +258,15 @@ def pack(checkpoint_dir, output_path):
     if not index_path.exists():
         raise ValueError(f"missing {index_path}")
     weight_map = json.loads(index_path.read_text())["weight_map"]
-    text_config = json.loads((checkpoint_dir / "config.json").read_text())["text_config"]
-    model = select_model(text_config)
+    config = json.loads((checkpoint_dir / "config.json").read_text())
+    text_config = config["text_config"]
+    model = select_model(text_config, config.get("tie_word_embeddings"))
     expected = list(expected_tensors(model))
-    missing = {name for name, _, _ in expected} - weight_map.keys()
+    missing = {name for name, _, _, _ in expected} - weight_map.keys()
     if missing:
         raise ValueError("checkpoint misses text tensors: " + ", ".join(sorted(missing)[:3]))
 
-    shard_names = sorted({weight_map[name] for name, _, _ in expected})
+    shard_names = sorted({weight_map[name] for name, _, _, _ in expected})
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_suffix(output_path.suffix + ".tmp")
     try:
@@ -212,9 +276,11 @@ def pack(checkpoint_dir, output_path):
                 for name in shard_names
             }
             output.write(HEADER.pack(MAGIC, FORMAT_VERSION, 0, *header_values(model)))
-            for number, (name, dtype, shape) in enumerate(expected, 1):
+            for number, (name, dtype, shape, matrix) in enumerate(expected, 1):
                 pad_to_alignment(output)
-                shards[weight_map[name]].copy_tensor(name, dtype, shape, output)
+                quantized = matrix and model["matrix_type"] == "Q8_0"
+                shards[weight_map[name]].copy_tensor(
+                    name, dtype, shape, quantized, output)
                 print(f"\r[{number:3}/{len(expected)}] {name}", end="", flush=True)
         print()
         temporary.replace(output_path)

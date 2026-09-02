@@ -24,7 +24,7 @@ NVCCFLAGS ?= -O3 -std=c++17 -arch=$(CUDA_ARCH) \
 
 .DELETE_ON_ERROR:
 
-.PHONY: all cuda model-4b serve-4b test cuda-test clean
+.PHONY: all cuda model-4b model-9b serve-4b serve-9b test cuda-test clean
 
 all: $(PROGRAM)
 
@@ -33,6 +33,9 @@ cuda: $(CUDA_PROGRAM)
 model-4b:
 	$(MAKE) -C scripts model-4b render
 
+model-9b:
+	$(MAKE) -C scripts model-9b render
+
 serve-4b: cuda
 	test -f "$(BUILD)/qwen35-4b-model.bin" || { echo "run: make model-4b"; exit 1; }
 	test -f "$(BUILD)/qwen35-0.8b-render.bin" || { echo "run: make model-4b"; exit 1; }
@@ -40,6 +43,14 @@ serve-4b: cuda
 		--render "$(BUILD)/qwen35-0.8b-render.bin" --listen \
 		--host 127.0.0.1 --port 8000 --session-slots 1 \
 		--session-context 40960 --audit-log "$(BUILD)/qwen35-audit.log"
+
+serve-9b: cuda
+	test -f "$(BUILD)/qwen35-9b-q8_0-model.bin" || { echo "run: make model-9b"; exit 1; }
+	test -f "$(BUILD)/qwen35-0.8b-render.bin" || { echo "run: make model-9b"; exit 1; }
+	$(CUDA_PROGRAM) --model "$(BUILD)/qwen35-9b-q8_0-model.bin" \
+		--render "$(BUILD)/qwen35-0.8b-render.bin" --listen \
+		--host 127.0.0.1 --port 8000 --session-slots 1 \
+		--session-context 40960 --audit-log "$(BUILD)/qwen35-9b-audit.log"
 
 $(PROGRAM): $(PROGRAM_OBJ)
 	mkdir -p $(BUILD)
@@ -50,7 +61,7 @@ $(CUDA_PROGRAM): $(CUDA_OBJ) $(COMMON_OBJ)
 	$(NVCC) $(NVCCFLAGS) $^ -L$(CUDA_LIB_DIR) -lcublas \
 		-Xlinker -rpath -Xlinker $(CUDA_LIB_DIR) -Xcompiler=-pthread -o $@
 
-$(CUDA_OBJ): arch/cuda/engine.cu internal.h model_config.h qwen35.h Makefile
+$(CUDA_OBJ): arch/cuda/engine.cu internal.h model_config.h q8.h qwen35.h Makefile
 	mkdir -p $(dir $@)
 	$(NVCC) $(NVCCFLAGS) -I. -MMD -MP -c $< -o $@
 

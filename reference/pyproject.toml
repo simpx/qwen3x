@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Official Transformers oracle for qwen3x"
 requires-python = ">=3.10"
 dependencies = [
+    "accelerate>=1.0,<2",
     "fastapi>=0.115,<1",
     "numpy>=1.26",
     "torch>=2.6",

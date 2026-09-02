@@ -13,6 +13,11 @@ constexpr size_t CONFIG_FIELD_COUNT = 16;
 constexpr size_t HEADER_SIZE = HEADER_PREFIX_SIZE + CONFIG_FIELD_COUNT * 4;
 constexpr int MAX_CONTEXT = 262144;
 
+enum MatrixType : uint32_t {
+    MATRIX_BF16,
+    MATRIX_Q8_0,
+};
+
 enum ConfigField : size_t {
     MODEL_ID,
     VOCAB_SIZE,
@@ -45,6 +50,8 @@ struct ModelConfig {
     int V, H, I, N;
     int AI, AH, KVH, AD, RD;
     int KH, VH, KD, VD, CK;
+    MatrixType matrix_type;
+    bool tied_embeddings;
 };
 
 constexpr ModelConfig QWEN35_08B = {
@@ -52,6 +59,7 @@ constexpr ModelConfig QWEN35_08B = {
     248320, 1024, 3584, 24,
     4, 8, 2, 256, 64,
     16, 16, 128, 128, 4,
+    MATRIX_BF16, true,
 };
 
 constexpr ModelConfig QWEN35_4B = {
@@ -59,12 +67,22 @@ constexpr ModelConfig QWEN35_4B = {
     248320, 2560, 9216, 32,
     4, 16, 4, 256, 64,
     16, 32, 128, 128, 4,
+    MATRIX_BF16, true,
+};
+
+constexpr ModelConfig QWEN35_9B = {
+    9000, "Qwen3.5-9B",
+    248320, 4096, 12288, 32,
+    4, 16, 4, 256, 64,
+    16, 32, 128, 128, 4,
+    MATRIX_Q8_0, false,
 };
 
 inline const ModelConfig* config_for_id(uint32_t id) {
     switch (id) {
     case QWEN35_08B.id: return &QWEN35_08B;
     case QWEN35_4B.id: return &QWEN35_4B;
+    case QWEN35_9B.id: return &QWEN35_9B;
     default: return nullptr;
     }
 }

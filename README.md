@@ -31,10 +31,10 @@ Python 不参与部署或推理，只用于离线权重转换、render 数据生
 
 日常只需要两个终端。
 
-终端一，在 qwen3x 中启动 4B 服务：
+终端一，在 qwen3x 中启动 9B Q8_0 服务：
 
 ```sh
-make serve-4b
+make serve-9b
 ```
 
 终端二，进入希望 pi 操作的项目，然后运行 qwen3x 自带的启动脚本：
@@ -44,29 +44,43 @@ cd /path/to/project
 /path/to/qwen3x/scripts/pi.sh
 ```
 
-`pi.sh` 保持当前工作目录不变，自动创建隔离的 pi 配置，检查 qwen3x 是否 ready，然后以
-`qwen3.5-4b` 和默认 thinking 启动 pi。配置模板是
+`pi.sh` 保持当前工作目录不变，自动创建隔离的 pi 配置，检查 qwen3x 是否 ready，并从
+`/v1/models` 选择当前服务实际加载的 4B 或 9B 模型，以默认 thinking 启动 pi。配置模板是
 [`scripts/pi-models.json`](scripts/pi-models.json)；40k context 使用的压缩余量在
 [`scripts/pi-settings.json`](scripts/pi-settings.json)。
 
 首次使用需要先准备模型：
 
 ```sh
-make model-4b
+make model-9b
 ```
 
-它下载官方 Qwen3.5-4B checkpoint，并在 `build/` 生成 4B BF16 model bin 和共享的
-Qwen3.5 render 数据。构建由 `make serve-4b` 自动完成。环境需要 CUDA Toolkit、
+它下载固定 revision 的官方 Qwen3.5-9B BF16 checkpoint，并在 `build/` 直接生成约
+8.86 GiB 的 9B Q8_0 model bin，以及共享的 Qwen3.5 render 数据。量化只改变权重；activation、
+recurrent state、KV cache、workspace 和 logits 仍是 FP32。`make serve-9b` 会检查产物并在
+缺失时提示运行上述命令。环境需要 CUDA Toolkit、
 [uv](https://docs.astral.sh/uv/)、Node >= 22.19 和 pi 0.84.4。
 
 当前路线在 RTX 4080 SUPER 16 GiB、CUDA 12.8、Node 22.19.0 上验证，使用 40960
 context。pi 可以流式 thinking 和 tool calls，完成分段读文件、review diff、修改文件和
 运行测试；真实修改仍应限定范围并人工 review。
 
+9B 在该机器上的 model、State 和 workspace 已知分配合计 11.538 GiB；进程实测增加
+11.793 GiB 显存。4K prompt prefill 为 8.90 秒（460 tok/s），随后 decode 为 25.9 tok/s；
+16K prompt prefill 为 56.54 秒（290 tok/s），随后 decode 为 21.5 tok/s。结果记录在
+[`eval/q8-9b.md`](eval/q8-9b.md)。
+
+显存更小或只想快速迭代时仍可使用现有 4B BF16 路径：
+
+```sh
+make model-4b
+make serve-4b
+```
+
 不用 pi 时可以直接请求同一个服务：
 
 ```sh
-scripts/chat.py -m qwen3.5-4b -u "你好"
+scripts/chat.py -m qwen3.5-9b -u "你好"
 ```
 
 或者使用 OpenAI-compatible HTTP：
@@ -74,11 +88,12 @@ scripts/chat.py -m qwen3.5-4b -u "你好"
 ```sh
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"qwen3.5-4b","messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"qwen3.5-9b","messages":[{"role":"user","content":"你好"}]}'
 ```
 
-完整启动参数可以用 `make -n serve-4b` 查看。这个目标固定监听 `127.0.0.1:8000`，使用
-40960 context；需要其他参数时直接运行 `build/qwen35-cuda`。
+完整启动参数可以用 `make -n serve-9b` 查看。`serve-4b` 和 `serve-9b` 都固定监听
+`127.0.0.1:8000`，使用一个 40960-token Session；需要其他参数时直接运行
+`build/qwen35-cuda`。
 
 ## 开发和其他接口
 
@@ -168,10 +183,11 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 日志，prompt 和 benchmark 默认使用 `error`；显式 `--log-level` 会覆盖模式默认值。
 指定 `--log-file build/qwen35.log` 后，滚动文件会替代 stderr 成为日志输出位置。
 
-`make serve-4b` 默认把完整 audit 写入独立的本地文件：
+`make serve-4b` 和 `make serve-9b` 默认把完整 audit 分别写入独立的本地文件：
 
 ```sh
 build/qwen35-audit.log
+build/qwen35-9b-audit.log
 ```
 
 audit 按事件记录原始请求、render prompt、模型输出、工具解析和实际 HTTP/SSE 输出。
@@ -206,5 +222,6 @@ build/              下载的 checkpoint、生成的模型和编译产物
 ## Roadmap
 
 1. 保持 Qwen3.5-0.8B correctness baseline。
-2. 以 Qwen3.5-4B 作为本机 coding agent 路线，按真实失败继续收敛。
-3. 只有 4B 的实际任务能力不足时，再评估 Qwen3.5-9B 或 27B。
+2. 以 Qwen3.5-4B BF16 作为快速本机 coding agent 路线。
+3. 以 Qwen3.5-9B Q8_0 作为 16 GiB 显卡上的默认高质量路线。
+4. 27B 留给独立目标。

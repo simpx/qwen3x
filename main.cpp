@@ -1129,6 +1129,9 @@ bool initialize(Runtime* runtime, std::string* error) {
         case 4000:
             runtime->options.served_model = "qwen3.5-4b";
             break;
+        case 9000:
+            runtime->options.served_model = "qwen3.5-9b";
+            break;
         default:
             *error = "loaded model has no served model name";
             return false;

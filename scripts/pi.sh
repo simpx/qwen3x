@@ -18,7 +18,7 @@ command -v pi >/dev/null 2>&1 || {
     exit 1
 }
 curl -fsS http://127.0.0.1:8000/readyz >/dev/null || {
-    echo "qwen3x is not ready; run: make -C $project serve-4b" >&2
+    echo "qwen3x is not ready; run: make -C $project serve-4b or serve-9b" >&2
     exit 1
 }
 
@@ -41,4 +41,10 @@ NODE
 fi
 
 export PI_CODING_AGENT_DIR="$config"
-exec pi --provider qwen3x --model qwen3.5-4b "$@"
+model=$(curl -fsS -H "Authorization: Bearer ${QWEN_API_KEY:-local}" \
+    http://127.0.0.1:8000/v1/models | node -e '
+let input = "";
+process.stdin.on("data", chunk => input += chunk);
+process.stdin.on("end", () => process.stdout.write(JSON.parse(input).data[0].id));
+')
+exec pi --provider qwen3x --model "$model" "$@"

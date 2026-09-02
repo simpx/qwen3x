@@ -257,14 +257,14 @@ activation quantization、KV quantization、vision、MTP inference 和其他模�
 
 ## 当前状态
 
-- [ ] 固定格式与 pack
-- [ ] CPU correctness
-- [ ] CUDA decode
-- [ ] CUDA prefill
-- [ ] runtime / HTTP / Makefile / README
+- [x] 固定格式与 pack
+- [x] CPU correctness
+- [x] CUDA decode
+- [x] CUDA prefill
+- [x] runtime / HTTP / Makefile / README
 - [ ] reference 与回归测试
-- [ ] 16 GiB 容量与性能验收
-- [ ] agent eval 与 pi 实测
+- [x] 16 GiB 容量与性能验收
+- [x] agent eval 与 pi 实测
 
 全部验收通过后更新本节，记录最终 model bin 大小、峰值显存、4K/16K 性能、数值误差、agent
 结果和已知边界。commit 和 push 由用户明确触发。
