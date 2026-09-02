@@ -46,6 +46,13 @@ pi 从 `~/.pi/agent/models.json` 读取 OpenAI-compatible 自定义模型。qwen
           "input": ["text"],
           "contextWindow": 40960,
           "maxTokens": 4096
+        },
+        {
+          "id": "qwen3.5-9b",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 40960,
+          "maxTokens": 4096
         }
       ]
     }

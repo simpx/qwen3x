@@ -262,9 +262,20 @@ activation quantization、KV quantization、vision、MTP inference 和其他模�
 - [x] CUDA decode
 - [x] CUDA prefill
 - [x] runtime / HTTP / Makefile / README
-- [ ] reference 与回归测试
+- [x] reference 与回归测试
 - [x] 16 GiB 容量与性能验收
 - [x] agent eval 与 pi 实测
 
-全部验收通过后更新本节，记录最终 model bin 大小、峰值显存、4K/16K 性能、数值误差、agent
-结果和已知边界。commit 和 push 由用户明确触发。
+最终 qwen3x model bin 为 9,514,418,816 bytes（8.861 GiB）。40960 context 的进程显存
+增量为 11.793 GiB，全卡峰值为 13.082 / 15.992 GiB。4K prefill 为 8.901 s / 460.183
+tok/s，随后 decode 为 25.887 tok/s；16K prefill 为 56.537 s / 289.794 tok/s，随后 decode
+为 21.509 tok/s。
+
+CPU/CUDA 单 token 最大绝对误差为 `2.3603439e-05`，官方 BF16/Q8_0 logits 平均绝对误差为
+`0.06621085`，4-step greedy token 完全一致。qwen3x 的 inspect、review、bugfix 全部通过且
+`tool_error_count=0`，pi 完成 read、write、bash 和测试任务。
+
+固定 llama.cpp + Unsloth Q8_0 外部基线能严格生成 `hello`；同一 agent eval 的 inspect 和
+bugfix 通过，review 找全三个问题但漏写文件名，因 rubric 的位置要求失败。完整命令、revision、
+SHA-256、数值、性能和原始结果位置记录在 `eval/q8-9b.md`。本轮边界保持不变，不扩展 Q4、
+activation/KV quantization、GGUF loader、vision 或其他模型。commit 和 push 由用户明确触发。
