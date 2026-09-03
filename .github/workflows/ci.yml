@@ -50,7 +50,7 @@ jobs:
           fi
       - name: Package experimental binaries (not GPU-validated)
         run: |
-          ./build/qwen35-metal --help
+          ./build/qwen35-metal --mock --bench 2 2 --session-context 16
           otool -L build/qwen35-metal
           tar -czf build/qwen35-metal-macos-arm64.tar.gz \
             build/qwen35-metal build/metal-test build/metal/libqwen35-metal.dylib
