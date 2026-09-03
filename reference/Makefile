@@ -20,6 +20,7 @@ SERVED_MODEL ?= qwen3.5-0.8b-reference
 ENGINE_DIR ?= ..
 LIBRARY ?= build/libqwen35.so
 CUDA_LIBRARY ?= build/libqwen35-cuda.so
+METAL_LIBRARY := $(ENGINE_DIR)/build/metal/libqwen35-metal.dylib
 BIN ?= $(ENGINE_DIR)/build/qwen35-0.8b-model.bin
 VECTORS ?= build/cpu
 REPORT ?= build/reference-report.json
@@ -33,12 +34,13 @@ CXX ?= c++
 CXXFLAGS ?=
 CUDA_LIB_DIR ?= /usr/local/cuda/targets/x86_64-linux/lib
 ENGINE_CXXFLAGS := -O3 -std=c++17 -fno-exceptions -fno-rtti \
-	-Wall -Wextra -Wpedantic -march=native
+	-Wall -Wextra -Wpedantic $(if $(filter arm64 aarch64,$(shell uname -m)),-mcpu=native,-march=native) \
+	$(if $(filter Darwin,$(shell uname -s)),-mmacosx-version-min=12.0,)
 THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(ENGINE_DIR)/third_party/spdlog/include
 SPDLOG_SRC := $(wildcard $(ENGINE_DIR)/third_party/spdlog/src/*.cpp)
 
-.PHONY: all sync dump test tool-test llama-smoke-test cpu cuda compare compare-cuda \
+.PHONY: all sync dump test tool-test llama-smoke-test cpu cuda compare compare-cuda compare-metal \
 	compare-4b compare-cuda-4b llama-smoke llama-smoke-run serve clean
 
 all: cpu
@@ -85,6 +87,15 @@ compare-cuda: $(CUDA_LIBRARY)
 		--report "$(CUDA_REPORT)" \
 		--tolerance-key cuda_max_abs_error \
 		--cxxflags "CUDA $(CXXFLAGS)" $(COMPARE_ARGS)
+
+# Metal keeps FP32 activations in prefill and decode; initially require the
+# same strict FP32 oracle contract, not behavior-only or quantization scores.
+compare-metal:
+	$(MAKE) -C "$(ENGINE_DIR)" metal-library
+	$(PYTHON) compare_engine.py \
+		--library "$(METAL_LIBRARY)" --bin "$(BIN)" --vectors "$(VECTORS)" \
+		--model "$(MODEL)" --chat-template "$(CHAT_TEMPLATE)" \
+		--report build/metal-reference-report.json --cxxflags "Metal FP32" $(COMPARE_ARGS)
 
 compare-4b:
 	$(MAKE) compare LIBRARY=build/libqwen35.so BIN=../build/qwen35-4b-model.bin \

@@ -53,6 +53,7 @@ render.cpp     Qwen chat template、tokenizer、token decode
 runtime.cpp    Session、cache/checkpoint、prefill、decode、sampling
 engine.cpp     权重、State/Work、算子和完整 Qwen forward
 arch/cuda/     CUDA engine；chunk prefill 与单 token decode forward
+arch/metal/    Metal engine；完整单 token forward 与 MSL kernel
 log.cpp        进程级日志实现
 ```
 
@@ -76,6 +77,8 @@ log.cpp        进程级日志实现
   一份 CUDA decode forward；只有计算结构或数值路径不同时才增加具名 forward/prefill。
 - forward 从 config 读取 `H、I、N、AH、KVH、VH`，完整展示 embedding、layer loop、
   DeltaNet/Attention、FFN、final norm 和 logits。分支直接留在 backend 入口和 layer loop。
+- Metal 独立展示同一完整 forward；系统 API 收敛在 Objective-C++ 平台文件，数学写在
+  `.metal` kernel。复用现有 model bin 和 runtime 边界，量化分支集中在 embed/mv。
 - File/Reader、固定布局 loader、Model/Layer、State/Work、checkpoint、模型算子和 CUDA kernel
   保持内聚、可组合，由完整 forward 直接编排。
 - 新型号依次加入 model ID、`ModelConfig`、packer 和 reference 测试；结构或数值路径不同时再
@@ -204,4 +207,6 @@ qwen35-0.8b-render.bin
 - 用户已有改动保持原样；工作区有变化时先区分改动归属。
 - 基础 C++ 改动至少运行 `make test`；render 边界运行 `make -C tests render-test`；HTTP
   数据流运行 `make -C tests http-test`。bug fix 配套最小回归测试。
+- Metal 改动在 Apple Silicon 上运行 `make metal-test`；真实 0.8B 数值验收运行
+  `make metal-reference`。WSL shader 离线编译和无 GPU 的 CI 构建不算 GPU 正确性通过。
 - push main 前确认提交内容和测试结果；远端历史出现分叉时停止 push 并向用户说明。

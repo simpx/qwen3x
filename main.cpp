@@ -36,6 +36,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+
 #define CPPHTTPLIB_NO_EXCEPTIONS
 #include "third_party/httplib/httplib.h"
 
@@ -250,6 +254,16 @@ bool integer(const std::string& text, Integer* output) {
 
 std::filesystem::path executable_path(const char* program) {
     std::error_code error;
+#if defined(__APPLE__)
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> path(size);
+    if (_NSGetExecutablePath(path.data(), &size) == 0) {
+        const auto resolved = std::filesystem::canonical(path.data(), error);
+        return error ? std::filesystem::path(path.data()) : resolved;
+    }
+    return std::filesystem::absolute(program, error);
+#else
     std::filesystem::path executable =
         std::filesystem::read_symlink("/proc/self/exe", error);
     if (error) {
@@ -258,6 +272,7 @@ std::filesystem::path executable_path(const char* program) {
         if (error) executable = program;
     }
     return executable;
+#endif
 }
 
 std::string sibling_file(const char* program, const char* name) {

@@ -7,7 +7,7 @@
 #include "qwen35.h"
 
 // runtime.cpp 只通过这组不透明操作访问一个计算后端。构建时由根目录
-// engine.cpp、arch/x86/engine.cpp、arch/cuda/engine.cu 或 Metal 实现其中一个。
+// engine.cpp、arch/cuda/engine.cu 或 arch/metal/engine.mm 实现其中一个。
 namespace q35_backend {
 
 struct Model;

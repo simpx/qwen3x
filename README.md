@@ -95,6 +95,71 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 `127.0.0.1:8000`，使用一个 40960-token Session；需要其他参数时直接运行
 `build/qwen35-cuda`。
 
+### Apple Silicon / Metal（实验性，待真机验收）
+
+新增 Metal backend 面向 M1 及更新的 Mac，要求 macOS 12+ 和包含 Metal toolchain 的
+完整 Xcode。它直接读取现有 0.8B/4B BF16、9B Q8_0 model.bin，无需重新 pack。
+Metal shader 编译后嵌入 `qwen35-metal`，运行时不需要外部 `.metallib`、Python 或第三方
+推理框架。平台接口集中在 `arch/metal/engine.mm`，数学计算在 `kernels.metal`。
+
+先在 Mac 上运行不下载模型的数值 smoke：
+
+```sh
+make -j3 metal
+MTL_DEBUG_LAYER=1 make metal-test
+```
+
+`metal-test` 用非零随机小模型，对比 CPU/Metal 的 BF16 和 Q8_0 完整 forward、每步
+logits、recurrent/KV state、prefill、checkpoint restore 和 reset；没有可用 GPU 时返回
+非零，不能视为通过。CI 同时构建 macOS CPU/Metal；如果托管 runner 不提供 GPU，会明确
+标记 GPU 测试未运行。合成测试不代替真实模型的数值验收。
+
+准备好模型后，Mac 上仍使用 `make serve-4b` / `make serve-9b`，自动选择 Metal；Linux/WSL
+继续选择 CUDA。连接 pi 的方式不变。也可以先用 0.8B 做短请求：
+
+```sh
+./build/qwen35-metal -c "你好" --session-context 128 --max-tokens 16
+```
+
+首版 prefill 逐 token 执行完整 forward，没有批量矩阵优化；长 prompt 的吞吐和 40K
+context 的真实内存占用尚未测量。9B 的权重本身约 8.86 GiB，统一内存还要供系统、KV
+和 recurrent state 使用；不要按 CUDA 显存数字直接推断 Mac 的可用容量。
+
+WSL 现在能运行 `make test`；安装 Apple 官方
+[Metal Developer Tools for Windows](https://developer.apple.com/metal/tools/) 后还能运行：
+
+```sh
+make metal-shaders
+# 工具不在 PATH 或默认安装目录时：
+python3 scripts/compile_metal.py --tools '/mnt/c/path/to/Metal/bin'
+```
+
+下载需要 Apple 登录，项目不会自动登录或安装。该命令仅编译 shader，不执行 GPU，也不
+生成 macOS 可执行文件。当前 WSL 上尚未安装该工具，因此 Metal 编译/执行仍需 Windows
+工具或 Mac/CI 验证。
+
+完整 0.8B 官方 FP32 oracle 验证入口为 `make metal-reference`，复用
+[`reference/`](reference/README.md) 的 `build/cpu` 向量、相同误差契约和逐 token/cache
+测试；需先准备或从 WSL 复制 model.bin、官方 checkpoint 和 reference 向量。
+
+不想把官方 checkpoint 复制到 Mac 时，可以先用现有 CPU engine 制作跨机器 smoke：
+
+```sh
+# WSL：各生成 35 个位置的完整词表 logits，不做 sampling。
+make metal-smoke-vectors
+make metal-smoke-9b-vectors
+```
+
+把 `build/metal-smoke-0.8b/`、`build/metal-smoke-9b/` 和对应的 model.bin 复制到 Mac 的
+相同目录，再运行 `make metal-smoke` / `make metal-smoke-9b`。仅需系统 Python；不需要
+PyTorch、Transformers、tokenizer 或额外 checkpoint。每套向量约 34 MiB。
+
+测试先核对 model.bin 的 SHA-256，再逐 token 比较全部 logits（最大绝对误差 ≤ `5e-4`、
+argmax 相同），并检查 prefill/decode、checkpoint 恢复、cache hit、reset 和 Session
+隔离（同 backend 路径误差 ≤ `5e-5`）。结果写在向量目录的 `check.json`，记录实际候选
+library 和平台；CPU 自检通过不表示 Metal 通过。这是相同 pack 的实现对齐，不是官方
+模型跑分，也不替代 `metal-reference`。
+
 ## 开发和其他接口
 
 0.8B 作为 CPU correctness 和协议 smoke 基线：
@@ -209,6 +274,7 @@ audit 按事件记录原始请求、render prompt、模型输出、工具解析�
 ```text
 engine.cpp          CPU correctness engine 与完整单 token forward
 arch/cuda/engine.cu CUDA Model/State、chunk prefill 和单 token forward
+arch/metal/         Metal Model/State、完整 forward 与 MSL kernel
 runtime.cpp         Session、sampling 和 cache 生命周期
 main.cpp            main、HTTP routes 和 completion 数据流
 parser.cpp          唯一 JSON-aware 的 C++ 边界

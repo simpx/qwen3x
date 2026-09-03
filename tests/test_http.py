@@ -44,6 +44,16 @@ def main():
     assert direct.stderr == "", direct.stderr
 
     with tempfile.TemporaryDirectory() as directory:
+        # Default model/render paths are relative to the actual binary, even
+        # when invoked by basename through PATH from an unrelated directory.
+        program = os.path.abspath(args.program)
+        from_path = subprocess.run(
+            [os.path.basename(program), "--chat", "hello", "--max-tokens", "1", "--mock"],
+            cwd=directory,
+            env=dict(os.environ, PATH=os.path.dirname(program) + os.pathsep + os.environ.get("PATH", "")),
+            capture_output=True, text=True, check=False,
+        )
+        assert from_path.returncode == 0, from_path.stderr
         log_file = os.path.join(directory, "qwen35.log")
         logged = subprocess.run(
             [args.program, "--chat", "hello", "--max-tokens", "1",

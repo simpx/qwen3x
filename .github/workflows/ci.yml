@@ -3,6 +3,7 @@ name: C++ checks
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,5 +13,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install pack-test dependency (Python 3.10 pin from scripts/uv.lock)
+        run: python3 -m pip install numpy==2.2.6
       - name: Build and run unit tests
         run: make test
+
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install pack-test dependency (Python 3.10 pin from scripts/uv.lock)
+        run: python3 -m pip install numpy==2.2.6
+      - name: Build and run CPU tests on Apple Silicon
+        run: make -j3 test
+      - name: Compile Metal shaders, engine and numerical smoke test
+        run: make -j3 metal build/metal-test metal-library
+      - name: Run Metal numerical smoke when a GPU is exposed
+        shell: bash
+        run: |
+          set +e
+          MTL_DEBUG_LAYER=1 ./build/metal-test
+          status=$?
+          set -e
+          if [ "$status" = 77 ]; then
+            echo "::warning::Metal runtime NOT TESTED: this runner exposes no Apple GPU."
+            echo "Metal compiled; GPU numerical smoke NOT RUN (no GPU)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            exit "$status"
+          fi

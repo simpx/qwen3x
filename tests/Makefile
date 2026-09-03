@@ -15,14 +15,15 @@ Q8_CPU_TEST ?= $(BUILD)/q8-cpu-test
 RENDER_DRIVER ?= $(BUILD)/render-test
 
 CXXFLAGS ?= -O3 -std=c++17 -fno-exceptions -fno-rtti \
-	-Wall -Wextra -Wpedantic -march=native
+	-Wall -Wextra -Wpedantic $(if $(filter arm64 aarch64,$(shell uname -m)),-mcpu=native,-march=native) \
+	$(if $(filter Darwin,$(shell uname -s)),-mmacosx-version-min=12.0,)
 THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(PROJECT)/third_party/spdlog/include
 SPDLOG_SRC := $(wildcard $(PROJECT)/third_party/spdlog/src/*.cpp)
 
-.PHONY: test parser-test runtime-test q8-cpu-test cli-test chat-test agent-test pack-test render-test http-test pi-retry-test clean
+.PHONY: test parser-test runtime-test q8-cpu-test cli-test chat-test agent-test pack-test metal-tools-test render-test http-test pi-retry-test clean
 
-test: parser-test runtime-test q8-cpu-test cli-test chat-test agent-test pack-test
+test: parser-test runtime-test q8-cpu-test cli-test chat-test agent-test pack-test metal-tools-test
 
 $(PARSER_TEST): parser_test.cpp $(PROJECT)/parser.cpp $(PROJECT)/render.cpp \
 		$(PROJECT)/render.h \
@@ -71,6 +72,12 @@ agent-test:
 pack-test:
 	cd "$(PROJECT)" && $(SYSTEM_PYTHON) -m unittest discover \
 		-s tests -p test_pack_weights.py -v
+
+metal-tools-test:
+	cd "$(PROJECT)" && $(SYSTEM_PYTHON) -m unittest discover \
+		-s tests -p test_metal_tools.py -v
+	cd "$(PROJECT)" && $(SYSTEM_PYTHON) -m unittest discover \
+		-s tests -p test_backend_smoke.py -v
 
 $(RENDER_DRIVER): render_driver.cpp $(PROJECT)/render.cpp $(PROJECT)/parser.cpp \
 		$(PROJECT)/render.h $(PROJECT)/third_party/nlohmann/json.hpp
