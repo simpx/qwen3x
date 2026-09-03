@@ -48,3 +48,15 @@ jobs:
           else
             exit "$status"
           fi
+      - name: Package experimental binaries (not GPU-validated)
+        run: |
+          ./build/qwen35-metal --help
+          otool -L build/qwen35-metal
+          tar -czf build/qwen35-metal-macos-arm64.tar.gz \
+            build/qwen35-metal build/metal-test build/metal/libqwen35-metal.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qwen35-metal-macos-arm64
+          path: build/qwen35-metal-macos-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 14

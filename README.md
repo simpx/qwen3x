@@ -114,6 +114,12 @@ logits、recurrent/KV state、prefill、checkpoint restore 和 reset；没有可
 非零，不能视为通过。CI 同时构建 macOS CPU/Metal；如果托管 runner 不提供 GPU，会明确
 标记 GPU 测试未运行。合成测试不代替真实模型的数值验收。
 
+当前已通过 macOS ARM64 的 CPU 测试及完整 Metal 编译；托管 CI 未提供 Apple GPU，
+因此 GPU 数值测试和真实模型验收仍未完成。[Actions](https://github.com/simpx/qwen3x/actions)
+中的 `qwen35-metal-macos-arm64` 附件保留实验性可执行文件、smoke 程序和测试 dylib。
+在对应 commit 的仓库根目录解压其中的 tar.gz 后，可直接运行
+`MTL_DEBUG_LAYER=1 ./build/metal-test`，不需要在本机安装 Xcode；附件不包含模型。
+
 准备好模型后，Mac 上仍使用 `make serve-4b` / `make serve-9b`，自动选择 Metal；Linux/WSL
 继续选择 CUDA。连接 pi 的方式不变。也可以先用 0.8B 做短请求：
 
@@ -135,8 +141,8 @@ python3 scripts/compile_metal.py --tools '/mnt/c/path/to/Metal/bin'
 ```
 
 下载需要 Apple 登录，项目不会自动登录或安装。该命令仅编译 shader，不执行 GPU，也不
-生成 macOS 可执行文件。当前 WSL 上尚未安装该工具，因此 Metal 编译/执行仍需 Windows
-工具或 Mac/CI 验证。
+生成 macOS 可执行文件。当前 WSL 上尚未安装该工具；Metal 编译已由 macOS CI 验证，
+GPU 执行仍需真实 Mac。
 
 完整 0.8B 官方 FP32 oracle 验证入口为 `make metal-reference`，复用
 [`reference/`](reference/README.md) 的 `build/cpu` 向量、相同误差契约和逐 token/cache
