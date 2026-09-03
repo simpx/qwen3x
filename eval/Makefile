@@ -32,7 +32,8 @@ THINKING_ARG := $(if $(filter 1 true yes,$(EVAL_THINKING)),--thinking,)
 SMOKE_ARG := $(if $(filter 1 true yes,$(EVAL_SMOKE)),--smoke,)
 PYTHON := $(UV) run --project "$(EVAL_DIR)" --locked python
 
-.PHONY: test run smoke reference compare agent-eval
+.PHONY: test run smoke smoke-run smoke-4b smoke-9b smoke-report \
+	reference compare agent-eval
 
 test:
 	cd "$(EVAL_DIR)" && $(PYTHON) -m unittest -v test_eval
@@ -56,10 +57,29 @@ run:
 		--output "$(EVAL_OUTPUT)"
 
 smoke:
+	timeout --signal=TERM --kill-after=15s 30m $(MAKE) smoke-run
+
+smoke-run:
 	for dataset in mmlu_pro ceval ifeval; do \
-		$(MAKE) run EVAL_DATASET="$$dataset" EVAL_LIMIT=20 EVAL_SMOKE=1 \
-			EVAL_MAX_TOKENS=128 || exit $$?; \
+		$(MAKE) run EVAL_DATASET="$$dataset" EVAL_LIMIT=2 EVAL_SMOKE=1 \
+			EVAL_THINKING=1 EVAL_SEED=42 EVAL_MAX_TOKENS=32768 || exit $$?; \
 	done
+	$(MAKE) smoke-report
+
+smoke-4b:
+	$(MAKE) smoke EVAL_MODEL=qwen3.5-4b \
+		TOKENIZER="$(PROJECT)/build/models/Qwen3.5-4B" \
+		EVAL_ARTIFACT="$(PROJECT)/build/qwen35-4b-model.bin" \
+		EVAL_OUTPUT="$(EVAL_DIR)/results/smoke/4b"
+
+smoke-9b:
+	$(MAKE) smoke EVAL_MODEL=qwen3.5-9b \
+		TOKENIZER="$(PROJECT)/build/models/Qwen3.5-4B" \
+		EVAL_ARTIFACT="$(PROJECT)/build/qwen35-9b-q8_0-model.bin" \
+		EVAL_OUTPUT="$(EVAL_DIR)/results/smoke/9b"
+
+smoke-report:
+	cd "$(PROJECT)" && $(PYTHON) "$(EVAL_DIR)/smoke_report.py"
 
 reference:
 	$(MAKE) run SERVER="$(REFERENCE_SERVER)" \

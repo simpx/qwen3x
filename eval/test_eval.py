@@ -42,7 +42,7 @@ class EvalToolTest(unittest.TestCase):
             eval_run.expected_sample_count("ifeval", False, None), 541
         )
         self.assertEqual(
-            eval_run.expected_sample_count("ceval", True, 20), 19
+            eval_run.expected_sample_count("ceval", True, 1), 2
         )
         self.assertIsNone(
             eval_run.expected_sample_count("ceval", False, 13)
@@ -65,8 +65,8 @@ class EvalToolTest(unittest.TestCase):
             "attempts": [{"result": "completed"}],
         })
 
-    def test_sampling_parameters_follow_qwen_benchmark_recipe(self):
-        self.assertEqual(eval_run.sampling_parameters(False, False), {
+    def test_sampling_parameters_follow_qwen_public_recipe(self):
+        self.assertEqual(eval_run.sampling_parameters(), {
             "temperature": 1.0,
             "top_p": 0.95,
             "top_k": 20,
@@ -74,16 +74,15 @@ class EvalToolTest(unittest.TestCase):
             "min_p": 0.0,
             "repetition_penalty": 1.0,
         })
-        self.assertEqual(eval_run.sampling_parameters(True, False), {
-            "temperature": 1.0,
-            "top_p": 0.95,
-            "top_k": 20,
-            "presence_penalty": 1.5,
-            "min_p": 0.0,
-            "repetition_penalty": 1.0,
+    def test_generation_config_transports_thinking_in_extra_body(self):
+        config = eval_run.generation_config(True, 42, 4096, 600)
+        self.assertNotIn("chat_template_kwargs", config)
+        self.assertEqual(config["extra_body"], {
+            "chat_template_kwargs": {
+                "enable_thinking": True,
+                "preserve_thinking": True,
+            },
         })
-        self.assertEqual(eval_run.sampling_parameters(True, True)["top_k"], 0)
-        self.assertEqual(eval_run.sampling_parameters(False, True)["temperature"], 0)
 
     def test_paired_primary_reports_binary_disagreements(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -195,6 +194,7 @@ class EvalToolTest(unittest.TestCase):
             summary = eval_run.summarize_predictions(run)
             self.assertEqual(summary["samples"], 2)
             self.assertEqual(summary["input_tokens"], 12)
+            self.assertEqual(summary["max_input_tokens"], 7)
             self.assertEqual(summary["cached_tokens"], 3)
             self.assertEqual(summary["output_tokens"], 6)
             self.assertEqual(summary["max_output_tokens"], 4)

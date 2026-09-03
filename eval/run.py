@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import math
+import signal
 import subprocess
 import time
 import urllib.request
@@ -27,7 +28,12 @@ DATASET_SOURCES = {
 DATASET_SUBSETS = {"mmlu_pro": 14, "ceval": 52, "ifeval": 1}
 DATASET_TOTAL_SAMPLES = {"mmlu_pro": 12032, "ceval": 1346, "ifeval": 541}
 DATASET_MIN_SUBSET_SAMPLES = {"mmlu_pro": 381, "ceval": 12, "ifeval": 541}
-SMOKE_SUBSET_SAMPLES = {"mmlu_pro": 410, "ceval": 19, "ifeval": 541}
+SMOKE_SUBSETS = {
+    "mmlu_pro": ["computer science", "math"],
+    "ceval": ["computer_network", "advanced_mathematics"],
+    "ifeval": ["default"],
+}
+SMOKE_MIN_CONTEXT = 65536
 LENGTH_FINISH_REASONS = {"length", "max_length", "max_tokens", "model_length"}
 
 
@@ -93,21 +99,8 @@ def previous_server_contract(previous: dict, backend: str, fallback: dict) -> di
     return merged or fallback
 
 
-def sampling_parameters(thinking: bool, smoke: bool) -> dict:
-    """Return the sampling recipe used by Qwen's benchmark table."""
-
-    if smoke:
-        return {
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "top_k": 0,
-            "presence_penalty": 0.0,
-            "min_p": 0.0,
-            "repetition_penalty": 1.0,
-        }
-    # The Language benchmark table has one explicit experimental-settings
-    # footnote for both thinking and non-thinking rows.  Do not replace this
-    # with the mode-specific Best Practices meant for general API generation.
+def sampling_parameters() -> dict:
+    """Return Qwen's public recommendation for thinking-mode general tasks."""
     return {
         "temperature": 1.0,
         "top_p": 0.95,
@@ -115,6 +108,31 @@ def sampling_parameters(thinking: bool, smoke: bool) -> dict:
         "presence_penalty": 1.5,
         "min_p": 0.0,
         "repetition_penalty": 1.0,
+    }
+
+
+def generation_config(thinking: bool, seed: int,
+                      max_tokens: int, timeout: int) -> dict:
+    """Build an EvalScope config whose Qwen options reach the HTTP body."""
+    return {
+        **sampling_parameters(),
+        "seed": seed,
+        "max_tokens": max_tokens,
+        "timeout": timeout,
+        # EvalScope validates generation fields before its OpenAI adapter can
+        # move unknown keys.  extra_body is the supported route for Qwen's
+        # chat_template_kwargs; the OpenAI client merges it into the JSON root.
+        "extra_body": {
+            "chat_template_kwargs": {
+                "enable_thinking": thinking,
+                "preserve_thinking": True,
+            },
+        },
+        # A failed long request must stay visible.  Silent retries can repeat
+        # tens of minutes of generation and obscure which attempt produced the
+        # saved prediction; resume is the explicit retry mechanism.
+        "retries": 1,
+        "retry_interval": 0,
     }
 
 
@@ -131,8 +149,9 @@ def expected_sample_count(
 ) -> int | None:
     """Return an exact expected count when the selected split makes it known."""
     if smoke:
-        available = SMOKE_SUBSET_SAMPLES[dataset]
-        return available if limit_per_subset is None else min(available, limit_per_subset)
+        if limit_per_subset is None:
+            return None
+        return len(SMOKE_SUBSETS[dataset]) * limit_per_subset
     if limit_per_subset is None:
         return DATASET_TOTAL_SAMPLES[dataset]
     if limit_per_subset <= DATASET_MIN_SUBSET_SAMPLES[dataset]:
@@ -170,6 +189,7 @@ def summarize_predictions(run_dir: Path) -> dict:
         "input_tokens": 0,
         "cached_tokens": 0,
         "output_tokens": 0,
+        "max_input_tokens": 0,
         "max_output_tokens": 0,
         "length_limited_samples": 0,
         "finish_reasons": {},
@@ -184,9 +204,13 @@ def summarize_predictions(run_dir: Path) -> dict:
             summary["failed_samples"] += int(output.get("error") is not None)
             usage = output.get("usage") or {}
             output_tokens = int(usage.get("output_tokens") or 0)
-            summary["input_tokens"] += int(usage.get("input_tokens") or 0)
+            input_tokens = int(usage.get("input_tokens") or 0)
+            summary["input_tokens"] += input_tokens
             summary["cached_tokens"] += int(usage.get("input_tokens_cache_read") or 0)
             summary["output_tokens"] += output_tokens
+            summary["max_input_tokens"] = max(
+                summary["max_input_tokens"], input_tokens
+            )
             summary["max_output_tokens"] = max(
                 summary["max_output_tokens"], output_tokens
             )
@@ -314,7 +338,7 @@ def parse_args() -> argparse.Namespace:
                         help="approximate total samples, stratified across subsets")
     parser.add_argument("--thinking", action="store_true")
     parser.add_argument("--smoke", action="store_true",
-                        help="use deterministic greedy sampling")
+                        help="use fixed small subsets without changing generation")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-tokens", type=int, default=32768)
     parser.add_argument("--request-timeout", type=float, default=7200,
@@ -360,40 +384,31 @@ def main() -> None:
                 raise RuntimeError("server is not ready")
     except Exception as error:
         raise SystemExit(f"cannot use Qwen server at {args.server}: {error}") from error
+    if args.smoke and server_info.get("context_size", 0) < SMOKE_MIN_CONTEXT:
+        raise SystemExit(
+            "smoke requires a 65536-token Session context so every fixed "
+            "prompt can request the official 32768-token output budget"
+        )
 
-    generation = {
-        **sampling_parameters(args.thinking, args.smoke),
-        "seed": args.seed,
-        "max_tokens": args.max_tokens,
-        "timeout": args.request_timeout,
-        # A failed long request must stay visible.  Silent retries can repeat
-        # tens of minutes of generation and obscure which attempt produced the
-        # saved prediction; resume is the explicit retry mechanism.
-        "retries": 1,
-        "retry_interval": 0,
-        "chat_template_kwargs": {
-            "enable_thinking": args.thinking,
-            "preserve_thinking": True,
-        },
-    }
-    # EvalScope applies --limit independently to every subset. Restrict smoke
-    # mode to one representative subset so LIMIT=20 really means 20 requests
-    # per benchmark, rather than hundreds across MMLU-Pro/C-Eval categories.
+    generation = generation_config(
+        args.thinking,
+        args.seed,
+        args.max_tokens,
+        args.request_timeout,
+    )
     dataset_args = {}
     if args.smoke:
-        smoke_subsets = {
-            "mmlu_pro": {"subset_list": ["computer science"]},
-            "ceval": {"subset_list": ["computer_network"]},
-            "ifeval": {"subset_list": ["default"]},
+        dataset_args = {
+            args.dataset: {"subset_list": SMOKE_SUBSETS[args.dataset]}
         }
-        dataset_args = {args.dataset: smoke_subsets[args.dataset]}
 
     # EvalScope's integer limit applies independently to every subset. Convert
     # the user-facing approximate total into a per-subset count, giving a small
     # but genuinely stratified sample instead of accidentally running N*subsets.
     evalscope_limit = None
     if args.samples is not None:
-        subsets = 1 if args.smoke else DATASET_SUBSETS[args.dataset]
+        subsets = (len(SMOKE_SUBSETS[args.dataset]) if args.smoke else
+                   DATASET_SUBSETS[args.dataset])
         evalscope_limit = math.ceil(args.samples / subsets)
     expected_samples = expected_sample_count(
         args.dataset, args.smoke, evalscope_limit
@@ -516,6 +531,10 @@ def main() -> None:
         no_timestamp=True,
         enable_progress_tracker=True,
     )
+    def cancel(signum, _frame):
+        raise KeyboardInterrupt(f"received {signal.Signals(signum).name}")
+
+    signal.signal(signal.SIGTERM, cancel)
     try:
         run_task(task_cfg=config)
     except BaseException as error:

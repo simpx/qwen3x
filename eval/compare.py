@@ -186,8 +186,12 @@ def main() -> None:
     ]
     engine_report = report(args.engine, dataset)
     reference_report = report(args.reference, dataset)
-    thinking = bool(engine_contract["generation_config"]["chat_template_kwargs"]
-                    ["enable_thinking"])
+    generation = engine_contract["generation_config"]
+    template = (generation.get("chat_template_kwargs") or
+                (generation.get("extra_body") or {}).get(
+                    "chat_template_kwargs"
+                ) or {})
+    thinking = bool(template.get("enable_thinking"))
     official_score = OFFICIAL_SCORES[thinking][dataset]
     engine_score = engine_report["score"]
     reference_score = reference_report["score"]
