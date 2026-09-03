@@ -61,6 +61,41 @@ Engine 的比较门槛也记录在 `vectors.json`：官方 FP32 PyTorch GEMV 与
 FP32、C++ scalar accumulation”的运算顺序不同，因此用实测的 `max_abs_error <= 5e-4`；每一步
 argmax 仍必须完全相同。这个门槛来自全量 vector regression，不是生成文本后临时放宽的阈值。
 
+## llama.cpp Q8_0 smoke test
+
+`make llama-smoke` 用独立的 llama.cpp 实现检查 9B Q8_0 的端到端 logits。它调用外部
+`llama-debug --save-logits` 和 qwen3x 对称的 `--save-logits` CLI。两边从相同的原始 prompt
+各自 tokenize，token IDs 必须完全相同，然后才比较最后一个位置的完整 logits。三个固定短输入
+分别覆盖单 token、短序列和包含中英文的 20-token 序列；每个输入比较
+完整词表的最大/平均绝对误差、cosine、argmax 和 top-10。固定通过门槛为最大误差不超过
+`0.50`、平均误差不超过 `0.075`、cosine 不低于 `0.9995`、argmax 相同且 top-10 至少重合
+9 项。
+
+对齐路径不做 sampling 或生成，所以 seed、temperature、top-k、top-p 和 max tokens 都不参与。
+两边从 position 0 开始，使用 128-token context 和单次 prefill；llama.cpp 另外固定
+`-b 128 -ub 128 -fa on -ctk f32 -ctv f32 --no-warmup`，qwen3x 使用固定的 CUDA FP32 state。
+
+llama.cpp 不是项目依赖：仓库不包含、下载、编译或链接它，默认 `make test` 也不运行这个
+检查。已经在仓库外准备好与 qwen3x model.bin 来自同一官方 checkpoint 的 Qwen3.5-9B
+Q8_0 GGUF，以及带 CUDA 的 `llama-debug` 后执行：
+
+```sh
+make llama-smoke
+```
+
+默认路径对应 `eval/q8-9b.md` 固定的 llama.cpp b10516 和 Unsloth GGUF。其他位置显式传入：
+
+```sh
+make llama-smoke \
+  LLAMA_DEBUG=/path/to/llama.cpp/build/bin/llama-debug \
+  LLAMA_GGUF=/path/to/Qwen3.5-9B-Q8_0.gguf \
+  QWEN_BIN=/path/to/qwen35-9b-q8_0-model.bin
+```
+
+外部工具缺失时 target 直接报错，不自动安装。整个命令有 15 分钟硬超时；当前 16 GiB CUDA
+测试机的预期耗时是几十秒。这个 smoke test 判断两套完整模型是否数值等价；Q8 block 和
+CPU/CUDA kernel 的局部错误仍由 `test_pack_weights.py`、`q8-cpu-test` 和 CUDA reference 测试定位。
+
 CUDA 实现使用 BF16 checkpoint weights、FP32 activation 和 FP32 cuBLAS accumulation；它保存独立
 CUDA oracle，但同样以紧的 `cuda_max_abs_error = 5e-4` 逐步比较。以后 Tensor-Core BF16-activation
 优化必须新建自己的 reference/contract，不能修改这个 correctness baseline。

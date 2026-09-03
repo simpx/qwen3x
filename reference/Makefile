@@ -24,6 +24,11 @@ BIN ?= $(ENGINE_DIR)/build/qwen35-0.8b-model.bin
 VECTORS ?= build/cpu
 REPORT ?= build/reference-report.json
 CUDA_REPORT ?= build/cuda-reference-report.json
+LLAMA_DEBUG ?= ../build/llama.cpp-b10516/build-cuda/bin/llama-debug
+LLAMA_GGUF ?= ../build/models/Unsloth-Qwen3.5-9B-GGUF/Qwen3.5-9B-Q8_0.gguf
+QWEN ?= ../build/qwen35-cuda
+QWEN_BIN ?= ../build/qwen35-9b-q8_0-model.bin
+QWEN_RENDER ?= ../build/qwen35-0.8b-render.bin
 CXX ?= c++
 CXXFLAGS ?=
 CUDA_LIB_DIR ?= /usr/local/cuda/targets/x86_64-linux/lib
@@ -33,12 +38,16 @@ THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(ENGINE_DIR)/third_party/spdlog/include
 SPDLOG_SRC := $(wildcard $(ENGINE_DIR)/third_party/spdlog/src/*.cpp)
 
-.PHONY: all sync dump test tool-test cpu cuda compare compare-cuda compare-4b compare-cuda-4b serve clean
+.PHONY: all sync dump test tool-test llama-smoke-test cpu cuda compare compare-cuda \
+	compare-4b compare-cuda-4b llama-smoke llama-smoke-run serve clean
 
 all: cpu
 
 tool-test:
 	cd "$(ENGINE_DIR)" && python3 -m unittest -v reference.test_tool_calls
+
+llama-smoke-test:
+	cd "$(ENGINE_DIR)" && python3 -m unittest -v reference.test_compare_llama
 
 sync:
 	$(UV) sync --locked
@@ -86,6 +95,15 @@ compare-cuda-4b:
 	$(MAKE) compare-cuda CUDA_LIBRARY=build/libqwen35-cuda.so BIN=../build/qwen35-4b-model.bin \
 		MODEL=../build/models/Qwen3.5-4B VECTORS=build/4b-mixed-fp32 \
 		CUDA_REPORT=build/4b-reference-report.json COMPARE_ARGS=--behavior-only
+
+llama-smoke:
+	timeout 15m $(MAKE) llama-smoke-run
+
+llama-smoke-run:
+	$(MAKE) -C "$(ENGINE_DIR)" cuda
+	python3 compare_llama.py \
+		--llama-debug "$(LLAMA_DEBUG)" --gguf "$(LLAMA_GGUF)" \
+		--qwen "$(QWEN)" --bin "$(QWEN_BIN)" --render "$(QWEN_RENDER)"
 
 $(LIBRARY): $(ENGINE_DIR)/engine.cpp $(ENGINE_DIR)/runtime.cpp \
 		$(ENGINE_DIR)/log.cpp $(ENGINE_DIR)/qwen35.h \

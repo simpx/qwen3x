@@ -1,11 +1,13 @@
 // main.cpp -- one-process Qwen3.5 inference program.
 //
-//   qwen35 -p "hello"
+//   qwen35 -p "raw prompt"
+//   qwen35 -c "chat message"
 //   qwen35 -l --host 127.0.0.1 --port 8000
 //   qwen35 --bench PREFILL_TOKENS DECODE_TOKENS
 //
-// Prompt mode constructs a ChatRequest directly. Listen mode adds the HTTP/JSON
-// boundary. Bench mode bypasses both renderer and HTTP to measure Session only.
+// Prompt mode tokenizes raw text. Chat mode constructs a ChatRequest directly.
+// Listen mode adds the HTTP/JSON boundary. Bench mode bypasses both renderer and
+// HTTP to measure Session only.
 //
 // Listen mode exposes:
 //   POST /v1/chat/completions
@@ -24,6 +26,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <random>
@@ -46,7 +49,7 @@ constexpr size_t MAX_REQUEST_BYTES = 16 * 1024 * 1024;
 constexpr const char* DEFAULT_MODEL = "qwen35-0.8b-model.bin";
 constexpr const char* DEFAULT_RENDER = "qwen35-0.8b-render.bin";
 
-enum class Mode { None, Prompt, Listen, Bench };
+enum class Mode { None, Prompt, Chat, Listen, Bench };
 
 struct Options {
     Mode mode = Mode::None;
@@ -57,6 +60,7 @@ struct Options {
     std::string served_model = "qwen3.5-0.8b";
     std::string log_file;
     std::string audit_file;
+    std::string logits_output_dir = "data";
     q35_log_level log_level = Q35_LOG_ERROR;
     int port = 8000;
     int slots = 1;
@@ -71,6 +75,8 @@ struct Options {
     bool slots_set = false;
     bool log_level_set = false;
     bool served_model_set = false;
+    bool save_logits = false;
+    bool logits_output_dir_set = false;
     bool mock = false;
 };
 
@@ -276,9 +282,13 @@ bool parse_options(int argc, char** argv, Options* options,
             options->mock = true;
             continue;
         }
+        if (argument == "--save-logits") {
+            options->save_logits = true;
+            continue;
+        }
         if (argument == "-l" || argument == "--listen") {
             if (options->mode != Mode::None) {
-                *error = "choose exactly one of --prompt, --listen, or --bench";
+                *error = "choose exactly one of --prompt, --chat, --listen, or --bench";
                 return false;
             }
             options->mode = Mode::Listen;
@@ -286,7 +296,7 @@ bool parse_options(int argc, char** argv, Options* options,
         }
         if (argument == "--bench") {
             if (options->mode != Mode::None) {
-                *error = "choose exactly one of --prompt, --listen, or --bench";
+                *error = "choose exactly one of --prompt, --chat, --listen, or --bench";
                 return false;
             }
             if (index + 2 >= argc ||
@@ -304,10 +314,17 @@ bool parse_options(int argc, char** argv, Options* options,
         if (!option_value(index, argc, argv, &value, error)) return false;
         if (argument == "-p" || argument == "--prompt") {
             if (options->mode != Mode::None) {
-                *error = "choose exactly one of --prompt, --listen, or --bench";
+                *error = "choose exactly one of --prompt, --chat, --listen, or --bench";
                 return false;
             }
             options->mode = Mode::Prompt;
+            options->prompt = value;
+        } else if (argument == "-c" || argument == "--chat") {
+            if (options->mode != Mode::None) {
+                *error = "choose exactly one of --prompt, --chat, --listen, or --bench";
+                return false;
+            }
+            options->mode = Mode::Chat;
             options->prompt = value;
         } else if (argument == "-m" || argument == "--model") {
             options->model_path = value;
@@ -322,6 +339,9 @@ bool parse_options(int argc, char** argv, Options* options,
             options->log_file = value;
         } else if (argument == "--audit-log") {
             options->audit_file = value;
+        } else if (argument == "--logits-output-dir") {
+            options->logits_output_dir = value;
+            options->logits_output_dir_set = true;
         } else if (argument == "--port") {
             if (!integer(value, &options->port) ||
                 options->port <= 0 || options->port > 65535) {
@@ -387,7 +407,7 @@ bool parse_options(int argc, char** argv, Options* options,
         return false;
     }
     if (options->mode == Mode::None) {
-        *error = "one of -p/--prompt, -l/--listen, or --bench is required";
+        *error = "one of -p/--prompt, -c/--chat, -l/--listen, or --bench is required";
         return false;
     }
     if (options->mode != Mode::Bench && options->render_path.empty()) {
@@ -396,6 +416,14 @@ bool parse_options(int argc, char** argv, Options* options,
     }
     if (!options->audit_file.empty() && options->mode != Mode::Listen) {
         *error = "--audit-log requires --listen";
+        return false;
+    }
+    if (options->save_logits && options->mode != Mode::Prompt) {
+        *error = "--save-logits requires -p/--prompt";
+        return false;
+    }
+    if (options->logits_output_dir_set && !options->save_logits) {
+        *error = "--logits-output-dir requires --save-logits";
         return false;
     }
     if (!options->log_level_set && options->mode == Mode::Listen) {
@@ -422,6 +450,9 @@ void usage(const char* program) {
     std::fprintf(stderr,
         "usage:\n"
         "  %s [-m MODEL] [-r RENDER] -p PROMPT [--max-tokens N]\n"
+        "  %s [-m MODEL] [-r RENDER] -c MESSAGE [--max-tokens N]\n"
+        "  %s [-m MODEL] [-r RENDER] -p PROMPT --save-logits\n"
+        "     [--logits-output-dir DIR]\n"
         "  %s [-m MODEL] [-r RENDER] -l [--host HOST] [--port PORT]\n"
         "  %s [-m MODEL] --bench PREFILL_TOKENS DECODE_TOKENS\n"
         "common: [--session-slots N] [--session-context N] [--mock]\n"
@@ -430,6 +461,7 @@ void usage(const char* program) {
         "defaults: 1 session slot, 40960-token context\n"
         "        log default: info for --listen, error otherwise\n"
         "defaults beside qwen35: %s and %s\n", program, program, program,
+        program, program,
         DEFAULT_MODEL, DEFAULT_RENDER);
 }
 
@@ -1146,23 +1178,89 @@ bool initialize(Runtime* runtime, std::string* error) {
     return true;
 }
 
-int run_prompt(Runtime& runtime, std::string* error) {
+bool save_logits(Runtime& runtime, const q35_render::RenderedPrompt& prompt,
+                 q35_session* session, std::string* error) {
+    static_assert(sizeof(int) == 4, "token files contain int32 values");
+    static_assert(sizeof(float) == 4, "logit files contain float32 values");
+
+    char native_error[ERROR_SIZE]{};
+    if (q35_session_sync(
+            session, prompt.tokens.data(), static_cast<int>(prompt.tokens.size()),
+            -1, nullptr, native_error, sizeof(native_error)) != Q35_OK) {
+        *error = native_error;
+        return false;
+    }
+
+    std::vector<float> logits(static_cast<size_t>(q35_vocab_size()));
+    if (q35_session_copy_logits(
+            session, logits.data(), static_cast<int>(logits.size()),
+            native_error, sizeof(native_error)) != Q35_OK) {
+        *error = native_error;
+        return false;
+    }
+
+    const std::filesystem::path output = runtime.options.logits_output_dir;
+    std::error_code filesystem_error;
+    std::filesystem::create_directories(output, filesystem_error);
+    if (filesystem_error) {
+        *error = "cannot create logits output directory: " + output.string();
+        return false;
+    }
+    const std::string model =
+        std::filesystem::path(runtime.options.model_path).stem().string();
+    const std::filesystem::path base = output / ("qwen3x-" + model);
+
+    {
+        const std::filesystem::path path = base.string() + ".bin";
+        std::ofstream file(path, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(logits.data()),
+                   static_cast<std::streamsize>(logits.size() * sizeof(float)));
+        if (!file) {
+            *error = "cannot write logits file: " + path.string();
+            return false;
+        }
+    }
+    {
+        const std::filesystem::path path = base.string() + "-tokens.bin";
+        std::ofstream file(path, std::ios::binary);
+        file.write(
+            reinterpret_cast<const char*>(prompt.tokens.data()),
+            static_cast<std::streamsize>(prompt.tokens.size() * sizeof(int)));
+        if (!file) {
+            *error = "cannot write token file: " + path.string();
+            return false;
+        }
+    }
+
+    std::printf("logits saved to %s.bin\n", base.c_str());
+    std::printf("tokens saved to %s-tokens.bin\n", base.c_str());
+    return true;
+}
+
+int run_cli(Runtime& runtime, std::string* error) {
     q35_render::CompletionRequest request;
     request.model = runtime.options.served_model;
     request.max_tokens = runtime.options.max_tokens;
     request.temperature = 0.0f;
-    q35_render::Message message;
-    message.role = q35_render::Role::User;
-    message.content = runtime.options.prompt;
-    request.chat.messages.push_back(std::move(message));
 
     q35_render::RenderedPrompt prompt;
-    if (!runtime.renderer->render(request.chat, &prompt, error)) return 1;
+    if (runtime.options.mode == Mode::Prompt) {
+        prompt.text = runtime.options.prompt;
+        if (!runtime.renderer->encode(prompt.text, &prompt.tokens, error)) return 1;
+    } else {
+        q35_render::Message message;
+        message.role = q35_render::Role::User;
+        message.content = runtime.options.prompt;
+        request.chat.messages.push_back(std::move(message));
+        if (!runtime.renderer->render(request.chat, &prompt, error)) return 1;
+    }
     if (prompt.tokens.empty()) {
-        *error = "chat template produced an empty prompt";
+        *error = "prompt produced no tokens";
         return 1;
     }
-    if (prompt.tokens.size() + static_cast<size_t>(request.max_tokens) >
+    const size_t completion_tokens =
+        runtime.options.save_logits ? 0 : static_cast<size_t>(request.max_tokens);
+    if (prompt.tokens.size() + completion_tokens >
         static_cast<size_t>(runtime.options.context)) {
         *error = "prompt and completion exceed --session-context";
         return 1;
@@ -1180,6 +1278,10 @@ int run_prompt(Runtime& runtime, std::string* error) {
     SessionLease lease;
     lease.manager = runtime.manager;
     lease.session = session;
+
+    if (runtime.options.save_logits) {
+        return save_logits(runtime, prompt, session, error) ? 0 : 1;
+    }
 
     GenerationResult result;
     const Publish discard = [](const char*, const std::string&) { return true; };
@@ -1406,8 +1508,9 @@ int main(int argc, char** argv) {
         Runtime runtime;
         runtime.options = std::move(options);
         if (initialize(&runtime, &error)) {
-            if (runtime.options.mode == Mode::Prompt) {
-                result = run_prompt(runtime, &error);
+            if (runtime.options.mode == Mode::Prompt ||
+                runtime.options.mode == Mode::Chat) {
+                result = run_cli(runtime, &error);
             } else {
                 result = serve(runtime, &error);
             }

@@ -25,7 +25,7 @@ NVCCFLAGS ?= -O3 -std=c++17 -arch=$(CUDA_ARCH) \
 .DELETE_ON_ERROR:
 
 .PHONY: all cuda model-4b model-9b serve-4b serve-9b \
-	serve-eval-4b serve-eval-9b test cuda-test clean
+	serve-eval-4b serve-eval-9b test cuda-test llama-smoke clean
 
 all: $(PROGRAM)
 
@@ -94,6 +94,9 @@ test: all
 
 cuda-test: cuda
 	$(MAKE) -C reference compare-cuda PYTHON=python3 VECTORS=build/cpu
+
+llama-smoke:
+	$(MAKE) -C reference llama-smoke
 
 clean:
 	rm -f "$(PROGRAM)" "$(CUDA_PROGRAM)" $(PROGRAM_OBJ) $(PROGRAM_DEP) \

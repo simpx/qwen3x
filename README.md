@@ -102,7 +102,16 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ```sh
 make -C scripts model render
 make -j4
-./build/qwen35 --prompt "hello" --max-tokens 128
+./build/qwen35 --chat "hello" --max-tokens 128
+```
+
+`-c/--chat` 把文本作为一条 user message 套用 Qwen chat template；`-p/--prompt` 直接
+tokenize 原始文本，主要用于续写和 logits 对齐。保存最后一个 prompt 位置的完整 logits：
+
+```sh
+./build/qwen35-cuda -m build/qwen35-9b-q8_0-model.bin \
+  -r build/qwen35-0.8b-render.bin -p "Hello" --session-context 128 \
+  --save-logits --logits-output-dir build/logits
 ```
 
 日常请求可以使用零依赖的薄客户端，不需要手写 JSON：

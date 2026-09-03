@@ -34,7 +34,7 @@ def main():
     args = parser.parse_args()
 
     direct = subprocess.run(
-        [args.program, "--prompt", "hello", "--max-tokens", "3",
+        [args.program, "--chat", "hello", "--max-tokens", "3",
          "--session-context", "256", "--mock"],
         capture_output=True,
         text=True,
@@ -46,7 +46,7 @@ def main():
     with tempfile.TemporaryDirectory() as directory:
         log_file = os.path.join(directory, "qwen35.log")
         logged = subprocess.run(
-            [args.program, "--prompt", "hello", "--max-tokens", "1",
+            [args.program, "--chat", "hello", "--max-tokens", "1",
              "--session-context", "256", "--mock", "--log-level", "info",
              "--log-file", log_file],
             capture_output=True,
@@ -57,6 +57,25 @@ def main():
         assert logged.stderr == "", logged.stderr
         with open(log_file, encoding="utf-8") as stream:
             assert "mock compute enabled" in stream.read()
+
+        logits_directory = os.path.join(directory, "logits")
+        saved = subprocess.run(
+            [args.program, "--prompt", "Hello", "--save-logits",
+             "--logits-output-dir", logits_directory,
+             "--session-context", "128", "--mock"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert saved.returncode == 0, saved.stderr
+        outputs = os.listdir(logits_directory)
+        token_file = next(name for name in outputs if name.endswith("-tokens.bin"))
+        logit_file = next(
+            name for name in outputs
+            if name.endswith(".bin") and not name.endswith("-tokens.bin")
+        )
+        assert os.path.getsize(os.path.join(logits_directory, token_file)) >= 4
+        assert os.path.getsize(os.path.join(logits_directory, logit_file)) > 4
 
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
