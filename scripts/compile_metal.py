@@ -62,7 +62,7 @@ def compile_shaders(output, tools=None):
     with tempfile.TemporaryDirectory(prefix="metal-", dir=output.parent) as directory:
         air = Path(directory) / "kernels.air"
         library = Path(directory) / "kernels.metallib"
-        subprocess.run(compiler + ["-target", "air64-apple-macosx12.0", "-std=metal2.4",
+        subprocess.run(compiler + ["-target", "air64-apple-macosx13.3", "-std=metal2.4",
                                   "-fno-fast-math", "-c", native(source), "-o", native(air)], check=True)
         if not air.is_file() or air.stat().st_size == 0:
             raise RuntimeError("Metal compiler produced no AIR")

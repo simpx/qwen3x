@@ -16,7 +16,7 @@ RENDER_DRIVER ?= $(BUILD)/render-test
 
 CXXFLAGS ?= -O3 -std=c++17 -fno-exceptions -fno-rtti \
 	-Wall -Wextra -Wpedantic $(if $(filter arm64 aarch64,$(shell uname -m)),-mcpu=native,-march=native) \
-	$(if $(filter Darwin,$(shell uname -s)),-mmacosx-version-min=12.0,)
+	$(if $(filter Darwin,$(shell uname -s)),-mmacosx-version-min=13.3,)
 THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(PROJECT)/third_party/spdlog/include
 SPDLOG_SRC := $(wildcard $(PROJECT)/third_party/spdlog/src/*.cpp)

@@ -97,7 +97,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ### Apple Silicon / Metal（实验性，待真机验收）
 
-新增 Metal backend 面向 M1 及更新的 Mac，要求 macOS 12+ 和包含 Metal toolchain 的
+新增 Metal backend 面向 M1 及更新的 Mac，要求 macOS 13.3+ 和包含 Metal toolchain 的
 完整 Xcode。它直接读取现有 0.8B/4B BF16、9B Q8_0 model.bin，无需重新 pack。
 Metal shader 编译后嵌入 `qwen35-metal`，运行时不需要外部 `.metallib`、Python 或第三方
 推理框架。平台接口集中在 `arch/metal/engine.mm`，数学计算在 `kernels.metal`。
