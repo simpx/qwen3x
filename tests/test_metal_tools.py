@@ -39,6 +39,8 @@ class MetalToolsTest(unittest.TestCase):
                     compile_metal.compile_shaders(output)
             self.assertEqual(run.call_count, 1)
             self.assertIn("-fno-fast-math", run.call_args.args[0])
+            self.assertIn("-std=macos-metal2.4", run.call_args.args[0])
+            self.assertIn("air64-apple-macosx13.3", run.call_args.args[0])
 
     @patch.object(compile_metal.sys, "platform", "darwin")
     @patch.object(compile_metal.shutil, "which", return_value="/usr/bin/xcrun")
