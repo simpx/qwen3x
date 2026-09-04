@@ -29,6 +29,23 @@ Python 不参与部署或推理，只用于离线权重转换、render 数据生
 
 ## 使用
 
+项目自带独立的轻量 agent **q3x**（TypeScript + Bun），支持 bash、流式输出、JSONL
+记录与恢复、手动/自动上下文压缩。构建后的单个可执行文件无需安装 Bun 或 Node：
+
+```sh
+cd agent && bun install --frozen-lockfile && cd ..
+make q3x
+build/q3x --help
+```
+
+在另一个终端运行 `make serve-9b` 后，进入工作项目运行
+`/path/to/qwen3x/build/q3x --thinking off`。服务默认地址为 `http://127.0.0.1:8000/v1`，
+也可通过 `--base-url` 连接其他标准服务器。完整用法和独立构建说明见
+[`agent/README.md`](agent/README.md)。`make q3x-test` 运行 agent 测试；测试设计和真实模型
+验收结果见 [`agent/TESTING.md`](agent/TESTING.md)。
+
+下面保留已验证的 pi 工作流：
+
 日常只需要两个终端。
 
 终端一，在 qwen3x 中启动 9B Q8_0 服务：

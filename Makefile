@@ -11,6 +11,7 @@ METAL_FLAGS := -fobjc-arc -mmacosx-version-min=13.3
 METAL_FRAMEWORKS := -framework Foundation -framework Metal
 GPU_BACKEND := $(if $(filter Darwin,$(shell uname -s)),metal,cuda)
 GPU_PROGRAM := $(if $(filter metal,$(GPU_BACKEND)),$(METAL_PROGRAM),$(CUDA_PROGRAM))
+BUN ?= bun
 NATIVE_FLAGS := $(if $(filter arm64 aarch64,$(shell uname -m)),-mcpu=native,-march=native)
 PLATFORM_FLAGS := $(if $(filter Darwin,$(shell uname -s)),-mmacosx-version-min=13.3,)
 
@@ -40,6 +41,13 @@ NVCCFLAGS ?= -O3 -std=c++17 -arch=$(CUDA_ARCH) \
 	serve-eval-4b serve-eval-9b test cuda-test llama-smoke clean
 
 all: $(PROGRAM)
+
+.PHONY: q3x q3x-test
+q3x:
+	$(MAKE) -C agent build BUN="$(BUN)" BUILD="$(abspath $(BUILD))"
+
+q3x-test:
+	$(MAKE) -C agent test BUN="$(BUN)"
 
 cuda: $(CUDA_PROGRAM)
 
