@@ -1,7 +1,16 @@
 UV ?= uv
+SYSTEM_PYTHON ?= python3
 EVAL_DIR := $(CURDIR)
 PROJECT ?= ..
 PROJECT := $(abspath $(PROJECT))
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+EVAL_DATASET_HUB ?= huggingface
+SMOKE_TIMEOUT ?= 43200
+else
+EVAL_DATASET_HUB ?= modelscope
+SMOKE_TIMEOUT ?= 1800
+endif
 SERVER ?= http://127.0.0.1:8000
 TOKENIZER ?= $(abspath ../build/models/Qwen3.5-0.8B)
 BIN ?= build/qwen35-4b-model.bin
@@ -46,6 +55,7 @@ run:
 		--backend "$(EVAL_BACKEND)" \
 		--artifact "$(EVAL_ARTIFACT)" \
 		--dataset "$(EVAL_DATASET)" \
+		--dataset-hub "$(EVAL_DATASET_HUB)" \
 		$(LIMIT_ARG) \
 		$(RESUME_ARG) \
 		$(THINKING_ARG) \
@@ -57,7 +67,7 @@ run:
 		--output "$(EVAL_OUTPUT)"
 
 smoke:
-	timeout --signal=TERM --kill-after=15s 30m $(MAKE) smoke-run
+	$(SYSTEM_PYTHON) "$(EVAL_DIR)/timeout.py" $(SMOKE_TIMEOUT) 15 $(MAKE) smoke-run
 
 smoke-run:
 	for dataset in mmlu_pro ceval ifeval; do \
@@ -74,7 +84,7 @@ smoke-4b:
 
 smoke-9b:
 	$(MAKE) smoke EVAL_MODEL=qwen3.5-9b \
-		TOKENIZER="$(PROJECT)/build/models/Qwen3.5-4B" \
+		TOKENIZER="$(PROJECT)/build/models/Qwen3.5-9B" \
 		EVAL_ARTIFACT="$(PROJECT)/build/qwen35-9b-q8_0-model.bin" \
 		EVAL_OUTPUT="$(EVAL_DIR)/results/smoke/9b"
 

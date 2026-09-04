@@ -109,7 +109,8 @@ serve-eval-4b: $(GPU_BACKEND)
 	$(GPU_PROGRAM) --model "$(BUILD)/qwen35-4b-model.bin" \
 		--render "$(BUILD)/qwen35-0.8b-render.bin" --listen \
 		--host 127.0.0.1 --port 8000 --session-slots 1 \
-		--session-context 65536 --audit-log "$(BUILD)/qwen35-4b-eval-audit.log"
+		--session-context 65536 --request-timeout 7200 \
+		--audit-log "$(BUILD)/qwen35-4b-eval-audit.log"
 
 serve-eval-9b: $(GPU_BACKEND)
 	test -f "$(BUILD)/qwen35-9b-q8_0-model.bin" || { echo "run: make model-9b"; exit 1; }
@@ -117,7 +118,8 @@ serve-eval-9b: $(GPU_BACKEND)
 	$(GPU_PROGRAM) --model "$(BUILD)/qwen35-9b-q8_0-model.bin" \
 		--render "$(BUILD)/qwen35-0.8b-render.bin" --listen \
 		--host 127.0.0.1 --port 8000 --session-slots 1 \
-		--session-context 65536 --audit-log "$(BUILD)/qwen35-9b-eval-audit.log"
+		--session-context 65536 --request-timeout 7200 \
+		--audit-log "$(BUILD)/qwen35-9b-eval-audit.log"
 
 $(PROGRAM): $(PROGRAM_OBJ)
 	mkdir -p $(BUILD)

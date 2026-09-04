@@ -72,11 +72,19 @@ cd /path/to/project
 make model-9b
 ```
 
+在 Apple Silicon Mac 上，`make serve-9b` 和 `make serve-eval-9b` 自动选择 Metal；Linux
+选择 CUDA。原生 CPU binary `build/qwen35` 继续作为 correctness baseline，其中 Q8_0 dot
+使用 Arm NEON，较大的矩阵按行通过系统线程池并行。9B 的 65,536-token CPU eval Session
+需要约 13--15 GiB 统一内存，因此建议至少 24 GiB 内存；eval 服务使用 7,200 秒请求上限，
+以容纳长 thinking 输出。M5 Pro 48 GB 的 CPU baseline、容量和六题 smoke 记录在
+[`eval/q8-9b-macos.md`](eval/q8-9b-macos.md)。
+
 它下载固定 revision 的官方 Qwen3.5-9B BF16 checkpoint，并在 `build/` 直接生成约
 8.86 GiB 的 9B Q8_0 model bin，以及共享的 Qwen3.5 render 数据。量化只改变权重；activation、
 recurrent state、KV cache、workspace 和 logits 仍是 FP32。`make serve-9b` 会检查产物并在
-缺失时提示运行上述命令。环境需要 CUDA Toolkit、
-[uv](https://docs.astral.sh/uv/)、Node >= 22.19 和 pi 0.84.4。
+缺失时提示运行上述命令。准备模型需要 [uv](https://docs.astral.sh/uv/)；Linux CUDA 服务
+另需 CUDA Toolkit。运行 pi 另需 Node >= 22.19；固定版本安装命令是
+`npm install -g @earendil-works/pi-coding-agent@0.84.4`。
 
 当前路线在 RTX 4080 SUPER 16 GiB、CUDA 12.8、Node 22.19.0 上验证，使用 40960
 context。pi 可以流式 thinking 和 tool calls，完成分段读文件、review diff、修改文件和
@@ -110,7 +118,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 完整启动参数可以用 `make -n serve-9b` 查看。`serve-4b` 和 `serve-9b` 都固定监听
 `127.0.0.1:8000`，使用一个 40960-token Session；需要其他参数时直接运行
-`build/qwen35-cuda`。
+Apple Silicon Metal 的 `build/qwen35-metal`、CPU baseline 的 `build/qwen35`，或 Linux
+CUDA 的 `build/qwen35-cuda`。
 
 ### Apple Silicon / Metal（实验性，待真机验收）
 

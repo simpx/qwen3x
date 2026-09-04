@@ -21,9 +21,16 @@ HERE = Path(__file__).resolve().parent
 PROJECT = HERE.parent
 SUPPORTED_DATASETS = ("mmlu_pro", "ceval", "ifeval")
 DATASET_SOURCES = {
-    "mmlu_pro": {"hub": "modelscope", "id": "TIGER-Lab/MMLU-Pro", "revision": "master"},
-    "ceval": {"hub": "modelscope", "id": "evalscope/ceval", "revision": "master"},
-    "ifeval": {"hub": "modelscope", "id": "opencompass/ifeval", "revision": "master"},
+    "modelscope": {
+        "mmlu_pro": {"id": "TIGER-Lab/MMLU-Pro", "revision": "master"},
+        "ceval": {"id": "evalscope/ceval", "revision": "master"},
+        "ifeval": {"id": "opencompass/ifeval", "revision": "master"},
+    },
+    "huggingface": {
+        "mmlu_pro": {"id": "TIGER-Lab/MMLU-Pro", "revision": "main"},
+        "ceval": {"id": "ceval/ceval-exam", "revision": "main"},
+        "ifeval": {"id": "google/IFEval", "revision": "main"},
+    },
 }
 DATASET_SUBSETS = {"mmlu_pro": 14, "ceval": 52, "ifeval": 1}
 DATASET_TOTAL_SAMPLES = {"mmlu_pro": 12032, "ceval": 1346, "ifeval": 541}
@@ -334,6 +341,8 @@ def parse_args() -> argparse.Namespace:
                         default=PROJECT / "build/models/Qwen3.5-0.8B")
     parser.add_argument("--dataset", choices=SUPPORTED_DATASETS,
                         default="mmlu_pro")
+    parser.add_argument("--dataset-hub", choices=tuple(DATASET_SOURCES),
+                        default="modelscope")
     parser.add_argument("--samples", type=int,
                         help="approximate total samples, stratified across subsets")
     parser.add_argument("--thinking", action="store_true")
@@ -396,11 +405,10 @@ def main() -> None:
         args.max_tokens,
         args.request_timeout,
     )
-    dataset_args = {}
+    dataset_source = DATASET_SOURCES[args.dataset_hub][args.dataset]
+    dataset_args = {args.dataset: {"dataset_id": dataset_source["id"]}}
     if args.smoke:
-        dataset_args = {
-            args.dataset: {"subset_list": SMOKE_SUBSETS[args.dataset]}
-        }
+        dataset_args[args.dataset]["subset_list"] = SMOKE_SUBSETS[args.dataset]
 
     # EvalScope's integer limit applies independently to every subset. Convert
     # the user-facing approximate total into a per-subset count, giving a small
@@ -434,7 +442,7 @@ def main() -> None:
 
     run_contract = {
         "dataset": args.dataset,
-        "dataset_source": DATASET_SOURCES[args.dataset],
+        "dataset_source": {"hub": args.dataset_hub, **dataset_source},
         "evalscope_version": version("evalscope"),
         "dataset_args": dataset_args,
         "model": args.model,
@@ -519,6 +527,7 @@ def main() -> None:
         eval_type="openai_api",
         datasets=[args.dataset],
         dataset_args=dataset_args,
+        dataset_hub=args.dataset_hub,
         limit=evalscope_limit,
         eval_batch_size=args.concurrency,
         generation_config=generation,

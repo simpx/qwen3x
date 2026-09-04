@@ -35,8 +35,8 @@ def latest_runs(root: Path, size: str) -> dict[str, tuple[Path, dict]]:
         dataset = contract.get("dataset")
         if dataset not in DATASETS or contract.get("model") != f"qwen3.5-{size}":
             continue
-        if contract.get("dataset_args") != {
-                dataset: {"subset_list": SMOKE_SUBSETS[dataset]}}:
+        dataset_args = (contract.get("dataset_args") or {}).get(dataset) or {}
+        if dataset_args.get("subset_list") != SMOKE_SUBSETS[dataset]:
             continue
         if (manifest.get("prediction_summary") or {}).get("samples") != 2:
             continue

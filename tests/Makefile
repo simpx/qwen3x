@@ -70,7 +70,7 @@ agent-test:
 		-s tests -p 'test_agent*.py' -v
 
 pack-test:
-	cd "$(PROJECT)" && $(SYSTEM_PYTHON) -m unittest discover \
+	cd "$(PROJECT)" && $(PYTHON) -m unittest discover \
 		-s tests -p test_pack_weights.py -v
 
 metal-tools-test:

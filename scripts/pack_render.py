@@ -152,11 +152,18 @@ def nfc_tables():
         probe = "A" + high + character + low
         return oracle_nfd.normalize_str(probe) != probe
 
-    representatives = {
-        value: character
-        for value, character in representatives.items()
-        if has_combining_class(character)
-    }
+    # Python may know newer Unicode characters than the Rust unicode-normalization
+    # version used by tokenizers.  Pick the first character for each class that
+    # the oracle itself recognizes instead of dropping the whole class when
+    # Python's first representative is too new (for example U+1DFA vs U+302A).
+    representatives = {}
+    for codepoint in range(0x110000):
+        if 0xD800 <= codepoint <= 0xDFFF:
+            continue
+        character = chr(codepoint)
+        value = unicodedata.combining(character)
+        if value and value not in representatives and has_combining_class(character):
+            representatives[value] = character
 
     def combining_class(character):
         if not has_combining_class(character):

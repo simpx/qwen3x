@@ -110,10 +110,10 @@ int main(int argc, char** argv) {
             std::cout << hex(rendered.text) << '\n';
         }
     } else if (mode == "chat" || mode == "chat-ids") {
-        const std::string input(
+        const std::string input {
             std::istreambuf_iterator<char>(std::cin),
             std::istreambuf_iterator<char>()
-        );
+        };
         ChatRequest request;
         const q35_render::Status status = parse_chat_request(input, request);
         if (!status.ok()) return report(status.message());

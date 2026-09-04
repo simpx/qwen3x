@@ -39,8 +39,9 @@ EvalScope prompt/few-shot，并采用 Qwen 公开推荐参数：thinking、`temp
 `top_p=0.95`、`top_k=20`、`min_p=0`、`presence_penalty=1.5`、
 `repetition_penalty=1.0`、`max_tokens=32768`、seed 42。
 
-每个模型有 30 分钟硬截止；超时即失败，不报告残缺分数。先在一个终端启动评测服务，再在
-另一个终端运行对应 smoke：
+Linux 每个模型有 30 分钟硬截止；Apple Silicon 的 CPU baseline 最坏可能生成完整 32K
+thinking 输出，因此使用 12 小时硬截止。两者都可通过 `SMOKE_TIMEOUT=秒数` 覆盖；超时即
+失败，不报告残缺分数。先在一个终端启动评测服务，再在另一个终端运行对应 smoke：
 
 ```sh
 make serve-eval-4b

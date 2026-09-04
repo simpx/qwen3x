@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -188,6 +189,23 @@ int main() {
             assert(embedding[block * q35_q8::BLOCK_SIZE + index] == value);
         }
     }
+
+    // Exercise the macOS row-parallel path, whose threshold deliberately
+    // stays above the tiny fixed-vector check above.
+    constexpr int rows = 1024;
+    std::vector<q35_q8::Block> parallel_weights(rows * 2);
+    for (int row = 0; row < rows; ++row) {
+        parallel_weights[row * 2] = blocks[0];
+        parallel_weights[row * 2 + 1] = blocks[1];
+    }
+    std::vector<float> parallel_output(rows);
+    q35_backend::Linear parallel_matrix {
+        parallel_weights.data(), rows, 64, q35_model::MATRIX_Q8_0,
+    };
+    q35_backend::mv(parallel_matrix, input, parallel_output.data());
+    for (float value : parallel_output)
+        assert(std::abs(value - expected[0]) < 1e-6f);
+
     loader_test();
     std::puts("q8-cpu-test: ok");
 }
