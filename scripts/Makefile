@@ -1,6 +1,6 @@
 PROJECT := $(abspath ..)
 BUILD ?= $(PROJECT)/build
-UV ?= uv
+UV ?= $(if $(wildcard $(BUILD)/bootstrap-venv/bin/uv),$(BUILD)/bootstrap-venv/bin/uv,uv)
 HF ?= $(UV) run --project "$(CURDIR)" --locked hf
 PYTHON ?= $(UV) run --project "$(CURDIR)" --locked python
 

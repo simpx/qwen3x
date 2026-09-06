@@ -2,7 +2,13 @@ PROJECT := $(abspath ..)
 BUILD ?= $(PROJECT)/build
 CXX ?= c++
 UV ?= uv
-PYTHON ?= $(UV) run --project "$(PROJECT)/scripts" --locked python
+ifneq ($(strip $(PYTHON)),)
+PYTHON := $(PYTHON)
+else ifneq ($(wildcard $(PROJECT)/eval/.venv/bin/python),)
+PYTHON := $(PROJECT)/eval/.venv/bin/python
+else
+PYTHON := $(UV) run --project "$(PROJECT)/scripts" --locked python
+endif
 SYSTEM_PYTHON ?= python3
 PI ?= pi
 
@@ -21,9 +27,14 @@ THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(PROJECT)/third_party/spdlog/include
 SPDLOG_SRC := $(wildcard $(PROJECT)/third_party/spdlog/src/*.cpp)
 
-.PHONY: test parser-test runtime-test q8-cpu-test cli-test chat-test agent-test pack-test metal-tools-test render-test http-test pi-retry-test clean
+.PHONY: test parser-test runtime-test q8-cpu-test cli-test chat-test agent-test \
+	pack-test metal-tools-test bench-test render-test http-test pi-retry-test clean
 
-test: parser-test runtime-test q8-cpu-test cli-test chat-test agent-test pack-test metal-tools-test
+test: parser-test runtime-test q8-cpu-test cli-test chat-test agent-test \
+	pack-test metal-tools-test bench-test
+
+bench-test:
+	cd "$(PROJECT)" && $(SYSTEM_PYTHON) -m unittest -v tests.test_bench_session
 
 $(PARSER_TEST): parser_test.cpp $(PROJECT)/parser.cpp $(PROJECT)/render.cpp \
 		$(PROJECT)/render.h \

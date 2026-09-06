@@ -19,11 +19,13 @@ jobs:
       - name: Install pack-test dependency (Python 3.10 pin from scripts/uv.lock)
         run: python3 -m pip install numpy==2.2.6
       - name: Build and run unit tests
-        run: make test
+        run: make test PYTHON=python3
 
   macos:
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -32,7 +34,13 @@ jobs:
       - name: Install pack-test dependency (Python 3.10 pin from scripts/uv.lock)
         run: python3 -m pip install numpy==2.2.6
       - name: Build and run CPU tests on Apple Silicon
-        run: make -j3 test
+        run: make -j3 test PYTHON=python3
+      - name: Install the pinned Metal 4 toolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -downloadComponent MetalToolchain
+          xcrun --toolchain Metal --find metal
+          xcrun --toolchain Metal --find metallib
       - name: Compile Metal shaders, engine and numerical smoke test
         run: make -j3 metal build/metal-test metal-library
       - name: Run Metal numerical smoke when a GPU is exposed

@@ -59,6 +59,10 @@ make -C eval smoke-report
 RoPE 或 forward；只要没有触顶，65,536 与更大的预分配容量计算相同。报告同时记录实际
 context、最大 prompt 和剩余 headroom。
 
+`eval/Makefile` 会优先使用仓库内的 `eval/.venv/bin/python`；没有该环境时才调用
+`uv run --locked`。也可以显式传入 `PYTHON=/path/to/python`，避免把评测环境与生产
+Runtime 混用。
+
 Qwen 没有公开模型卡成绩使用的完整 harness 和逐 benchmark prompt，因此不能声称严格复现
 其内部评测。`smoke-report` 输出本地 4B BF16、9B Q8_0、官方完整集分数和差值；smoke 只有
 6 题，且使用 EvalScope 的公开 prompt，差值用于快速发现明显退化，不是对官方完整集的统计

@@ -7,13 +7,13 @@ METAL_PROGRAM := $(BUILD)/qwen35-metal
 METAL_CXX ?= clang++
 METAL_DIR := $(BUILD)/metal
 METAL_OBJ := $(BUILD)/obj/arch/metal/engine.o
-METAL_FLAGS := -fobjc-arc -mmacosx-version-min=13.3
+METAL_FLAGS := -fobjc-arc
 METAL_FRAMEWORKS := -framework Foundation -framework Metal
 GPU_BACKEND := $(if $(filter Darwin,$(shell uname -s)),metal,cuda)
 GPU_PROGRAM := $(if $(filter metal,$(GPU_BACKEND)),$(METAL_PROGRAM),$(CUDA_PROGRAM))
 BUN ?= bun
 NATIVE_FLAGS := $(if $(filter arm64 aarch64,$(shell uname -m)),-mcpu=native,-march=native)
-PLATFORM_FLAGS := $(if $(filter Darwin,$(shell uname -s)),-mmacosx-version-min=13.3,)
+PLATFORM_FLAGS := $(if $(filter Darwin,$(shell uname -s)),-mmacosx-version-min=26.3,)
 
 CXXFLAGS ?= -O3 -std=c++17 -fno-exceptions -fno-rtti \
 	-Wall -Wextra -Wpedantic $(NATIVE_FLAGS) $(PLATFORM_FLAGS)

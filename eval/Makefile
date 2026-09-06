@@ -39,7 +39,16 @@ LIMIT_ARG := $(if $(EVAL_LIMIT),--samples "$(EVAL_LIMIT)",)
 RESUME_ARG := $(if $(EVAL_RESUME),--resume "$(EVAL_RESUME)",)
 THINKING_ARG := $(if $(filter 1 true yes,$(EVAL_THINKING)),--thinking,)
 SMOKE_ARG := $(if $(filter 1 true yes,$(EVAL_SMOKE)),--smoke,)
+# Prefer the repository-local locked environment when it is already present.
+# This keeps the make targets usable on a machine without the optional uv CLI;
+# callers can still override PYTHON or UV explicitly.
+ifneq ($(strip $(PYTHON)),)
+PYTHON := $(PYTHON)
+else ifneq ($(wildcard $(EVAL_DIR)/.venv/bin/python),)
+PYTHON := $(EVAL_DIR)/.venv/bin/python
+else
 PYTHON := $(UV) run --project "$(EVAL_DIR)" --locked python
+endif
 
 .PHONY: test run smoke smoke-run smoke-4b smoke-9b smoke-report \
 	reference compare agent-eval

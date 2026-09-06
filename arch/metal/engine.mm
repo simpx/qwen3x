@@ -306,8 +306,7 @@ void forward(id<MTLComputeCommandEncoder> enc, const Model& model, State& state,
 bool Model::load(const char* path, const char** error) {
     auto fail = [&](const char* message) { *error = message; return false; };
     device = MTLCreateSystemDefaultDevice();
-    if (!device || !device.hasUnifiedMemory || ![device supportsFamily:MTLGPUFamilyApple7])
-        return fail("Metal requires an Apple Silicon GPU (M1 or newer)");
+    if (!device) return fail("Metal device unavailable");
     if (!kernels.load(device, error)) return false;
     const int fd = open(path, O_RDONLY);
     if (fd < 0) return fail("cannot open model.bin");

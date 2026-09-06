@@ -121,10 +121,11 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 Apple Silicon Metal 的 `build/qwen35-metal`、CPU baseline 的 `build/qwen35`，或 Linux
 CUDA 的 `build/qwen35-cuda`。
 
-### Apple Silicon / Metal（实验性，待真机验收）
+### Apple M5 Pro / Metal 4（实验性）
 
-新增 Metal backend 面向 M1 及更新的 Mac，要求 macOS 13.3+ 和包含 Metal toolchain 的
-完整 Xcode。它直接读取现有 0.8B/4B BF16、9B Q8_0 model.bin，无需重新 pack。
+Metal backend 固定使用 Apple M5 Pro、macOS 26.3+、Xcode 26.6 和 Metal 4.0，不维护旧
+系统、旧 Xcode 或其他 GPU 的兼容路径。它直接读取现有 0.8B/4B BF16、9B Q8_0
+model.bin，无需重新 pack。
 Metal shader 编译后嵌入 `qwen35-metal`，运行时不需要外部 `.metallib`、Python 或第三方
 推理框架。平台接口集中在 `arch/metal/engine.mm`，数学计算在 `kernels.metal`。
 
@@ -134,6 +135,10 @@ Metal shader 编译后嵌入 `qwen35-metal`，运行时不需要外部 `.metalli
 make -j3 metal
 MTL_DEBUG_LAYER=1 make metal-test
 ```
+
+Xcode 26 的 Metal 编译器是独立可选组件，先在 Xcode 设置中安装。构建脚本只调用
+`xcrun --toolchain Metal`，并固定 `metal4.0` 与 `air64-apple-macosx26.3`；缺少指定环境
+就直接失败，不探测或回退到其他工具链。运行已编译的可执行文件不需要 Xcode。
 
 `metal-test` 用非零随机小模型，对比 CPU/Metal 的 BF16 和 Q8_0 完整 forward、每步
 logits、recurrent/KV state、prefill、checkpoint restore 和 reset；没有可用 GPU 时返回
@@ -157,18 +162,20 @@ logits、recurrent/KV state、prefill、checkpoint restore 和 reset；没有可
 context 的真实内存占用尚未测量。9B 的权重本身约 8.86 GiB，统一内存还要供系统、KV
 和 recurrent state 使用；不要按 CUDA 显存数字直接推断 Mac 的可用容量。
 
-WSL 现在能运行 `make test`；安装 Apple 官方
-[Metal Developer Tools for Windows](https://developer.apple.com/metal/tools/) 后还能运行：
+性能改动统一用同一 Engine、单 Session 测量；每种 prompt 长度先预热一次，再取三次
+中位数：
 
 ```sh
-make metal-shaders
-# 工具不在 PATH 或默认安装目录时：
-python3 scripts/compile_metal.py --tools '/mnt/c/path/to/Metal/bin'
+make metal-library
+caffeinate -i python3 scripts/bench_session.py \
+  --library build/metal/libqwen35-metal.dylib \
+  --model build/qwen35-9b-q8_0-model.bin --output build/bench-9b.json
 ```
 
-下载需要 Apple 登录，项目不会自动登录或安装。该命令仅编译 shader，不执行 GPU，也不
-生成 macOS 可执行文件。当前 WSL 上尚未安装该工具；Metal 编译已由 macOS CI 验证，
-GPU 执行仍需真实 Mac。
+这个入口不绑定具体模型，可通过 `--model`、`--context`、`--prompts` 和 `--decode` 用于
+后续 27B 验收。测试 dylib 只调用与可执行文件相同的 C ABI，不是运行或分发依赖。
+测量期间应停止其他推理服务；输出路径必须不存在，以保留每轮原始证据。报告记录 load、
+prefill、decode、runtime TTFT、Darwin peak footprint、swap 变化和 memory pressure。
 
 完整 0.8B 官方 FP32 oracle 验证入口为 `make metal-reference`，复用
 [`reference/`](reference/README.md) 的 `build/cpu` 向量、相同误差契约和逐 token/cache
