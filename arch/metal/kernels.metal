@@ -62,6 +62,18 @@ kernel void embed_q4(device const Q4Block* w [[buffer(0)]],
         out[i] = float(as_type<half>(b.scale)) * q4(b, i % 32);
     }
 }
+kernel void batch_embed_q4(device const Q4Block* w [[buffer(0)]],
+                           device float* out [[buffer(1)]],
+                           constant int* tokens [[buffer(2)]],
+                           constant uint2& p [[buffer(3)]],
+                           uint i [[thread_position_in_grid]]) {
+    if (i < p.x * p.y) {
+        const uint token_index = i / p.x, hidden = i % p.x;
+        device const Q4Block& b =
+            w[ulong(tokens[token_index]) * (p.x / 32) + hidden / 32];
+        out[i] = float(as_type<half>(b.scale)) * q4(b, hidden % 32);
+    }
+}
 // p = {columns, add_to_output}. One group reduces one matrix row.
 kernel void mv_bf16(device const ushort* w [[buffer(0)]],
                     device const float* x [[buffer(1)]], device float* out [[buffer(2)]],
@@ -100,16 +112,12 @@ kernel void mv_q4(device const Q4Block* w [[buffer(0)]],
             device const Q4Block& b = w[ulong(row) * blocks + column / 32];
             const uint offset = column % 16;
             const uint shift = column % 32 < 16 ? 0 : 4;
-            const float4 low = float4(
-                int((b.values[offset] >> shift) & 15) - 8,
-                int((b.values[offset + 1] >> shift) & 15) - 8,
-                int((b.values[offset + 2] >> shift) & 15) - 8,
-                int((b.values[offset + 3] >> shift) & 15) - 8);
-            const float4 high = float4(
-                int((b.values[offset + 4] >> shift) & 15) - 8,
-                int((b.values[offset + 5] >> shift) & 15) - 8,
-                int((b.values[offset + 6] >> shift) & 15) - 8,
-                int((b.values[offset + 7] >> shift) & 15) - 8);
+            const uchar4 packed0 = *reinterpret_cast<device const uchar4*>(
+                b.values + offset);
+            const uchar4 packed1 = *reinterpret_cast<device const uchar4*>(
+                b.values + offset + 4);
+            const float4 low = float4((packed0 >> shift) & 15) - 8.0f;
+            const float4 high = float4((packed1 >> shift) & 15) - 8.0f;
             const float scale = float(as_type<half>(b.scale));
             sums[part] += scale *
                 (dot(low, *reinterpret_cast<device const float4*>(x + column)) +
@@ -141,16 +149,12 @@ kernel void batch_mv_q4(device const Q4Block* w [[buffer(0)]],
             device const Q4Block& b = w[ulong(row) * blocks + column / 32];
             const uint offset = column % 16;
             const uint shift = column % 32 < 16 ? 0 : 4;
-            const float4 low = float4(
-                int((b.values[offset] >> shift) & 15) - 8,
-                int((b.values[offset + 1] >> shift) & 15) - 8,
-                int((b.values[offset + 2] >> shift) & 15) - 8,
-                int((b.values[offset + 3] >> shift) & 15) - 8);
-            const float4 high = float4(
-                int((b.values[offset + 4] >> shift) & 15) - 8,
-                int((b.values[offset + 5] >> shift) & 15) - 8,
-                int((b.values[offset + 6] >> shift) & 15) - 8,
-                int((b.values[offset + 7] >> shift) & 15) - 8);
+            const uchar4 packed0 = *reinterpret_cast<device const uchar4*>(
+                b.values + offset);
+            const uchar4 packed1 = *reinterpret_cast<device const uchar4*>(
+                b.values + offset + 4);
+            const float4 low = float4((packed0 >> shift) & 15) - 8.0f;
+            const float4 high = float4((packed1 >> shift) & 15) - 8.0f;
             const float scale = float(as_type<half>(b.scale));
             #pragma unroll
             for (uint token_part = 0; token_part < TOKEN_TILE; ++token_part) {
@@ -189,6 +193,28 @@ kernel void rms(device const float* x [[buffer(0)]], device const ushort* w [[bu
 kernel void swiglu(device float* gate [[buffer(0)]], device const float* up [[buffer(1)]],
                     constant uint& n [[buffer(2)]], uint i [[thread_position_in_grid]]) {
     if (i < n) gate[i] = silu(gate[i]) * up[i];
+}
+kernel void batch_rms(device const float* input [[buffer(0)]],
+                      device const ushort* w [[buffer(1)]],
+                      device float* output [[buffer(2)]],
+                      constant uint2& p [[buffer(3)]],
+                      uint token [[threadgroup_position_in_grid]],
+                      uint tid [[thread_index_in_threadgroup]]) {
+    if (token >= p.y) return;
+    device const float* x = input + ulong(token) * p.x;
+    device float* out = output + ulong(token) * p.x;
+    float square = 0.0f;
+    for (uint i = tid; i < p.x; i += BLOCK) square += x[i] * x[i];
+    threadgroup float shared[BLOCK];
+    const float scale = rsqrt(sum_group(square, shared, tid) / p.x + EPS);
+    for (uint i = tid; i < p.x; i += BLOCK)
+        out[i] = x[i] * scale * (1.0f + bf16(w[i]));
+}
+kernel void batch_swiglu(device float* gate [[buffer(0)]],
+                         device const float* up [[buffer(1)]],
+                         constant uint2& p [[buffer(2)]],
+                         uint i [[thread_position_in_grid]]) {
+    if (i < p.x * p.y) gate[i] = silu(gate[i]) * up[i];
 }
 kernel void conv(device float* qkv [[buffer(0)]], device const ushort* w [[buffer(1)]],
                   device float* history [[buffer(2)]], constant uint& n [[buffer(3)]],
@@ -246,6 +272,94 @@ kernel void gated_rms(device float* values [[buffer(0)]], device const float* w 
     threadgroup float shared[BLOCK];
     const float scale = rsqrt(sum_group(x * x, shared, tid) / VD + EPS);
     if (tid < VD) values[i] = x * scale * w[tid] * silu(gate[i]);
+}
+kernel void batch_conv(device float* qkv [[buffer(0)]],
+                       device const ushort* w [[buffer(1)]],
+                       device float* history [[buffer(2)]],
+                       constant uint2& p [[buffer(3)]],
+                       uint channel [[thread_position_in_grid]]) {
+    if (channel >= p.y) return;
+    device float* past = history + ulong(channel) * (CK - 1);
+    for (uint token = 0; token < p.x; ++token) {
+        device float& value = qkv[ulong(token) * p.y + channel];
+        float sum = value * bf16(w[channel * CK + CK - 1]);
+        for (uint i = 0; i < CK - 1; ++i)
+            sum += past[i] * bf16(w[channel * CK + i]);
+        for (uint i = 0; i < CK - 2; ++i) past[i] = past[i + 1];
+        past[CK - 2] = value;
+        value = silu(sum);
+    }
+}
+kernel void batch_prepare_delta_qk(device const float* qkv [[buffer(0)]],
+                                   device float* query [[buffer(1)]],
+                                   device float* key [[buffer(2)]],
+                                   constant uint4& p [[buffer(3)]],
+                                   uint2 group [[threadgroup_position_in_grid]],
+                                   uint tid [[thread_index_in_threadgroup]]) {
+    const uint head = group.x, token = group.y;
+    if (token >= p.x || head >= p.z) return;
+    const uint source = head / (p.z / KH) * KD;
+    const ulong base = ulong(token) * p.y;
+    const float q = tid < KD ? qkv[base + source + tid] : 0.0f;
+    const float k = tid < KD ? qkv[base + KH * KD + source + tid] : 0.0f;
+    threadgroup float shared[BLOCK];
+    const float qs = rsqrt(sum_group(q * q, shared, tid) + EPS) / sqrt(float(KD));
+    const float ks = rsqrt(sum_group(k * k, shared, tid) + EPS);
+    if (tid < KD) {
+        const ulong out = (ulong(token) * p.z + head) * KD + tid;
+        query[out] = q * qs;
+        key[out] = k * ks;
+    }
+}
+kernel void batch_delta_rule(device const float* q [[buffer(0)]],
+                             device const float* k [[buffer(1)]],
+                             device const float* qkv [[buffer(2)]],
+                             device const float* a [[buffer(3)]],
+                             device const float* b [[buffer(4)]],
+                             device const float* alog [[buffer(5)]],
+                             device const ushort* dt [[buffer(6)]],
+                             device float* memory [[buffer(7)]],
+                             device float* out [[buffer(8)]],
+                             constant uint4& p [[buffer(9)]],
+                             uint head [[threadgroup_position_in_grid]],
+                             uint tid [[thread_index_in_threadgroup]]) {
+    if (head >= p.z || tid >= VD) return;
+    device float* state = memory + ulong(head) * KD * VD;
+    for (uint token = 0; token < p.x; ++token) {
+        const ulong scalar = ulong(token) * p.z + head;
+        const float decay = exp(-exp(alog[head]) *
+                                softplus(a[scalar] + bf16(dt[head])));
+        const float beta = sigmoid(b[scalar]);
+        const ulong qk = scalar * KD;
+        float predicted = 0.0f;
+        for (uint i = 0; i < KD; ++i) {
+            state[i * VD + tid] *= decay;
+            predicted += k[qk + i] * state[i * VD + tid];
+        }
+        const ulong value = ulong(token) * p.y + 2 * KH * KD + head * VD + tid;
+        const float delta = beta * (qkv[value] - predicted);
+        float result = 0.0f;
+        for (uint i = 0; i < KD; ++i) {
+            state[i * VD + tid] += k[qk + i] * delta;
+            result += q[qk + i] * state[i * VD + tid];
+        }
+        out[(ulong(token) * p.z + head) * VD + tid] = result;
+    }
+}
+kernel void batch_gated_rms(device float* values [[buffer(0)]],
+                            device const float* w [[buffer(1)]],
+                            device const float* gate [[buffer(2)]],
+                            constant uint2& p [[buffer(3)]],
+                            uint2 group [[threadgroup_position_in_grid]],
+                            uint tid [[thread_index_in_threadgroup]]) {
+    const uint head = group.x, token = group.y;
+    if (token >= p.x || head >= p.y) return;
+    const ulong base = (ulong(token) * p.y + head) * VD;
+    const float x = tid < VD ? values[base + tid] : 0.0f;
+    threadgroup float shared[BLOCK];
+    const float scale = rsqrt(sum_group(x * x, shared, tid) / VD + EPS);
+    if (tid < VD)
+        values[base + tid] = x * scale * w[tid] * silu(gate[base + tid]);
 }
 kernel void prepare_query(device const float* packed [[buffer(0)]],
                            device const ushort* norm [[buffer(1)]],
@@ -308,4 +422,95 @@ kernel void attention(device const float* query [[buffer(0)]], device const floa
         maximum = next_maximum;
     }
     out[head * AD + tid] = accumulator / denominator * sigmoid(gate[head * AD + tid]);
+}
+kernel void batch_prepare_query(device const float* packed [[buffer(0)]],
+                                device const ushort* norm [[buffer(1)]],
+                                device float* query [[buffer(2)]],
+                                device float* gate [[buffer(3)]],
+                                constant uint4& p [[buffer(4)]],
+                                uint2 group [[threadgroup_position_in_grid]],
+                                uint tid [[thread_index_in_threadgroup]]) {
+    const uint head = group.x, token = group.y;
+    if (token >= p.y || head >= p.z) return;
+    const ulong packed_base = ulong(token) * 2 * p.z * AD + head * 2 * AD;
+    const ulong out_base = (ulong(token) * p.z + head) * AD;
+    threadgroup float shared[BLOCK], q[AD];
+    const float x = packed[packed_base + tid];
+    const float scale = rsqrt(sum_group(x * x, shared, tid) / AD + EPS);
+    q[tid] = x * scale * (1.0f + bf16(norm[tid]));
+    gate[out_base + tid] = packed[packed_base + AD + tid];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float value = q[tid];
+    if (tid < RD) {
+        const uint i = tid % (RD / 2);
+        const float angle = (p.x + token) / pow(THETA, 2.0f * i / RD);
+        value = tid < RD / 2 ? q[i] * cos(angle) - q[i + RD / 2] * sin(angle)
+                            : q[i + RD / 2] * cos(angle) + q[i] * sin(angle);
+    }
+    query[out_base + tid] = value;
+}
+kernel void batch_prepare_key(device float* key [[buffer(0)]],
+                              device const ushort* norm [[buffer(1)]],
+                              constant uint4& p [[buffer(2)]],
+                              uint2 group [[threadgroup_position_in_grid]],
+                              uint tid [[thread_index_in_threadgroup]]) {
+    const uint head = group.x, token = group.y;
+    if (token >= p.y || head >= p.z) return;
+    const ulong base = (ulong(token) * p.z + head) * AD;
+    threadgroup float shared[BLOCK], k[AD];
+    const float x = key[base + tid];
+    const float scale = rsqrt(sum_group(x * x, shared, tid) / AD + EPS);
+    k[tid] = x * scale * (1.0f + bf16(norm[tid]));
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float value = k[tid];
+    if (tid < RD) {
+        const uint i = tid % (RD / 2);
+        const float angle = (p.x + token) / pow(THETA, 2.0f * i / RD);
+        value = tid < RD / 2 ? k[i] * cos(angle) - k[i + RD / 2] * sin(angle)
+                            : k[i + RD / 2] * cos(angle) + k[i] * sin(angle);
+    }
+    key[base + tid] = value;
+}
+kernel void batch_store_kv(device const float* key [[buffer(0)]],
+                           device const float* value [[buffer(1)]],
+                           device float* kc [[buffer(2)]],
+                           device float* vc [[buffer(3)]],
+                           constant uint4& p [[buffer(4)]],
+                           uint i [[thread_position_in_grid]]) {
+    if (i < p.y * p.z) {
+        const uint token = i / p.z, lane = i % p.z;
+        const ulong destination = ulong(p.x + token) * p.z + lane;
+        kc[destination] = key[i];
+        vc[destination] = value[i];
+    }
+}
+kernel void batch_attention(device const float* query [[buffer(0)]],
+                            device const float* gate [[buffer(1)]],
+                            device const float* kc [[buffer(2)]],
+                            device const float* vc [[buffer(3)]],
+                            device float* out [[buffer(4)]],
+                            constant uint4& p [[buffer(5)]],
+                            uint2 group [[threadgroup_position_in_grid]],
+                            uint tid [[thread_index_in_threadgroup]]) {
+    const uint head = group.x, token_index = group.y;
+    if (token_index >= p.y || head >= p.z) return;
+    const uint kv_head = head / (p.z / p.w);
+    const uint position = p.x + token_index;
+    const ulong query_base = (ulong(token_index) * p.z + head) * AD;
+    const float q = query[query_base + tid];
+    float accumulator = 0.0f, maximum = -INFINITY, denominator = 0.0f;
+    threadgroup float shared[BLOCK];
+    for (uint token = 0; token <= position; ++token) {
+        const ulong offset = (ulong(token) * p.w + kv_head) * AD;
+        const float score = sum_group(q * kc[offset + tid], shared, tid) /
+                            sqrt(float(AD));
+        const float next_maximum = max(maximum, score);
+        const float alpha = exp(maximum - next_maximum);
+        const float beta = exp(score - next_maximum);
+        accumulator = accumulator * alpha + beta * vc[offset + tid];
+        denominator = denominator * alpha + beta;
+        maximum = next_maximum;
+    }
+    out[query_base + tid] = accumulator / denominator *
+                            sigmoid(gate[query_base + tid]);
 }

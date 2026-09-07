@@ -1,6 +1,7 @@
 // Qwen Metal engine. This platform boundary uses Objective-C++ and system
 // frameworks only. Model owns packed weights; State owns shared GPU buffers.
-// Prefill initially repeats the same readable FP32-activation token forward.
+// Decode uses the readable single-token forward. Q4 prefill keeps recurrent
+// operations token-ordered while batching its matrix projections.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
@@ -27,7 +28,7 @@
 
 namespace q3x_backend {
 
-constexpr int BLOCK = 256, ENCODE_TOKENS = 8;
+constexpr int BLOCK = 256, ENCODE_TOKENS = 8, Q4_BATCH_TOKENS = 4;
 struct Linear {
     size_t offset = 0;
     int rows = 0, cols = 0;
@@ -46,10 +47,15 @@ struct Layer {
     AttentionWeights attention;
 };
 struct Kernels {
-    id<MTLComputePipelineState> embed_bf16, embed_q8, embed_q4;
-    id<MTLComputePipelineState> mv_bf16, mv_q8, mv_q4, batch_mv_q4, rms, swiglu;
+    id<MTLComputePipelineState> embed_bf16, embed_q8, embed_q4, batch_embed_q4;
+    id<MTLComputePipelineState> mv_bf16, mv_q8, mv_q4, batch_mv_q4;
+    id<MTLComputePipelineState> rms, swiglu, batch_rms, batch_swiglu;
     id<MTLComputePipelineState> conv, prepare_delta_qk, delta_rule, gated_rms;
+    id<MTLComputePipelineState> batch_conv, batch_prepare_delta_qk;
+    id<MTLComputePipelineState> batch_delta_rule, batch_gated_rms;
     id<MTLComputePipelineState> prepare_query, prepare_key, store_kv, attention;
+    id<MTLComputePipelineState> batch_prepare_query, batch_prepare_key;
+    id<MTLComputePipelineState> batch_store_kv, batch_attention;
     bool load(id<MTLDevice> device, const char** error) {
         dispatch_data_t data = dispatch_data_create(kernels_metallib, kernels_metallib_len,
                                                     nullptr, ^{});
@@ -71,12 +77,23 @@ struct Kernels {
         };
         embed_bf16 = make("embed_bf16"); embed_q8 = make("embed_q8");
         embed_q4 = make("embed_q4");
+        batch_embed_q4 = make("batch_embed_q4");
         mv_bf16 = make("mv_bf16"); mv_q8 = make("mv_q8"); mv_q4 = make("mv_q4");
         batch_mv_q4 = make("batch_mv_q4");
-        rms = make("rms"); swiglu = make("swiglu"); conv = make("conv");
+        rms = make("rms"); swiglu = make("swiglu");
+        batch_rms = make("batch_rms"); batch_swiglu = make("batch_swiglu");
+        conv = make("conv");
         prepare_delta_qk = make("prepare_delta_qk"); delta_rule = make("delta_rule");
         gated_rms = make("gated_rms"); prepare_query = make("prepare_query");
+        batch_conv = make("batch_conv");
+        batch_prepare_delta_qk = make("batch_prepare_delta_qk");
+        batch_delta_rule = make("batch_delta_rule");
+        batch_gated_rms = make("batch_gated_rms");
         prepare_key = make("prepare_key"); store_kv = make("store_kv"); attention = make("attention");
+        batch_prepare_query = make("batch_prepare_query");
+        batch_prepare_key = make("batch_prepare_key");
+        batch_store_kv = make("batch_store_kv");
+        batch_attention = make("batch_attention");
         return !*error;
     }
 };
@@ -131,6 +148,31 @@ struct Work {
         Q3X_ASSERT(storage.used == storage.count, "Metal Work layout mismatch");
     }
 };
+struct BatchWork {
+    Storage storage;
+    size_t hidden, normalized, ffn_gate, ffn_up;
+    size_t delta_qkv, delta_z, delta_a, delta_b, delta_q, delta_k, delta_output;
+    size_t query_and_gate, query, attention_gate, key, value, attention_output;
+    BatchWork(id<MTLDevice> device, const q3x_model::ModelConfig& c) {
+        const int DO = c.VH * c.VD, DQKV = 2 * c.KH * c.KD + DO;
+        const int AS = c.AH * c.AD, KVW = c.KVH * c.AD;
+        const size_t stride = 2ull * c.H + 2ull * c.I + DQKV + 4ull * DO +
+                              2ull * c.VH + 5ull * AS + 2ull * KVW;
+        storage.allocate(device, Q4_BATCH_TOKENS * stride);
+        auto take = [&](size_t width) {
+            return storage.take(Q4_BATCH_TOKENS * width);
+        };
+        hidden = take(c.H); normalized = take(c.H);
+        ffn_gate = take(c.I); ffn_up = take(c.I);
+        delta_qkv = take(DQKV); delta_z = take(DO);
+        delta_a = take(c.VH); delta_b = take(c.VH);
+        delta_q = take(DO); delta_k = take(DO); delta_output = take(DO);
+        query_and_gate = take(2 * AS); query = take(AS);
+        attention_gate = take(AS); key = take(KVW); value = take(KVW);
+        attention_output = take(AS);
+        Q3X_ASSERT(storage.used == storage.count, "Metal BatchWork layout mismatch");
+    }
+};
 struct LayerState { size_t conv = 0, memory = 0, key = 0, value = 0; };
 struct State {
     const q3x_model::ModelConfig* config;
@@ -139,8 +181,10 @@ struct State {
     std::unique_ptr<LayerState[]> layer;
     Storage recurrent, kv, checkpoint;
     Work work;
+    BatchWork batch;
     State(Model& model, int context) : config(model.config), capacity(context),
-                                       work(model.device, *model.config) {
+                                       work(model.device, *model.config),
+                                       batch(model.device, *model.config) {
         const auto& c = *config;
         Q3X_ASSERT(c.AD == 256 && c.RD == 64 && c.KH == 16 && c.KD == 128 && c.VD == 128 && c.CK == 4,
                    "Metal fixed dimensions model=%s", c.name);
@@ -163,7 +207,7 @@ struct State {
         std::memset(work.storage.data(work.logits), 0, c.V * sizeof(float));
         const size_t state_bytes =
             (recurrent.count + kv.count + checkpoint.count +
-             work.storage.count) * sizeof(float);
+             work.storage.count + batch.storage.count) * sizeof(float);
         LOG_INFO("Metal state model=%s context=%d bytes=%zu allocated=%llu",
                  c.name, context, state_bytes,
                  static_cast<unsigned long long>(model.device.currentAllocatedSize));
@@ -302,6 +346,206 @@ void ffn(id<MTLComputeCommandEncoder> enc, const Model& model, Work& work, const
     [enc setBytes:&n length:sizeof(n) atIndex:2];
     launch(enc, model.kernels.swiglu, (n + BLOCK - 1) / BLOCK);
     mv(enc, model, layer.weights, layer.down, work, work.ffn_gate, work.hidden, true);
+}
+
+size_t batch_at(size_t base, int token, int width) {
+    return base + static_cast<size_t>(token) * width * sizeof(float);
+}
+void batch_embed_q4(id<MTLComputeCommandEncoder> enc, const Model& model,
+                    BatchWork& work, const int* tokens, int count) {
+    const Linear& w = model.embedding;
+    const uint32_t p[] = {static_cast<uint32_t>(w.cols),
+                          static_cast<uint32_t>(count)};
+    [enc setBuffer:model.weights offset:w.offset atIndex:0];
+    [enc setBuffer:work.storage.buffer offset:work.hidden atIndex:1];
+    [enc setBytes:tokens length:static_cast<size_t>(count) * sizeof(int) atIndex:2];
+    [enc setBytes:p length:sizeof(p) atIndex:3];
+    launch(enc, model.kernels.batch_embed_q4,
+           (count * w.cols + BLOCK - 1) / BLOCK);
+}
+void batch_mv_q4(id<MTLComputeCommandEncoder> enc, const Model& model,
+                 id<MTLBuffer> weights, const Linear& w, BatchWork& work,
+                 size_t input, size_t output, int count, bool add = false) {
+    Q3X_ASSERT(w.type == q3x_model::MATRIX_Q4_0, "Metal batch matrix type=%d",
+               static_cast<int>(w.type));
+    const uint32_t p[] = {static_cast<uint32_t>(w.rows),
+                          static_cast<uint32_t>(w.cols),
+                          static_cast<uint32_t>(count), add ? 1u : 0u};
+    [enc setBuffer:weights offset:w.offset atIndex:0];
+    [enc setBuffer:work.storage.buffer offset:input atIndex:1];
+    [enc setBuffer:work.storage.buffer offset:output atIndex:2];
+    [enc setBytes:p length:sizeof(p) atIndex:3];
+    launch_grid(enc, model.kernels.batch_mv_q4,
+                MTLSizeMake(w.rows, (count + 3) / 4, 1),
+                MTLSizeMake(32, 1, 1));
+}
+void batch_rms(id<MTLComputeCommandEncoder> enc, const Model& model,
+               id<MTLBuffer> weights, size_t weight, BatchWork& work,
+               size_t input, size_t output, int width, int count) {
+    const uint32_t p[] = {static_cast<uint32_t>(width),
+                          static_cast<uint32_t>(count)};
+    [enc setBuffer:work.storage.buffer offset:input atIndex:0];
+    [enc setBuffer:weights offset:weight atIndex:1];
+    [enc setBuffer:work.storage.buffer offset:output atIndex:2];
+    [enc setBytes:p length:sizeof(p) atIndex:3];
+    launch(enc, model.kernels.batch_rms, count);
+}
+void batch_deltanet_q4(id<MTLComputeCommandEncoder> enc, const Model& model,
+                       State& state, const Layer& layer,
+                       const LayerState& history, int count) {
+    const DeltaWeights& w = layer.delta;
+    BatchWork& work = state.batch;
+    const auto& c = *model.config;
+    const int DO = c.VH * c.VD, DQKV = 2 * c.KH * c.KD + DO;
+    batch_mv_q4(enc, model, layer.weights, w.qkv, work,
+                work.normalized, work.delta_qkv, count);
+    batch_mv_q4(enc, model, layer.weights, w.z, work,
+                work.normalized, work.delta_z, count);
+    batch_mv_q4(enc, model, layer.weights, w.a, work,
+                work.normalized, work.delta_a, count);
+    batch_mv_q4(enc, model, layer.weights, w.b, work,
+                work.normalized, work.delta_b, count);
+    const uint32_t conv[] = {static_cast<uint32_t>(count),
+                             static_cast<uint32_t>(DQKV)};
+    [enc setBuffer:work.storage.buffer offset:work.delta_qkv atIndex:0];
+    [enc setBuffer:layer.weights offset:w.conv atIndex:1];
+    [enc setBuffer:state.recurrent.buffer offset:history.conv atIndex:2];
+    [enc setBytes:conv length:sizeof(conv) atIndex:3];
+    launch(enc, model.kernels.batch_conv, (DQKV + BLOCK - 1) / BLOCK);
+    const uint32_t p[] = {static_cast<uint32_t>(count),
+                          static_cast<uint32_t>(DQKV),
+                          static_cast<uint32_t>(c.VH), 0};
+    [enc setBuffer:work.storage.buffer offset:work.delta_qkv atIndex:0];
+    [enc setBuffer:work.storage.buffer offset:work.delta_q atIndex:1];
+    [enc setBuffer:work.storage.buffer offset:work.delta_k atIndex:2];
+    [enc setBytes:p length:sizeof(p) atIndex:3];
+    launch_grid(enc, model.kernels.batch_prepare_delta_qk,
+                MTLSizeMake(c.VH, count, 1), MTLSizeMake(BLOCK, 1, 1));
+    [enc setBuffer:work.storage.buffer offset:work.delta_q atIndex:0];
+    [enc setBuffer:work.storage.buffer offset:work.delta_k atIndex:1];
+    [enc setBuffer:work.storage.buffer offset:work.delta_qkv atIndex:2];
+    [enc setBuffer:work.storage.buffer offset:work.delta_a atIndex:3];
+    [enc setBuffer:work.storage.buffer offset:work.delta_b atIndex:4];
+    [enc setBuffer:layer.weights offset:w.alog atIndex:5];
+    [enc setBuffer:layer.weights offset:w.dt atIndex:6];
+    [enc setBuffer:state.recurrent.buffer offset:history.memory atIndex:7];
+    [enc setBuffer:work.storage.buffer offset:work.delta_output atIndex:8];
+    [enc setBytes:p length:sizeof(p) atIndex:9];
+    launch(enc, model.kernels.batch_delta_rule, c.VH);
+    const uint32_t gated[] = {static_cast<uint32_t>(count),
+                              static_cast<uint32_t>(c.VH)};
+    [enc setBuffer:work.storage.buffer offset:work.delta_output atIndex:0];
+    [enc setBuffer:layer.weights offset:w.norm atIndex:1];
+    [enc setBuffer:work.storage.buffer offset:work.delta_z atIndex:2];
+    [enc setBytes:gated length:sizeof(gated) atIndex:3];
+    launch_grid(enc, model.kernels.batch_gated_rms,
+                MTLSizeMake(c.VH, count, 1), MTLSizeMake(BLOCK, 1, 1));
+    batch_mv_q4(enc, model, layer.weights, w.out, work,
+                work.delta_output, work.hidden, count, true);
+}
+void batch_attention_q4(id<MTLComputeCommandEncoder> enc, const Model& model,
+                        State& state, const Layer& layer,
+                        const LayerState& history, int count) {
+    const AttentionWeights& w = layer.attention;
+    BatchWork& work = state.batch;
+    const auto& c = *model.config;
+    const int KVW = c.KVH * c.AD;
+    batch_mv_q4(enc, model, layer.weights, w.q, work,
+                work.normalized, work.query_and_gate, count);
+    batch_mv_q4(enc, model, layer.weights, w.k, work,
+                work.normalized, work.key, count);
+    batch_mv_q4(enc, model, layer.weights, w.v, work,
+                work.normalized, work.value, count);
+    const uint32_t query[] = {static_cast<uint32_t>(state.position),
+                              static_cast<uint32_t>(count),
+                              static_cast<uint32_t>(c.AH), 0};
+    [enc setBuffer:work.storage.buffer offset:work.query_and_gate atIndex:0];
+    [enc setBuffer:layer.weights offset:w.qnorm atIndex:1];
+    [enc setBuffer:work.storage.buffer offset:work.query atIndex:2];
+    [enc setBuffer:work.storage.buffer offset:work.attention_gate atIndex:3];
+    [enc setBytes:query length:sizeof(query) atIndex:4];
+    launch_grid(enc, model.kernels.batch_prepare_query,
+                MTLSizeMake(c.AH, count, 1), MTLSizeMake(BLOCK, 1, 1));
+    const uint32_t key[] = {static_cast<uint32_t>(state.position),
+                            static_cast<uint32_t>(count),
+                            static_cast<uint32_t>(c.KVH), 0};
+    [enc setBuffer:work.storage.buffer offset:work.key atIndex:0];
+    [enc setBuffer:layer.weights offset:w.knorm atIndex:1];
+    [enc setBytes:key length:sizeof(key) atIndex:2];
+    launch_grid(enc, model.kernels.batch_prepare_key,
+                MTLSizeMake(c.KVH, count, 1), MTLSizeMake(BLOCK, 1, 1));
+    const uint32_t cache[] = {static_cast<uint32_t>(state.position),
+                              static_cast<uint32_t>(count),
+                              static_cast<uint32_t>(KVW), 0};
+    [enc setBuffer:work.storage.buffer offset:work.key atIndex:0];
+    [enc setBuffer:work.storage.buffer offset:work.value atIndex:1];
+    [enc setBuffer:state.kv.buffer offset:history.key atIndex:2];
+    [enc setBuffer:state.kv.buffer offset:history.value atIndex:3];
+    [enc setBytes:cache length:sizeof(cache) atIndex:4];
+    launch(enc, model.kernels.batch_store_kv,
+           (count * KVW + BLOCK - 1) / BLOCK);
+    const uint32_t p[] = {static_cast<uint32_t>(state.position),
+                          static_cast<uint32_t>(count),
+                          static_cast<uint32_t>(c.AH),
+                          static_cast<uint32_t>(c.KVH)};
+    [enc setBuffer:work.storage.buffer offset:work.query atIndex:0];
+    [enc setBuffer:work.storage.buffer offset:work.attention_gate atIndex:1];
+    [enc setBuffer:state.kv.buffer offset:history.key atIndex:2];
+    [enc setBuffer:state.kv.buffer offset:history.value atIndex:3];
+    [enc setBuffer:work.storage.buffer offset:work.attention_output atIndex:4];
+    [enc setBytes:p length:sizeof(p) atIndex:5];
+    launch_grid(enc, model.kernels.batch_attention,
+                MTLSizeMake(c.AH, count, 1), MTLSizeMake(BLOCK, 1, 1));
+    batch_mv_q4(enc, model, layer.weights, w.out, work,
+                work.attention_output, work.hidden, count, true);
+}
+void batch_ffn_q4(id<MTLComputeCommandEncoder> enc, const Model& model,
+                  BatchWork& work, const Layer& layer, int count) {
+    batch_mv_q4(enc, model, layer.weights, layer.gate, work,
+                work.normalized, work.ffn_gate, count);
+    batch_mv_q4(enc, model, layer.weights, layer.up, work,
+                work.normalized, work.ffn_up, count);
+    const uint32_t p[] = {static_cast<uint32_t>(model.config->I),
+                          static_cast<uint32_t>(count)};
+    [enc setBuffer:work.storage.buffer offset:work.ffn_gate atIndex:0];
+    [enc setBuffer:work.storage.buffer offset:work.ffn_up atIndex:1];
+    [enc setBytes:p length:sizeof(p) atIndex:2];
+    launch(enc, model.kernels.batch_swiglu,
+           (count * model.config->I + BLOCK - 1) / BLOCK);
+    batch_mv_q4(enc, model, layer.weights, layer.down, work,
+                work.ffn_gate, work.hidden, count, true);
+}
+void prefill_q4(id<MTLComputeCommandEncoder> enc, const Model& model,
+                State& state, const int* tokens, int count,
+                bool compute_logits) {
+    Q3X_ASSERT(count > 0 && count <= Q4_BATCH_TOKENS,
+               "Metal Q4 prefill count=%d", count);
+    const auto& c = *model.config;
+    BatchWork& work = state.batch;
+    batch_embed_q4(enc, model, work, tokens, count);
+    for (int i = 0; i < c.N; ++i) {
+        const Layer& layer = model.layer[i];
+        batch_rms(enc, model, layer.weights, layer.input_norm, work,
+                  work.hidden, work.normalized, c.H, count);
+        if (i % c.AI != c.AI - 1)
+            batch_deltanet_q4(enc, model, state, layer, state.layer[i], count);
+        else
+            batch_attention_q4(enc, model, state, layer, state.layer[i], count);
+        batch_rms(enc, model, layer.weights, layer.post_norm, work,
+                  work.hidden, work.normalized, c.H, count);
+        batch_ffn_q4(enc, model, work, layer, count);
+    }
+    if (compute_logits) {
+        const uint32_t n = c.H;
+        [enc setBuffer:work.storage.buffer
+             offset:batch_at(work.hidden, count - 1, c.H) atIndex:0];
+        [enc setBuffer:model.weights offset:model.final_norm atIndex:1];
+        [enc setBuffer:state.work.storage.buffer offset:state.work.normalized atIndex:2];
+        [enc setBytes:&n length:sizeof(n) atIndex:3];
+        launch(enc, model.kernels.rms, 1);
+        mv(enc, model, model.weights, model.lm_head, state.work,
+           state.work.normalized, state.work.logits);
+    }
 }
 void forward(id<MTLComputeCommandEncoder> enc, const Model& model, State& state,
               int token, bool compute_logits) {
@@ -443,6 +687,33 @@ void state_reset(State* state) {
 }
 void state_forward(Model* model, State* state, const int* tokens, int count, bool logits) {
     Q3X_ASSERT(model && state && tokens && count > 0, "Metal forward count=%d", count);
+    Q3X_ASSERT(state->position >= 0 && state->position + count <= state->capacity,
+               "Metal forward position=%d count=%d capacity=%d",
+               state->position, count, state->capacity);
+    for (int i = 0; i < count; ++i)
+        Q3X_ASSERT(tokens[i] >= 0 && tokens[i] < model->config->V,
+                   "Metal forward token[%d]=%d vocabulary=%d",
+                   i, tokens[i], model->config->V);
+    if (model->config->matrix_type == q3x_model::MATRIX_Q4_0 && count > 1) {
+        for (int start = 0; start < count; start += Q4_BATCH_TOKENS) {
+            @autoreleasepool {
+                const int chunk = std::min(Q4_BATCH_TOKENS, count - start);
+                id<MTLCommandBuffer> command = [state->queue commandBuffer];
+                id<MTLComputeCommandEncoder> enc = [command computeCommandEncoder];
+                Q3X_ASSERT(command && enc, "Metal command allocation failed");
+                prefill_q4(enc, *model, *state, tokens + start, chunk,
+                           logits && start + chunk == count);
+                [enc endEncoding]; [command commit]; [command waitUntilCompleted];
+                Q3X_ASSERT(command.status == MTLCommandBufferStatusCompleted,
+                           "Metal execution failed: %s",
+                           command.error
+                               ? command.error.localizedDescription.UTF8String
+                               : "no error detail");
+                state->position += chunk;
+            }
+        }
+        return;
+    }
     // Bound command-buffer memory for long prompts. Runtime already splits the
     // range at checkpoint_at; no encoded chunk crosses that boundary.
     for (int start = 0; start < count; start += ENCODE_TOKENS) {
