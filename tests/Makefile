@@ -27,7 +27,8 @@ CXXFLAGS ?= -O3 -std=c++17 -fno-exceptions -fno-rtti \
 THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(PROJECT)/third_party/spdlog/include
 CPU_SRC := $(PROJECT)/arch/cpu.cpp
-CPU_HEADERS := $(wildcard $(PROJECT)/arch/*.h $(PROJECT)/arch/arm/*.h $(PROJECT)/arch/x86/*.h $(PROJECT)/arch/apple/*.h)
+CPU_HEADERS := $(PROJECT)/q4.h $(PROJECT)/q8.h \
+	$(wildcard $(PROJECT)/arch/*.h $(PROJECT)/arch/arm/*.h $(PROJECT)/arch/x86/*.h $(PROJECT)/arch/apple/*.h)
 CPU_FLAGS := -DQ3X_CPU_OPT=$(CPU_OPT)
 SPDLOG_SRC := $(wildcard $(PROJECT)/third_party/spdlog/src/*.cpp)
 

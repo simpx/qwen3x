@@ -40,7 +40,8 @@ ENGINE_CXXFLAGS := -O3 -std=c++17 -fno-exceptions -fno-rtti \
 THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(ENGINE_DIR)/third_party/spdlog/include
 CPU_SRC := $(ENGINE_DIR)/arch/cpu.cpp
-CPU_HEADERS := $(wildcard $(ENGINE_DIR)/arch/*.h $(ENGINE_DIR)/arch/arm/*.h $(ENGINE_DIR)/arch/x86/*.h $(ENGINE_DIR)/arch/apple/*.h)
+CPU_HEADERS := $(ENGINE_DIR)/q4.h $(ENGINE_DIR)/q8.h \
+	$(wildcard $(ENGINE_DIR)/arch/*.h $(ENGINE_DIR)/arch/arm/*.h $(ENGINE_DIR)/arch/x86/*.h $(ENGINE_DIR)/arch/apple/*.h)
 SPDLOG_SRC := $(wildcard $(ENGINE_DIR)/third_party/spdlog/src/*.cpp)
 
 .PHONY: all sync dump test tool-test llama-smoke-test cpu cuda compare compare-cuda compare-metal \

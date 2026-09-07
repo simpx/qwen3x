@@ -334,8 +334,8 @@ audit 按事件记录原始请求、render prompt、模型输出、工具解析�
 ## 目录
 
 ```text
-engine.cpp          CPU 朴素算子、Model/State 与完整单 token forward
-arch/cpu.cpp        CPU 加速入口与平台选择；不拥有模型或状态
+engine.cpp          BF16 朴素算子、Model/State 与完整单 token forward
+arch/cpu.cpp        CPU 量化标量实现、架构选择与扩展入口
 arch/arm/           ARM NEON 算子
 arch/x86/           x86 AVX-512 算子
 arch/apple/         Apple GCD 行并行调度
@@ -356,10 +356,23 @@ build/              下载的 checkpoint、生成的模型和编译产物
 model 和 render 数据保持分开：各官方型号只管理自己的权重文件，固定的
 `qwen3x-render.bin` 保存所有支持型号共享的 tokenizer 数据。
 
-`engine.cpp` 保留完整的标量公式。`mv` 和 FP32 `dot` 先尝试 `arch/cpu.h` 的同步
-加速入口；返回 `false` 时输出未被修改，继续执行当前文件的朴素循环。SIMD 与系统
-线程调度在 `arch/` 内组合，CPU 优化不复制 forward，也不修改 Model/State 布局。
-CUDA 和 Metal 继续保留适合各自内存与执行方式的完整 forward。
+`engine.cpp` 保留 Linear、BF16 权重读取和 embed/mv/dot 的朴素公式，可以在同一文件
+读完 BF16 模型的数据流。embedding 是取一行并转成 FP32；mv 是每行与输入向量做点积。
+`try_embed` / `try_mv` 用一行调用接入 `arch/cpu.h`。CPU 扩展入口先尝试架构加速，
+再执行 `arch/cpu.cpp` 内的量化标量实现；完成计算返回 `true`，BF16 回退返回 `false` 且不修改
+输出，继续执行 engine 内的公式。FP32 dot 同样保留在 engine。未知格式触发内部不变量
+检查，不会按 BF16 解释。`CPU_OPT=0` 只关闭架构加速，量化计算始终可用。
+
+量化 payload 的大小通过 `q3x_cpu::quantized_bytes` 查询。engine 直接计算 BF16 大小，
+并负责所有权重的加载顺序、文件对齐、边界和 EOF 检查；CPU 扩展入口不拥有模型或状态。
+
+`arch/cpu.cpp` 依次组织量化标量实现、架构加速辅助函数和公开入口。量化实现按 Q8_0、
+Q4_0 分组，并位于 `CPU_OPT` 条件之外；共享的 block 布局仍在 `q8.h`、`q4.h`。后续其他
+Q4 编码需要独立的格式标识、存储布局、实现和测试；仅位数相同不能共用解码规则。
+格式与 model ID 的映射仍在 `model_config.h`，packer 必须产出对应布局。
+
+SIMD 与线程调度在 `arch/` 内组合。CUDA 和 Metal 保留各自的权重表示、格式分派与完整
+forward；新增格式的 GPU 支持需在对应 backend 单独实现。
 
 默认 `make` 使用本机指令集选择手写优化；没有对应实现时自动回退。教学和数值对照可用：
 

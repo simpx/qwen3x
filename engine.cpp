@@ -18,8 +18,6 @@
 
 #include "internal.h"
 #include "model_config.h"
-#include "q4.h"
-#include "q8.h"
 #include "qwen3x.h"
 
 namespace q3x_backend {
@@ -35,6 +33,7 @@ struct Linear {
     int rows = 0, cols = 0;
     q3x_model::MatrixType type = q3x_model::MATRIX_BF16;
 };
+
 struct DeltaWeights {
     Linear qkv, z, a, b, out;
     const BF16* conv = nullptr;
@@ -166,28 +165,6 @@ FP32 f32(BF16 value) {
     std::memcpy(&result, &bits, sizeof(result));
     return result;
 }
-FP32 f16(uint16_t value) {
-    const uint32_t sign = static_cast<uint32_t>(value & 0x8000u) << 16;
-    uint32_t exponent = (value >> 10) & 0x1fu;
-    uint32_t mantissa = value & 0x03ffu;
-    uint32_t bits = 0;
-    if (exponent == 0) {
-        if (mantissa == 0) {
-            bits = sign;
-        } else {
-            exponent = 113;
-            while (!(mantissa & 0x0400u)) { mantissa <<= 1; --exponent; }
-            bits = sign | (exponent << 23) | ((mantissa & 0x03ffu) << 13);
-        }
-    } else if (exponent == 31) {
-        bits = sign | 0x7f800000u | (mantissa << 13);
-    } else {
-        bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
-    }
-    FP32 result;
-    std::memcpy(&result, &bits, sizeof(result));
-    return result;
-}
 FP32 sigmoid(FP32 x) {
     if (x >= 0.0f) return 1.0f / (1.0f + std::exp(-x));
     const FP32 e = std::exp(x); return e / (1.0f + e);
@@ -195,90 +172,24 @@ FP32 sigmoid(FP32 x) {
 FP32 silu(FP32 x) { return x * sigmoid(x); }
 FP32 softplus(FP32 x) { return x > 20.0f ? x : std::log1p(std::exp(x)); }
 
-void embed_bf16(const Linear& table, int token, FP32* out) {
-    const BF16* row = static_cast<const BF16*>(table.w) +
-                      static_cast<size_t>(token) * table.cols;
-    for (int i = 0; i < table.cols; ++i) out[i] = f32(row[i]);
-}
-void embed_q8(const Linear& table, int token, FP32* out) {
-    const int blocks = table.cols / q3x_q8::BLOCK_SIZE;
-    const q3x_q8::Block* row = static_cast<const q3x_q8::Block*>(table.w) +
-                               static_cast<size_t>(token) * blocks;
-    for (int block = 0; block < blocks; ++block) {
-        const FP32 scale = f16(row[block].scale);
-        for (int i = 0; i < q3x_q8::BLOCK_SIZE; ++i)
-            out[block * q3x_q8::BLOCK_SIZE + i] = scale * row[block].values[i];
-    }
-}
-void embed_q4(const Linear& table, int token, FP32* out) {
-    const int blocks = table.cols / q3x_q4::BLOCK_SIZE;
-    const q3x_q4::Block* row = static_cast<const q3x_q4::Block*>(table.w) +
-                               static_cast<size_t>(token) * blocks;
-    for (int block = 0; block < blocks; ++block) {
-        const FP32 scale = f16(row[block].scale);
-        for (int i = 0; i < q3x_q4::BLOCK_SIZE; ++i)
-            out[block * q3x_q4::BLOCK_SIZE + i] =
-                scale * q3x_q4::value(row[block], i);
-    }
-}
+// Embedding is one row of W[V,H], decoded into FP32; it performs no dot product.
 void embed(const Linear& table, int token, FP32* out) {
     Q3X_ASSERT(token >= 0 && token < table.rows, "embedding token=%d rows=%d", token, table.rows);
-    switch (table.type) {
-    case q3x_model::MATRIX_BF16: embed_bf16(table, token, out); break;
-    case q3x_model::MATRIX_Q8_0: embed_q8(table, token, out); break;
-    case q3x_model::MATRIX_Q4_0: embed_q4(table, token, out); break;
-    }
-}
-FP32 dot_q8(const q3x_q8::Block* blocks, const FP32* x, int n) {
-    FP32 sum = 0.0f;
-    for (int block = 0; block < n / q3x_q8::BLOCK_SIZE; ++block) {
-        FP32 inner = 0.0f;
-        for (int i = 0; i < q3x_q8::BLOCK_SIZE; ++i)
-            inner += blocks[block].values[i] * x[block * q3x_q8::BLOCK_SIZE + i];
-        sum += f16(blocks[block].scale) * inner;
-    }
-    return sum;
-}
-FP32 dot_q4(const q3x_q4::Block* blocks, const FP32* x, int n) {
-    FP32 sum = 0.0f;
-    for (int block = 0; block < n / q3x_q4::BLOCK_SIZE; ++block) {
-        FP32 inner = 0.0f;
-        for (int i = 0; i < q3x_q4::BLOCK_SIZE; ++i)
-            inner += q3x_q4::value(blocks[block], i) *
-                     x[block * q3x_q4::BLOCK_SIZE + i];
-        sum += f16(blocks[block].scale) * inner;
-    }
-    return sum;
+    if (q3x_cpu::try_embed(table.w, table.type, table.cols, token, out)) return;
+    const BF16* row = static_cast<const BF16*>(table.w) + static_cast<size_t>(token) * table.cols;
+    for (int i = 0; i < table.cols; ++i) out[i] = f32(row[i]);
 }
 FP32 dot(const BF16* a, const FP32* b, int n) {
     FP32 sum = 0.0f;
     for (int i = 0; i < n; ++i) sum += f32(a[i]) * b[i];
     return sum;
 }
-void mv_bf16(const Linear& w, const FP32* x, FP32* y) {
+// y[rows] = W[rows,cols] * x[cols]. The BF16 baseline stays visible here.
+void mv(const Linear& w, const FP32* x, FP32* y) {
+    if (q3x_cpu::try_mv(w.w, w.type, w.rows, w.cols, x, y)) return;
     const BF16* weights = static_cast<const BF16*>(w.w);
     for (int row = 0; row < w.rows; ++row)
         y[row] = dot(weights + static_cast<size_t>(row) * w.cols, x, w.cols);
-}
-void mv_q8(const Linear& w, const FP32* x, FP32* y) {
-    const int blocks = w.cols / q3x_q8::BLOCK_SIZE;
-    const q3x_q8::Block* weights = static_cast<const q3x_q8::Block*>(w.w);
-    for (int row = 0; row < w.rows; ++row)
-        y[row] = dot_q8(weights + static_cast<size_t>(row) * blocks, x, w.cols);
-}
-void mv_q4(const Linear& w, const FP32* x, FP32* y) {
-    const int blocks = w.cols / q3x_q4::BLOCK_SIZE;
-    const q3x_q4::Block* weights = static_cast<const q3x_q4::Block*>(w.w);
-    for (int row = 0; row < w.rows; ++row)
-        y[row] = dot_q4(weights + static_cast<size_t>(row) * blocks, x, w.cols);
-}
-void mv(const Linear& w, const FP32* x, FP32* y) {
-    if (q3x_cpu::try_mv(w.w, w.type, w.rows, w.cols, x, y)) return;
-    switch (w.type) {
-    case q3x_model::MATRIX_BF16: mv_bf16(w, x, y); break;
-    case q3x_model::MATRIX_Q8_0: mv_q8(w, x, y); break;
-    case q3x_model::MATRIX_Q4_0: mv_q4(w, x, y); break;
-    }
 }
 FP32 dot(const FP32* a, const FP32* b, int n) {
     FP32 sum = 0.0f;
@@ -500,19 +411,14 @@ bool Model::load(const char* path, const char** error) {
     const int AS = c.AH * c.AD, KVW = c.KVH * c.AD;
     const int DO = c.VH * c.VD, DQKV = 2 * c.KH * c.KD + DO;
     auto linear = [&](int rows, int cols) {
-        Q3X_ASSERT(cols % 32 == 0, "matrix cols=%d is not divisible by 32", cols);
         if (c.matrix_type == q3x_model::MATRIX_BF16)
             return Linear {take<BF16>(file, file_size, cursor,
                                       static_cast<size_t>(rows) * cols, error),
                            rows, cols, c.matrix_type};
-        if (c.matrix_type == q3x_model::MATRIX_Q8_0)
-            return Linear {take<q3x_q8::Block>(file, file_size, cursor,
-                                               static_cast<size_t>(rows) * cols /
-                                               q3x_q8::BLOCK_SIZE, error),
-                           rows, cols, c.matrix_type};
-        return Linear {take<q3x_q4::Block>(file, file_size, cursor,
-                                           static_cast<size_t>(rows) * cols /
-                                           q3x_q4::BLOCK_SIZE, error),
+        size_t bytes = 0;
+        if (!*error && !q3x_cpu::quantized_bytes(c.matrix_type, rows, cols, &bytes))
+            *error = "invalid quantized matrix layout";
+        return Linear {take<uint8_t>(file, file_size, cursor, bytes, error),
                        rows, cols, c.matrix_type};
     };
     layer.reset(new (std::nothrow) Layer[c.N]);

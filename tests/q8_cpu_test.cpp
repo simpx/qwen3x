@@ -9,8 +9,50 @@
 #include <unistd.h>
 
 #include "../engine.cpp"
+#include "q4.h"
+#include "q8.h"
 
 namespace {
+
+void quant_layout_test() {
+    size_t bytes = 123;
+    assert(!q3x_cpu::quantized_bytes(q3x_model::MATRIX_BF16, 3, 17, &bytes));
+    assert(bytes == 123);
+    assert(q3x_cpu::quantized_bytes(q3x_model::MATRIX_Q8_0, 3, 64, &bytes));
+    assert(bytes == 204);
+    assert(q3x_cpu::quantized_bytes(q3x_model::MATRIX_Q4_0, 3, 64, &bytes));
+    assert(bytes == 108);
+    for (auto type : {q3x_model::MATRIX_BF16, q3x_model::MATRIX_Q8_0,
+                      q3x_model::MATRIX_Q4_0}) {
+        bytes = 123;
+        assert(!q3x_cpu::quantized_bytes(type, 0, 32, &bytes));
+        assert(!q3x_cpu::quantized_bytes(type, 1, -32, &bytes));
+        assert(bytes == 123);
+    }
+    assert(!q3x_cpu::quantized_bytes(q3x_model::MATRIX_Q8_0, 1, 33, &bytes));
+    assert(!q3x_cpu::quantized_bytes(q3x_model::MATRIX_Q4_0, 1, 16, &bytes));
+    assert(!q3x_cpu::quantized_bytes(static_cast<q3x_model::MatrixType>(999), 1, 32, &bytes));
+    assert(bytes == 123);
+    // On 32-bit hosts this must reject overflow; on 64-bit hosts it must not
+    // truncate through a 32-bit rows*cols intermediate. No allocation is needed.
+    constexpr int large_cols = 2147483616;  // whole Q8_0 blocks
+    constexpr uint64_t large_bytes = uint64_t(2147483647) * (large_cols / 32) * 34;
+    const bool fits = large_bytes <= std::numeric_limits<size_t>::max();
+    assert(q3x_cpu::quantized_bytes(q3x_model::MATRIX_Q8_0, 2147483647, large_cols,
+                                     &bytes) == fits);
+    assert(bytes == (fits ? static_cast<size_t>(large_bytes) : 123));
+
+    const uint16_t weights[] = {0, 0, 0, 0x3f80, 0xc000, 0x3f00};
+    const q3x_backend::Linear table {weights, 2, 3, q3x_model::MATRIX_BF16};
+    float output[3];
+    q3x_backend::embed(table, 1, output);
+    assert(output[0] == 1.0f && output[1] == -2.0f && output[2] == 0.5f);
+
+    // The BF16 embedding fallback must neither dereference inputs nor touch output.
+    float untouched[3] = {123.0f, -7.0f, 19.0f};
+    assert(!q3x_cpu::try_embed(nullptr, q3x_model::MATRIX_BF16, 3, 0, untouched));
+    assert(untouched[0] == 123.0f && untouched[1] == -7.0f && untouched[2] == 19.0f);
+}
 
 // Different rows, non-binary-exact Q8 scales, SIMD tails and the GCD threshold.
 // Double accumulation is an independent numerical oracle for both build modes.
@@ -91,7 +133,7 @@ void cpu_kernel_test() {
         }
     }
     float untouched = 123.0f;
-    assert(!q3x_cpu::try_mv(nullptr, q3x_model::MATRIX_Q4_0, 1, 32, nullptr, &untouched));
+    assert(!q3x_cpu::try_embed(nullptr, q3x_model::MATRIX_BF16, 1, 0, &untouched));
     assert(untouched == 123.0f);
 }
 
@@ -224,6 +266,7 @@ void loader_test() {
 }  // namespace
 
 int main() {
+    quant_layout_test();
     cpu_kernel_test();
     q3x_q8::Block blocks[4]{};
     const uint16_t scales[4] = {0x3c00, 0x3800, 0x4000, 0x3400};
@@ -256,14 +299,21 @@ int main() {
     q3x_backend::mv(matrix, input, output);
     assert(std::abs(output[0] - expected[0]) < 1e-6f);
     assert(std::abs(output[1] - expected[1]) < 1e-6f);
+    float quant_output[2] = {123.0f, 123.0f};
+    assert(q3x_cpu::try_mv(blocks, matrix.type, 2, 64, input, quant_output));
+    assert(std::abs(quant_output[0] - expected[0]) < 1e-6f);
+    assert(std::abs(quant_output[1] - expected[1]) < 1e-6f);
 
     float embedding[64]{};
     q3x_backend::embed(matrix, 1, embedding);
+    float quant_embedding[64]{};
+    assert(q3x_cpu::try_embed(blocks, matrix.type, 64, 1, quant_embedding));
     for (int block = 0; block < 2; ++block) {
         for (int index = 0; index < q3x_q8::BLOCK_SIZE; ++index) {
             const float value = decoded_scales[2 + block] *
                                 blocks[2 + block].values[index];
             assert(embedding[block * q3x_q8::BLOCK_SIZE + index] == value);
+            assert(quant_embedding[block * q3x_q8::BLOCK_SIZE + index] == value);
         }
     }
 
@@ -304,12 +354,19 @@ int main() {
     float q4_output = 0.0f;
     q3x_backend::mv(q4_matrix, input, &q4_output);
     assert(std::abs(q4_output - q4_expected) < 1e-6f);
+    // CPU_OPT=0 must still handle quantized matrices through the CPU entry point.
+    float cpu_q4_output = 123.0f;
+    assert(q3x_cpu::try_mv(q4_blocks, q4_matrix.type, 1, 64, input, &cpu_q4_output));
+    assert(std::abs(cpu_q4_output - q4_expected) < 1e-6f);
 
     float q4_embedding[64]{};
     q3x_backend::embed(q4_matrix, 0, q4_embedding);
+    assert(q3x_cpu::try_embed(q4_blocks, q4_matrix.type, 64, 0, quant_embedding));
     for (int index = 0; index < 64; ++index)
         assert(q4_embedding[index] == decoded_scales[index / 32] *
                                       q3x_q4::value(q4_blocks[index / 32], index % 32));
+    for (int index = 0; index < 64; ++index)
+        assert(quant_embedding[index] == q4_embedding[index]);
 
     loader_test();
     std::puts("q8-cpu-test: ok");

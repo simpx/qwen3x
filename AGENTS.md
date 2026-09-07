@@ -52,8 +52,8 @@ main.cpp       main、CLI、HTTP routes、completion 编排
 parser.cpp     JSON <-> 简单 C++ 请求/响应结构
 render.cpp     Qwen chat template、tokenizer、token decode
 runtime.cpp    Session、cache/checkpoint、prefill、decode、sampling
-engine.cpp     权重、State/Work、算子和完整 Qwen forward
-arch/cpu.cpp   CPU 算子加速入口；平台选择与 SIMD/线程调度组合
+engine.cpp     权重加载顺序、State/Work、模型算子和完整 Qwen forward
+arch/cpu.cpp   CPU 量化标量实现、架构选择、线程调度与扩展入口
 arch/arm/      ARM SIMD 算子
 arch/x86/      x86 SIMD 算子
 arch/apple/    Apple 系统线程调度
@@ -175,9 +175,15 @@ qwen3x-render.bin         所有支持型号共用的固定 tokenizer 数据
   符号，并让矩阵乘法维度能够直接检查。
 - `engine.cpp` 中一个 token 的完整 forward 从上到下展开，作为最容易理解和验证的实现。
 - CPU prefill 逐 token forward，作为 correctness baseline。
-- `engine.cpp` 保留朴素算子和唯一 CPU forward，不放平台条件、SIMD intrinsic 或线程调度。
-  CPU 手写优化放在 `arch/` 对应目录，只替换热点算子；加速入口返回 false 时不得修改输出，
-  由 `engine.cpp` 的朴素实现回退。`CPU_OPT=0` 使用独立目录构建关闭手写加速的数值基线。
+- `engine.cpp` 保留 Linear、BF16 权重读取、embed/mv/dot 的朴素公式和唯一 CPU forward，
+  使 BF16 主路径在单文件内自洽。只通过 `q3x_cpu` 接入扩展：try_embed/try_mv 先尝试架构
+  加速或量化实现；完成计算返回 true，BF16 回退返回 false 且不修改输出，随后执行 engine
+  内的公式。量化格式大小也由 CPU 扩展入口提供，engine 不包含量化格式分派。
+- 平台条件、SIMD intrinsic 和线程调度放在 `arch/`。量化格式大小与标量 embed/mv
+  集中在 `arch/cpu.cpp`，格式标识表示完整编码（例如 Q4_0），共享 block 布局保留在
+  q4.h/q8.h。权重所有权、tensor 加载顺序、alignment 和 EOF 检查仍在 engine。
+  新增格式先补充明确的标量实现及数值测试。
+  `CPU_OPT=0` 使用独立目录构建，只关闭架构加速，量化支持始终保留。
 - CUDA prefill 在 backend 内按 chunk 批量调度；runtime 把 `checkpoint_at` 作为精确 range
   边界，CUDA chunk 不跨过该边界。CUDA decode 保留可直接阅读的单 token forward，并用
   CUDA Graph replay 相同的具名 kernel 顺序。
