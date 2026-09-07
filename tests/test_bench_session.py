@@ -65,10 +65,13 @@ class SessionBenchmarkTest(unittest.TestCase):
 
     def test_load_log_uses_the_current_metal_fields(self):
         current = bench.metal_load_fields(
-            "Metal ready device=Apple M5 Pro weights=10 recommended_working_set=20")
+            "Metal ready device=Apple M5 Pro weights=10 allocated=20 "
+            "max_buffer=30 recommended_working_set=40")
         self.assertEqual(current, {
             "metal_device": "Apple M5 Pro", "model_weight_bytes": 10,
-            "metal_recommended_working_set_bytes": 20,
+            "metal_allocated_after_load_bytes": 20,
+            "metal_max_buffer_bytes": 30,
+            "metal_recommended_working_set_bytes": 40,
         })
 
 

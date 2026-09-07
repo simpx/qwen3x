@@ -38,7 +38,7 @@ make q3x
 build/q3x --help
 ```
 
-在另一个终端运行 `make serve-9b` 后，进入工作项目运行
+在另一个终端运行 `make serve-9b` 或 `make serve-27b` 后，进入工作项目运行
 `/path/to/qwen3x/build/q3x --thinking off`。服务默认地址为 `http://127.0.0.1:8000/v1`，
 也可通过 `--base-url` 连接其他标准服务器。完整用法和独立构建说明见
 [`agent/README.md`](agent/README.md)。`make q3x-test` 运行 agent 测试；测试设计和真实模型
@@ -62,8 +62,8 @@ cd /path/to/project
 ```
 
 `pi.sh` 保持当前工作目录不变，自动创建隔离的 pi 配置，检查 qwen3x 是否 ready，并从
-`/v1/models` 选择当前服务实际加载的 4B 或 9B 模型，以默认 thinking 启动 pi。配置模板是
-[`scripts/pi-models.json`](scripts/pi-models.json)；40k context 使用的压缩余量在
+`/v1/models` 选择当前服务实际加载的 4B、9B 或 27B 模型，以默认 thinking 启动 pi。
+配置模板是 [`scripts/pi-models.json`](scripts/pi-models.json)；压缩余量在
 [`scripts/pi-settings.json`](scripts/pi-settings.json)。
 
 首次使用需要先准备模型：
@@ -75,13 +75,14 @@ make model-9b
 在 Apple Silicon Mac 上，`make serve-9b` 和 `make serve-eval-9b` 自动选择 Metal；Linux
 选择 CUDA。原生 CPU binary `build/qwen3x` 继续作为 correctness baseline，其中 Q8_0 dot
 使用 Arm NEON，较大的矩阵按行通过系统线程池并行。9B 的 65,536-token CPU eval Session
-需要约 13--15 GiB 统一内存，因此建议至少 24 GiB 内存；eval 服务使用 7,200 秒请求上限，
-以容纳长 thinking 输出。M5 Pro 48 GB 的 CPU baseline、容量和六题 smoke 记录在
+需要约 13--15 GiB 统一内存，因此建议至少 24 GiB 内存。服务和 q3x 不设置整请求 deadline，
+慢速本地生成由完成条件或用户取消结束。M5 Pro 48 GB 的 CPU baseline、容量和六题 smoke 记录在
 [`eval/q8-9b-macos.md`](eval/q8-9b-macos.md)。
 
 它下载固定 revision 的官方 Qwen3.5-9B BF16 checkpoint，并在 `build/` 直接生成约
-8.86 GiB 的 9B Q8_0 model bin，以及共享的 Qwen3.5 render 数据。量化只改变权重；activation、
-recurrent state、KV cache、workspace 和 logits 仍是 FP32。`make serve-9b` 会检查产物并在
+8.86 GiB 的 9B Q8_0 model bin，以及共享的 `qwen3x-render.bin` tokenizer 数据；固定
+Qwen3.8 template 编译在可执行文件中。量化只改变权重；activation、recurrent state、KV
+cache、workspace 和 logits 仍是 FP32。`make serve-9b` 会检查产物并在
 缺失时提示运行上述命令。准备模型需要 [uv](https://docs.astral.sh/uv/)；Linux CUDA 服务
 另需 CUDA Toolkit。运行 pi 另需 Node >= 22.19；固定版本安装命令是
 `npm install -g @earendil-works/pi-coding-agent@0.84.4`。
@@ -121,10 +122,20 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 Apple Silicon Metal 的 `build/qwen3x-metal`、CPU baseline 的 `build/qwen3x`，或 Linux
 CUDA 的 `build/qwen3x-cuda`。
 
+M5 Pro 上的 27B 路径只保留 Q4_0：
+
+```sh
+make model-27b
+make serve-27b
+```
+
+它生成 `build/qwen38-27b-q4_0-model.bin`，并固定使用 Metal、单 Session 和 32768 context。
+该路径不宣称 CUDA 兼容；当前真实吞吐、峰值内存和长上下文容量仍需用下述 benchmark 验收。
+
 ### Apple M5 Pro / Metal 4（实验性）
 
 Metal backend 固定使用 Apple M5 Pro、macOS 26.3+、Xcode 26.6 和 Metal 4.0，不维护旧
-系统、旧 Xcode 或其他 GPU 的兼容路径。它直接读取现有 0.8B/4B BF16、9B Q8_0
+系统、旧 Xcode 或其他 GPU 的兼容路径。它直接读取 0.8B/4B BF16、9B Q8_0 和 27B Q4_0
 model.bin，无需重新 pack。
 Metal shader 编译后嵌入 `qwen3x-metal`，运行时不需要外部 `.metallib`、Python 或第三方
 推理框架。平台接口集中在 `arch/metal/engine.mm`，数学计算在 `kernels.metal`。
@@ -140,7 +151,7 @@ Xcode 26 的 Metal 编译器是独立可选组件，先在 Xcode 设置中安装
 `xcrun --toolchain Metal`，并固定 `metal4.0` 与 `air64-apple-macosx26.3`；缺少指定环境
 就直接失败，不探测或回退到其他工具链。运行已编译的可执行文件不需要 Xcode。
 
-`metal-test` 用非零随机小模型，对比 CPU/Metal 的 BF16 和 Q8_0 完整 forward、每步
+`metal-test` 用非零随机小模型，对比 CPU/Metal 的 BF16、Q8_0 和 Q4_0 完整 forward、每步
 logits、recurrent/KV state、prefill、checkpoint restore 和 reset；没有可用 GPU 时返回
 非零，不能视为通过。CI 同时构建 macOS CPU/Metal；如果托管 runner 不提供 GPU，会明确
 标记 GPU 测试未运行。合成测试不代替真实模型的数值验收。
@@ -151,8 +162,9 @@ logits、recurrent/KV state、prefill、checkpoint restore 和 reset；没有可
 在对应 commit 的仓库根目录解压其中的 tar.gz 后，可直接运行
 `MTL_DEBUG_LAYER=1 ./build/metal-test`，不需要在本机安装 Xcode；附件不包含模型。
 
-准备好模型后，Mac 上仍使用 `make serve-4b` / `make serve-9b`，自动选择 Metal；Linux/WSL
-继续选择 CUDA。连接 pi 的方式不变。也可以先用 0.8B 做短请求：
+准备好模型后，Mac 上使用 `make serve-4b` / `make serve-9b` / `make serve-27b`；前两者
+自动选择 Metal，27B 明确只使用 Metal。Linux/WSL 的 4B/9B 继续选择 CUDA。连接 pi 的方式
+不变。也可以先用 0.8B 做短请求：
 
 ```sh
 ./build/qwen3x-metal -c "你好" --session-context 128 --max-tokens 16
@@ -170,10 +182,14 @@ make metal-library
 caffeinate -i python3 scripts/bench_session.py \
   --library build/metal/libqwen3x-metal.dylib \
   --model build/qwen35-9b-q8_0-model.bin --output build/bench-9b.json
+caffeinate -i python3 scripts/bench_session.py \
+  --library build/metal/libqwen3x-metal.dylib \
+  --model build/qwen38-27b-q4_0-model.bin --context 32768 \
+  --output build/bench-27b.json
 ```
 
-这个入口不绑定具体模型，可通过 `--model`、`--context`、`--prompts` 和 `--decode` 用于
-后续 27B 验收。测试 dylib 只调用与可执行文件相同的 C ABI，不是运行或分发依赖。
+这个入口不绑定具体模型，可通过 `--model`、`--context`、`--prompts` 和 `--decode` 验收
+27B。测试 dylib 只调用与可执行文件相同的 C ABI，不是运行或分发依赖。
 测量期间应停止其他推理服务；输出路径必须不存在，以保留每轮原始证据。报告记录 load、
 prefill、decode、runtime TTFT、Darwin peak footprint、swap 变化和 memory pressure。
 
@@ -317,7 +333,7 @@ arch/metal/         Metal Model/State、完整 forward 与 MSL kernel
 runtime.cpp         Session、sampling 和 cache 生命周期
 main.cpp            main、HTTP routes 和 completion 数据流
 parser.cpp          唯一 JSON-aware 的 C++ 边界
-render.cpp          固定 Qwen3.5 chat template 和 tokenizer
+render.cpp          固定 Qwen3.8 chat template 和 Qwen tokenizer
 scripts/            离线 packer 及其 Python 环境
 tests/              parser、renderer、runtime 和端到端回归
 reference/          官方 PyTorch/Transformers 数值 reference
@@ -338,4 +354,4 @@ build/              下载的 checkpoint、生成的模型和编译产物
 1. 保持 Qwen3.5-0.8B correctness baseline。
 2. 以 Qwen3.5-4B BF16 作为快速本机 coding agent 路线。
 3. 以 Qwen3.5-9B Q8_0 作为 16 GiB 显卡上的默认高质量路线。
-4. 27B 留给独立目标。
+4. 以 Qwen3.8-27B Q4_0 验收 M5 Pro Metal 本地 agent 路线。

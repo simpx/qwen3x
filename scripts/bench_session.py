@@ -50,13 +50,16 @@ def system_snapshot():
 
 def metal_load_fields(message):
     match = re.fullmatch(
-        r"Metal ready device=(.*?) weights=(\d+) recommended_working_set=(\d+)",
+        r"Metal ready device=(.*?) weights=(\d+) allocated=(\d+) "
+        r"max_buffer=(\d+) recommended_working_set=(\d+)",
         message,
     )
     if not match:
         return {}
     return {"metal_device": match[1], "model_weight_bytes": int(match[2]),
-            "metal_recommended_working_set_bytes": int(match[3])}
+            "metal_allocated_after_load_bytes": int(match[3]),
+            "metal_max_buffer_bytes": int(match[4]),
+            "metal_recommended_working_set_bytes": int(match[5])}
 
 
 def main():

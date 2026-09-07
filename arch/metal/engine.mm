@@ -160,6 +160,12 @@ struct State {
         Q3X_ASSERT(recurrent.used == recurrent.count && kv.used == kv.count, "Metal State layout mismatch");
         std::memset(recurrent.data(), 0, recurrent.count * sizeof(float));
         std::memset(work.storage.data(work.logits), 0, c.V * sizeof(float));
+        const size_t state_bytes =
+            (recurrent.count + kv.count + checkpoint.count +
+             work.storage.count) * sizeof(float);
+        LOG_INFO("Metal state model=%s context=%d bytes=%zu allocated=%llu",
+                 c.name, context, state_bytes,
+                 static_cast<unsigned long long>(model.device.currentAllocatedSize));
     }
 };
 
@@ -393,8 +399,12 @@ bool Model::load(const char* path, const char** error) {
     for (int i = 0; i < c.N; ++i) layer[i].weights = upload(regions[i + 1], regions[i + 2]);
     if (*error) return mapped_fail(*error);
     munmap(const_cast<uint8_t*>(file), size);
-    LOG_INFO("Metal ready device=%s weights=%zu recommended_working_set=%llu",
-             device.name.UTF8String, size, static_cast<unsigned long long>(device.recommendedMaxWorkingSetSize));
+    LOG_INFO("Metal ready device=%s weights=%zu allocated=%llu max_buffer=%llu "
+             "recommended_working_set=%llu",
+             device.name.UTF8String, size,
+             static_cast<unsigned long long>(device.currentAllocatedSize),
+             static_cast<unsigned long long>(device.maxBufferLength),
+             static_cast<unsigned long long>(device.recommendedMaxWorkingSetSize));
     return true;
 }
 
