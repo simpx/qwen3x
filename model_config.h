@@ -57,48 +57,48 @@ struct ModelConfig {
 };
 
 constexpr ModelConfig QWEN35_08B = {
-    800, "Qwen3.5-0.8B",         // id, name
-    248320, 1024, 3584, 24,       // V, H, I, N
-    4, 8, 2, 256, 64,             // AI, AH, KVH, AD, RD
-    16, 16, 128, 128, 4,          // KH, VH, KD, VD, CK
-    0, 0, 0,                       // experts, top_k, shared_I
-    MATRIX_BF16, true,             // matrix_type, tied_embeddings
+    800, "Qwen3.5-0.8B",              // id, name
+    248320, 1024, 3584, 24,            // V, H, I, N
+    4, 8, 2, 256, 64,                  // AI, AH, KVH, AD, RD
+    16, 16, 128, 128, 4,               // KH, VH, KD, VD, CK
+    0, 0, 0,                            // experts, top_k, shared_I
+    MATRIX_BF16, true,                  // matrix_type, tied_embeddings
 };
 
 constexpr ModelConfig QWEN35_4B = {
-    4000, "Qwen3.5-4B",           // id, name
-    248320, 2560, 9216, 32,        // V, H, I, N
-    4, 16, 4, 256, 64,             // AI, AH, KVH, AD, RD
-    16, 32, 128, 128, 4,           // KH, VH, KD, VD, CK
-    0, 0, 0,                        // experts, top_k, shared_I
-    MATRIX_BF16, true,              // matrix_type, tied_embeddings
+    4000, "Qwen3.5-4B",                // id, name
+    248320, 2560, 9216, 32,            // V, H, I, N
+    4, 16, 4, 256, 64,                 // AI, AH, KVH, AD, RD
+    16, 32, 128, 128, 4,               // KH, VH, KD, VD, CK
+    0, 0, 0,                            // experts, top_k, shared_I
+    MATRIX_BF16, true,                  // matrix_type, tied_embeddings
 };
 
 constexpr ModelConfig QWEN35_9B = {
-    9000, "Qwen3.5-9B",           // id, name
-    248320, 4096, 12288, 32,       // V, H, I, N
-    4, 16, 4, 256, 64,             // AI, AH, KVH, AD, RD
-    16, 32, 128, 128, 4,           // KH, VH, KD, VD, CK
-    0, 0, 0,                        // experts, top_k, shared_I
-    MATRIX_Q8_0, false,             // matrix_type, tied_embeddings
-};
-
-constexpr ModelConfig QWEN38_27B = {
-    38027, "Qwen3.8-27B",         // id, name
-    248320, 5120, 17408, 64,       // V, H, I, N
-    4, 24, 4, 256, 64,             // AI, AH, KVH, AD, RD
-    16, 48, 128, 128, 4,           // KH, VH, KD, VD, CK
-    0, 0, 0,                        // experts, top_k, shared_I
-    MATRIX_Q4_0, false,             // matrix_type, tied_embeddings
+    9000, "Qwen3.5-9B",                // id, name
+    248320, 4096, 12288, 32,           // V, H, I, N
+    4, 16, 4, 256, 64,                 // AI, AH, KVH, AD, RD
+    16, 32, 128, 128, 4,               // KH, VH, KD, VD, CK
+    0, 0, 0,                            // experts, top_k, shared_I
+    MATRIX_Q8_0, false,                 // matrix_type, tied_embeddings
 };
 
 constexpr ModelConfig QWEN36_35B_A3B = {
-    36035, "Qwen3.6-35B-A3B",     // id, name
-    248320, 2048, 512, 40,         // V, H, I, N
-    4, 16, 2, 256, 64,             // AI, AH, KVH, AD, RD
-    16, 32, 128, 128, 4,           // KH, VH, KD, VD, CK
-    256, 8, 512,                    // experts, top_k, shared_I
-    MATRIX_Q4_0, false,             // matrix_type, tied_embeddings
+    36035, "Qwen3.6-35B-A3B",          // id, name
+    248320, 2048, 512, 40,             // V, H, I, N
+    4, 16, 2, 256, 64,                 // AI, AH, KVH, AD, RD
+    16, 32, 128, 128, 4,               // KH, VH, KD, VD, CK
+    256, 8, 512,                        // experts, top_k, shared_I
+    MATRIX_Q4_0, false,                 // matrix_type, tied_embeddings
+};
+
+constexpr ModelConfig QWEN38_27B = {
+    38027, "Qwen3.8-27B",              // id, name
+    248320, 5120, 17408, 64,           // V, H, I, N
+    4, 24, 4, 256, 64,                 // AI, AH, KVH, AD, RD
+    16, 48, 128, 128, 4,               // KH, VH, KD, VD, CK
+    0, 0, 0,                            // experts, top_k, shared_I
+    MATRIX_Q4_0, false,                 // matrix_type, tied_embeddings
 };
 
 inline const ModelConfig* config_for_id(uint32_t id) {

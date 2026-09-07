@@ -258,6 +258,7 @@ void embed(const Linear& table, int token, FP32* out) {
     case q3x_model::MATRIX_BF16: embed_bf16(table, token, out); break;
     case q3x_model::MATRIX_Q8_0: embed_q8(table, token, out); break;
     case q3x_model::MATRIX_Q4_0: embed_q4(table, token, out); break;
+    default: Q3X_ASSERT(false, "unknown embedding matrix type=%u", table.type);
     }
 }
 FP32 dot_q8(const q3x_q8::Block* blocks, const FP32* x, int n) {
@@ -397,6 +398,7 @@ void mv(const Linear& w, const FP32* x, FP32* y) {
     case q3x_model::MATRIX_BF16: mv_bf16(w, x, y); break;
     case q3x_model::MATRIX_Q8_0: mv_q8(w, x, y); break;
     case q3x_model::MATRIX_Q4_0: mv_q4(w, x, y); break;
+    default: Q3X_ASSERT(false, "unknown matrix type=%u", w.type);
     }
 }
 void expert_mv_q4(const ExpertLinear& w, int expert, const FP32* x, FP32* y) {
@@ -687,20 +689,28 @@ bool Model::load(const char* path, const char** error) {
     const int AS = c.AH * c.AD, KVW = c.KVH * c.AD;
     const int DO = c.VH * c.VD, DQKV = 2 * c.KH * c.KD + DO;
     auto linear = [&](int rows, int cols, q3x_model::MatrixType type) {
-        Q3X_ASSERT(cols % 32 == 0, "matrix cols=%d is not divisible by 32", cols);
         if (type == q3x_model::MATRIX_BF16)
             return Linear {take<BF16>(file, file_size, cursor,
                                       static_cast<size_t>(rows) * cols, error),
                            rows, cols, type};
-        if (type == q3x_model::MATRIX_Q8_0)
+        if (type == q3x_model::MATRIX_Q8_0) {
+            Q3X_ASSERT(cols % q3x_q8::BLOCK_SIZE == 0,
+                       "matrix cols=%d Q8 block=%d", cols, q3x_q8::BLOCK_SIZE);
             return Linear {take<q3x_q8::Block>(file, file_size, cursor,
                                                static_cast<size_t>(rows) * cols /
                                                q3x_q8::BLOCK_SIZE, error),
                            rows, cols, type};
-        return Linear {take<q3x_q4::Block>(file, file_size, cursor,
-                                           static_cast<size_t>(rows) * cols /
-                                           q3x_q4::BLOCK_SIZE, error),
-                       rows, cols, type};
+        }
+        if (type == q3x_model::MATRIX_Q4_0) {
+            Q3X_ASSERT(cols % q3x_q4::BLOCK_SIZE == 0,
+                       "matrix cols=%d Q4 block=%d", cols, q3x_q4::BLOCK_SIZE);
+            return Linear {take<q3x_q4::Block>(file, file_size, cursor,
+                                               static_cast<size_t>(rows) * cols /
+                                               q3x_q4::BLOCK_SIZE, error),
+                           rows, cols, type};
+        }
+        Q3X_ASSERT(false, "unknown loader matrix type=%u", type);
+        return Linear {};
     };
     auto model_linear = [&](int rows, int cols) {
         return linear(rows, cols, c.matrix_type);

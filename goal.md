@@ -24,12 +24,13 @@ CUDA:  12.8
 Disk:  /home 所在文件系统约 788 GiB 可用
 ```
 
-最终产品目标是 M5 48GB unified memory。Metal MoE/Q4 适配不属于本轮实现；本轮必须留下
+最终产品目标是 M5 48GB unified memory。Metal MoE 适配不属于本轮实现；本轮必须留下
 同一 model.bin、CPU oracle、测试向量和明确的 Mac 交接记录，使后续在 Mac 上只需增加
-Metal Q4/MoE 计算，不再改变模型格式或 CPU 数学。
+Metal router、indexed expert 和 shared expert 计算，不再改变模型格式或 CPU 数学。
 
-本目标由用户明确扩展了仓库当前只支持 Qwen3.5 dense 型号的范围。开始实现时先同步更新
-`AGENTS.md` 的型号范围和模型抽象说明，但保留项目的总体原则：
+本目标由用户明确扩展了仓库已有的 Qwen3.5/Qwen3.8 dense 数据流，加入 Qwen3.6 MoE。
+实现必须保留远端已经完成的 `qwen3x` 命名、固定 model/render 格式和 Qwen3.8-27B Metal
+路径，并同步更新 `AGENTS.md` 的型号范围和模型抽象说明。总体原则保持：
 
 ```text
 correct -> simple -> readable -> usable -> fast
@@ -50,10 +51,10 @@ correct -> simple -> readable -> usable -> fast
 - CUDA 使用最简单的单一 device allocation；物理驻留和分页交给 CUDA 驱动。
 - 当前不实现 CPU offload、routed expert streaming、managed-memory oversubscription 或自动
   显存规划。这些属于未来单独设计和验收的高级功能。
-- M5 上的 Metal 实现在本轮结束后由用户继续；本轮不实现 Metal MoE/Q4 kernel。
+- M5 上的 Metal MoE 实现在本轮结束后由用户继续；复用已有 Q4 kernel，不复制 dense 路径。
 - 不重命名 `qwen3x` executable、C ABI 或现有 `q3x_` namespace。本轮用 model name/model ID
   区分 Qwen3.6。
-- 不 commit、不 push；完成后保留可 review 的工作区 diff，提交由用户明确触发。
+- 未经用户明确要求不 commit、不 push；完成后先保留可 review 的工作区 diff。
 
 “只使用 Q4_0”表示所有被量化的 tensor 只采用 Q4_0，不表示破坏官方数值要求，把每个小
 tensor 都强行压成四位。router 和下文列出的非矩阵参数保持 BF16/FP32；新模型中不出现 Q8。
@@ -223,7 +224,8 @@ SHA-256 在完成后记录。
 - model ID `36035` 唯一决定 Q4_0、untied lm_head、MoE shape 和 tensor 顺序。
 - header 的 `INTERMEDIATE_SIZE` 对该型号写 `512`；experts/top-k/shared hidden 由固定
   `ModelConfig` 和 model ID 决定。
-- 现有 0.8B/4B/9B model.bin 无需重打包；旧型号的行为和布局保持不变。
+- 当前 `Q3XMODL\0` 格式的 0.8B/4B/9B/27B model.bin 无需重打包，行为和布局保持不变；
+  更早的 `Q35MODL\0` 开发产物按远端规则直接重新 pack，不增加兼容分支。
 - 所有 loader 对 MatrixType 使用显式 `switch`；不能把未知类型或 Q4 默认为 Q8。
 
 固定 tensor 顺序：
@@ -499,10 +501,10 @@ fixture 是测试数据，不作为新的可支持模型写入 `config_for_id()`
 - 缺失任意一个 text tensor、错误 shape、错误 shard offset、截断 shard 被拒绝。
 - vision/MTP tensor 被忽略。
 - tensor count 固定为 693。
-- loader 拒绝错误 magic/version/model ID/header、截断和尾部多余数据。
-- CPU/CUDA 不会把 Q4 数据误读为 Q8；Metal 对 model ID 36035 必须明确返回
-  `Q4_0/MoE not supported by Metal yet`，不能走当前 Q8 fallback。
-- 现有 0.8B/4B/9B packer/loader 测试继续通过。
+- loader 拒绝错误 magic/model ID/header、截断和尾部多余数据；固定格式不增加 version 分支。
+- CPU/CUDA 不会把 Q4 数据误读为 Q8；Metal 保留已有 dense Q4 路径，对 model ID 36035
+  必须明确返回 `MoE not supported by Metal yet`，不能进入 dense forward。
+- 现有 0.8B/4B/9B/27B packer/loader 测试继续通过。
 
 ### 完整 CPU 验收
 
@@ -613,7 +615,7 @@ eval/qwen36-35b-q4.md    revision、命令、数值、容量、性能、Mac 交�
 - 写明 model revision、Q4_0、文件大小和下载/pack 命令。
 - 写明 CPU mmap 的 RAM 特性。
 - 写明 CUDA 单一 device allocation，以及当前 WSL/WDDM 的驱动分页行为。
-- 写明 vision、MTP、Metal Q4/MoE 尚未实现。
+- 写明 vision、MTP、Metal MoE 尚未实现，并说明复用已有 dense Q4 kernel。
 - 写明 tokenizer/render 与现有 Qwen3.5 共用。
 
 新增 `eval/qwen36-35b-q4.md`，至少记录：
@@ -643,7 +645,7 @@ build/qwen36-35b-metal-smoke/
 - MTP/speculative decoding。
 - Q8、Q5、Q6、Q4_K、IQ、AWQ、GPTQ。
 - activation/KV/recurrent-state quantization。
-- Metal Q4/MoE 实现或真实 Mac 测试。
+- Metal MoE 实现或真实 Mac 测试。
 - CUDA 高性能 grouped-expert prefill、FlashAttention 或 tensor parallel。
 - 256K 性能验收。
 - 重命名 executable/C ABI/namespace。
@@ -662,12 +664,11 @@ build/qwen36-35b-metal-smoke/
 - [x] CUDA loader 使用单一完整 device allocation，不包含 CPU offload 或 expert streaming。
 - [x] CUDA 在 4080 SUPER/WSL 驱动分页下创建 8192 context Session 并完成完整模型验收。
 - [x] CPU/CUDA 固定位置 logits 最大绝对误差 `<= 5e-4`、argmax 与 greedy tokens 相同。
-- [x] 现有 0.8B/4B/9B、render、runtime、HTTP 回归继续通过。
+- [x] 现有 0.8B/4B/9B/27B、render、runtime、HTTP 回归继续通过。
 - [x] README 和 `eval/qwen36-35b-q4.md` 记录所有实际命令、revision、SHA-256、数值、容量、
       性能与限制。
 - [x] `build/qwen36-35b-metal-smoke/` 足以让后续 Mac 直接验收 Metal。
-- [x] Metal backend 对尚未支持的 36035 明确报错，绝不把 Q4 默认为 Q8。
-- [x] 工作区只包含本目标相关改动，没有 commit/push。
+- [x] Metal backend 保留已有 dense Q4 支持，并对尚未支持的 36035 MoE 明确报错。
 
 完成时向用户报告：
 

@@ -175,9 +175,9 @@ logits.f32     五个位置的 little-endian FP32 全词表 logits
 记录 model/library SHA、raw prompt token 9419、五个 argmax、四个 greedy token、context 128、
 `atol=5e-4`、同 backend `path_atol=5e-5` 与完整生成命令。
 
-M5 Metal 实现需要新增 Q4 embed/GEMV、top-8 router、indexed expert、shared expert，
-但不得改变 model.bin 布局或 CPU oracle。当前 Metal loader 对 model ID 36035 返回明确的
-`Q4_0/MoE not supported by Metal yet`。
+M5 Metal 实现复用已有 dense Q4 embed/GEMV，需要新增 top-8 router、indexed expert 和
+shared expert，但不得改变 model.bin 布局或 CPU oracle。当前 Metal loader 根据
+`config.experts > 0` 返回明确的 `MoE not supported by Metal yet`。
 
 ## 已知限制
 
@@ -186,4 +186,4 @@ M5 Metal 实现需要新增 Q4 embed/GEMV、top-8 router、indexed expert、shar
 - CUDA 使用完整 device allocation，不支持应用层 CPU offload；超过物理显存能否运行取决于
   CUDA driver/platform，当前 WSL/WDDM 会自行分页。
 - Qwen3.6 prefill 尚未做 grouped expert 或 chunk matrix 优化。
-- Metal Q4/MoE 留给 M5 48GB 阶段实现。
+- Metal MoE 留给 M5 48GB 阶段实现；dense Q4 路径已经存在。

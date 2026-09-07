@@ -127,8 +127,9 @@ make cuda-35b-smoke
 
 CPU 输出位于 `build/qwen36-35b-cpu-smoke/`，CUDA 输出位于
 `build/qwen36-35b-cuda-smoke/`，可复制到 M5 的 handoff 位于
-`build/qwen36-35b-metal-smoke/`。当前 Metal backend 会明确拒绝 35B Q4_0/MoE，后续 Mac
-适配复用同一 model.bin 和 handoff vectors。固定上游、格式、实测结果与限制见
+`build/qwen36-35b-metal-smoke/`。当前 Metal backend 已有 dense Q4_0 embed/matrix 路径，
+但会明确拒绝尚未实现的 35B MoE；后续 Mac 适配复用同一 model.bin 和 handoff vectors。
+固定上游、格式、实测结果与限制见
 [`eval/qwen36-35b-q4.md`](eval/qwen36-35b-q4.md)。
 
 显存更小或只想快速迭代时仍可使用现有 4B BF16 路径：

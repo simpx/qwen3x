@@ -6,8 +6,8 @@
 ## 项目目标
 
 qwen3x 是一个个人开发的、极简、本地优先的 Qwen C++ 推理引擎，用于教学、研究和 PoC。
-型号范围包括 Qwen3.5-0.8B、2B、4B、9B、Qwen3.6-35B-A3B 和 Qwen3.8-27B。
-Qwen3.6 的 vision encoder 和 MTP 不在本项目范围内。
+型号范围固定为 Qwen3.5-0.8B、2B、4B、9B，Qwen3.6-35B-A3B 和 Qwen3.8-27B，
+不在本项目中扩展到其他架构或型号。Qwen3.6 的 vision encoder 和 MTP 不在项目范围内。
 
 项目希望用尽可能少的代码展示一条真实、完整、可运行的推理数据流。读者应当能从
 `main()` 出发，一直读到模型 forward：
@@ -78,8 +78,9 @@ log.cpp        进程级日志实现
   一份 CUDA decode forward；只有计算结构或数值路径不同时才增加具名 forward/prefill。
 - forward 从 config 读取 `H、I、N、AH、KVH、VH`，完整展示 embedding、layer loop、
   DeltaNet/Attention、FFN、final norm 和 logits。分支直接留在 backend 入口和 layer loop。
-- Metal 独立展示同一完整 forward；系统 API 收敛在 Objective-C++ 平台文件，数学写在
-  `.metal` kernel。复用现有 model bin 和 runtime 边界，量化分支集中在 embed/mv。
+- Metal 独立展示 dense 型号的同一完整 forward；系统 API 收敛在 Objective-C++ 平台文件，
+  数学写在 `.metal` kernel。复用现有 model bin 和 runtime 边界，量化分支集中在 embed/mv；
+  Qwen3.6 MoE 尚未适配时由 loader 明确拒绝。
 - File/Reader、固定布局 loader、Model/Layer、State/Work、checkpoint、模型算子和 CUDA kernel
   保持内聚、可组合，由完整 forward 直接编排。
 - Qwen3.6-35B-A3B 使用 Q4_0 matrix、BF16 router 和显式 MoE 分支。
