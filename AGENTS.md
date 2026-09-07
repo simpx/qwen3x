@@ -6,8 +6,8 @@
 ## 项目目标
 
 qwen3x 是一个个人开发的、极简、本地优先的 Qwen C++ 推理引擎，用于教学、研究和 PoC。
-型号范围固定为 Qwen3.5-0.8B、2B、4B、9B 和 Qwen3.8-27B，不在本项目中扩展到其他架构
-或型号。
+型号范围固定为 Qwen3.5-0.8B、2B、4B、9B，Qwen3.6-35B-A3B 和 Qwen3.8-27B，
+不在本项目中扩展到其他架构或型号。Qwen3.6 的 vision encoder 和 MTP 不在项目范围内。
 
 项目希望用尽可能少的代码展示一条真实、完整、可运行的推理数据流。读者应当能从
 `main()` 出发，一直读到模型 forward：
@@ -78,14 +78,16 @@ log.cpp        进程级日志实现
 
 - model bin 使用固定布局和 model ID 表达已支持型号；header、tensor 顺序、类型、alignment
   和 EOF 检查保持唯一、明确。
-- `ModelConfig` 集中记录每个型号的固定 shape。同一 Qwen3.5 结构共享一份完整 CPU forward 和
+- `ModelConfig` 集中记录每个型号的固定 shape。dense 与 MoE 共享一份完整 CPU forward 和
   一份 CUDA decode forward；只有计算结构或数值路径不同时才增加具名 forward/prefill。
 - forward 从 config 读取 `H、I、N、AH、KVH、VH`，完整展示 embedding、layer loop、
   DeltaNet/Attention、FFN、final norm 和 logits。分支直接留在 backend 入口和 layer loop。
-- Metal 独立展示同一完整 forward；系统 API 收敛在 Objective-C++ 平台文件，数学写在
-  `.metal` kernel。复用现有 model bin 和 runtime 边界，量化分支集中在 embed/mv。
+- Metal 独立展示 dense 型号的同一完整 forward；系统 API 收敛在 Objective-C++ 平台文件，
+  数学写在 `.metal` kernel。复用现有 model bin 和 runtime 边界，量化分支集中在 embed/mv；
+  Qwen3.6 MoE 尚未适配时由 loader 明确拒绝。
 - File/Reader、固定布局 loader、Model/Layer、State/Work、checkpoint、模型算子和 CUDA kernel
   保持内聚、可组合，由完整 forward 直接编排。
+- Qwen3.6-35B-A3B 使用 Q4_0 matrix、BF16 router 和显式 MoE 分支。
 - 新型号依次加入 model ID、`ModelConfig`、packer 和 reference 测试；结构或数值路径不同时再
   增加对应的 CPU/CUDA 主流程。
 
@@ -184,6 +186,9 @@ qwen3x-render.bin         所有支持型号共用的固定 tokenizer 数据
   q4.h/q8.h。权重所有权、tensor 加载顺序、alignment 和 EOF 检查仍在 engine。
   新增格式先补充明确的标量实现及数值测试。
   `CPU_OPT=0` 使用独立目录构建，只关闭架构加速，量化支持始终保留。
+- Qwen3.6 CUDA 权重使用一个完整 `cudaMalloc` device allocation；不在应用中保留 host
+  expert view。物理驻留和分页由 CUDA 驱动决定。CPU offload、expert streaming 和自动显存
+  规划属于未来的独立高级功能，不进入当前基础实现。
 - CUDA prefill 在 backend 内按 chunk 批量调度；runtime 把 `checkpoint_at` 作为精确 range
   边界，CUDA chunk 不跨过该边界。CUDA decode 保留可直接阅读的单 token forward，并用
   CUDA Graph replay 相同的具名 kernel 顺序。

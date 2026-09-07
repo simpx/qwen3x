@@ -1,15 +1,15 @@
-// arch/cuda/engine.cu -- readable CUDA engine for supported Qwen3.5 models.
+// arch/cuda/engine.cu -- readable CUDA engine for supported Qwen models.
 //
 // This is the same model data flow as engine.cpp with a different physical
 // home for Model, State and Work:
 //
-//   Model: packed BF16/Q8_0 weights are copied once and kept packed on the GPU
+//   Model: packed BF16/Q8_0/Q4_0 weights stay packed in device memory
 //   State: recurrent/KV state and its checkpoint stay on the GPU
-//   Work:  one Session-owned GPU scratch area reused by every forward
+//   Work:  Session-owned GPU scratch buffers reused by every forward
 //
-// Prefill runs the same layers over explicit token chunks; decode captures the
-// one-token forward as a CUDA Graph. Both stay behind q3x_backend::state_forward()
-// and do not enter runtime.cpp.
+// Dense prefill uses explicit token chunks and dense decode uses a CUDA Graph.
+// Qwen3.6 prefill/decode launches the same readable one-token forward. Both
+// stay behind q3x_backend::state_forward() and do not enter runtime.cpp.
 
 #include <algorithm>
 #include <cstdint>
@@ -30,6 +30,7 @@
 
 #include "internal.h"
 #include "model_config.h"
+#include "q4.h"
 #include "q8.h"
 
 namespace qwen3x_cuda {
@@ -85,10 +86,25 @@ struct AttentionWeights {
     const BF16* knorm = nullptr;
 };
 
+struct ExpertLinear {
+    const void* weight = nullptr;
+    int experts = 0;
+    int rows = 0;
+    int columns = 0;
+    q3x_model::MatrixType type = q3x_model::MATRIX_Q4_0;
+};
+
+struct MoeWeights {
+    Linear router;
+    ExpertLinear gate_up, down;
+    Linear shared_gate, shared_up, shared_down, shared_scale;
+};
+
 struct Layer {
     const BF16* input_norm = nullptr;
     const BF16* post_norm = nullptr;
     Linear gate, up, down;
+    MoeWeights moe;
     DeltaWeights delta;
     AttentionWeights attention;
 };
@@ -159,6 +175,7 @@ struct LayerState {
 
 struct Work {
     float* storage = nullptr;
+    size_t allocated_bytes = 0;
     float* hidden = nullptr;
     float* normalized = nullptr;
     float* logits = nullptr;
@@ -177,13 +194,23 @@ struct Work {
     float* key = nullptr;
     float* value = nullptr;
     float* attention_output = nullptr;
+    float* router_logits = nullptr;
+    float* router_probabilities = nullptr;
+    float* expert_gate_up = nullptr;
+    float* expert_hidden = nullptr;
+    float* expert_weights = nullptr;
+    int* expert_ids = nullptr;
 
-    void allocate(int V, int H, int I, int AH, int KVH, int VH) {
+    void allocate(int V, int H, int I, int AH, int KVH, int VH,
+                  int experts, int top_k) {
         const int AS = AH * AD, KVW = KVH * AD;
         const int DO = VH * VD, DQKV = 2 * DQK + DO;
         const size_t count = 2 * H + V + 2 * I + DQKV + DO + 2 * VH +
-                             3 * DO + 5 * AS + 2 * KVW;
+                             3 * DO + 5 * AS + 2 * KVW + 2ull * experts +
+                             static_cast<size_t>(top_k) * (3 * I + 1);
         CUDA_OK(cudaMalloc(&storage, count * sizeof(float)));
+        allocated_bytes = count * sizeof(float) +
+                          static_cast<size_t>(top_k) * sizeof(int);
         float* cursor = storage;
         hidden = cursor; cursor += H;
         normalized = cursor; cursor += H;
@@ -203,6 +230,12 @@ struct Work {
         key = cursor; cursor += KVW;
         value = cursor; cursor += KVW;
         attention_output = cursor; cursor += AS;
+        router_logits = cursor; cursor += experts;
+        router_probabilities = cursor; cursor += experts;
+        expert_gate_up = cursor; cursor += static_cast<size_t>(top_k) * 2 * I;
+        expert_hidden = cursor; cursor += static_cast<size_t>(top_k) * I;
+        expert_weights = cursor; cursor += top_k;
+        if (top_k) CUDA_OK(cudaMalloc(&expert_ids, top_k * sizeof(int)));
         Q3X_ASSERT(cursor == storage + count,
                    "CUDA Work layout cursor=%p end=%p",
                    static_cast<void*>(cursor),
@@ -211,7 +244,10 @@ struct Work {
 
     void release() {
         if (storage) cudaFree(storage);
+        if (expert_ids) cudaFree(expert_ids);
         storage = nullptr;
+        expert_ids = nullptr;
+        allocated_bytes = 0;
     }
 };
 
@@ -328,10 +364,12 @@ struct StateData {
         CUDA_OK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
         CUBLAS_OK(cublasCreate(&cublas));
         CUBLAS_OK(cublasSetStream(cublas, stream));
-        work.allocate(c.V, H, I, AH, KVH, VH);
-        batch.allocate(H, I, AH, KVH, VH,
-                       c.matrix_type == q3x_model::MATRIX_BF16 &&
-                       c.id == q3x_model::QWEN35_4B.id);
+        work.allocate(c.V, H, I, AH, KVH, VH, c.experts, c.top_k);
+        if (!c.experts) {
+            batch.allocate(H, I, AH, KVH, VH,
+                           c.matrix_type == q3x_model::MATRIX_BF16 &&
+                           c.id == q3x_model::QWEN35_4B.id);
+        }
         recurrent.allocate(recurrent_count);
         kv_cache.allocate(static_cast<size_t>(attention_layers) * 2 * cache_count);
         checkpoint.allocate(recurrent_count + c.V);
@@ -355,6 +393,20 @@ struct StateData {
         kv_cache.finish();
         CUDA_OK(cudaMemsetAsync(recurrent.memory, 0,
                                 recurrent.count * sizeof(float), stream));
+        if (c.experts) {
+            const size_t recurrent_bytes = recurrent.count * sizeof(float);
+            const size_t kv_bytes = kv_cache.count * sizeof(float);
+            const size_t checkpoint_bytes = checkpoint.count * sizeof(float);
+            const size_t token_bytes = static_cast<size_t>(capacity) * sizeof(int);
+            const size_t state_bytes = work.allocated_bytes + recurrent_bytes +
+                                       kv_bytes + checkpoint_bytes + token_bytes +
+                                       sizeof(int);
+            LOG_INFO("CUDA Qwen3.6 state context=%d state_bytes=%zu "
+                     "work_bytes=%zu recurrent_bytes=%zu kv_bytes=%zu "
+                     "checkpoint_bytes=%zu",
+                     capacity, state_bytes, work.allocated_bytes,
+                     recurrent_bytes, kv_bytes, checkpoint_bytes);
+        }
     }
 
     ~StateData() {
@@ -448,6 +500,22 @@ __global__ void embed_q8_kernel(const q3x_q8::Block* table,
     }
 }
 
+__global__ void embed_q4_kernel(const q3x_q4::Block* table,
+                                const int* tokens, const int* position,
+                                float* output, int H) {
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < H) {
+        const int token = tokens[*position];
+        const int blocks = H / q3x_q4::BLOCK_SIZE;
+        const q3x_q4::Block& block = table[
+            static_cast<size_t>(token) * blocks + index / q3x_q4::BLOCK_SIZE];
+        const int within = index % q3x_q4::BLOCK_SIZE;
+        const uint8_t packed = block.values[within % 16];
+        const int quant = within < 16 ? packed & 0x0f : packed >> 4;
+        output[index] = f16(block.scale) * (quant - 8);
+    }
+}
+
 __global__ void mv_kernel(const BF16* weight, const float* input,
                           float* output, int rows, int columns) {
     const int row = blockIdx.x;
@@ -488,6 +556,21 @@ __device__ float dot_row_q8(const q3x_q8::Block* weight, int row,
     return block_sum(sum, shared);
 }
 
+__device__ float dot_row_q4(const q3x_q4::Block* weight, int row,
+                            const float* input, int columns, float* shared) {
+    const int blocks = columns / q3x_q4::BLOCK_SIZE;
+    const q3x_q4::Block* source = weight + static_cast<size_t>(row) * blocks;
+    float sum = 0.0f;
+    for (int column = threadIdx.x; column < columns; column += blockDim.x) {
+        const q3x_q4::Block& block = source[column / q3x_q4::BLOCK_SIZE];
+        const int within = column % q3x_q4::BLOCK_SIZE;
+        const uint8_t packed = block.values[within % 16];
+        const int quant = within < 16 ? packed & 0x0f : packed >> 4;
+        sum += f16(block.scale) * (quant - 8) * input[column];
+    }
+    return block_sum(sum, shared);
+}
+
 __global__ void mv_q8_kernel(const q3x_q8::Block* weight,
                              const float* input, float* output,
                              int rows, int columns) {
@@ -505,6 +588,26 @@ __global__ void mv_add_q8_kernel(const q3x_q8::Block* weight,
     if (row >= rows) return;
     __shared__ float shared[BLOCK];
     const float total = dot_row_q8(weight, row, input, columns, shared);
+    if (threadIdx.x == 0) output[row] += total;
+}
+
+__global__ void mv_q4_kernel(const q3x_q4::Block* weight,
+                             const float* input, float* output,
+                             int rows, int columns) {
+    const int row = blockIdx.x;
+    if (row >= rows) return;
+    __shared__ float shared[BLOCK];
+    const float total = dot_row_q4(weight, row, input, columns, shared);
+    if (threadIdx.x == 0) output[row] = total;
+}
+
+__global__ void mv_add_q4_kernel(const q3x_q4::Block* weight,
+                                 const float* input, float* output,
+                                 int rows, int columns) {
+    const int row = blockIdx.x;
+    if (row >= rows) return;
+    __shared__ float shared[BLOCK];
+    const float total = dot_row_q4(weight, row, input, columns, shared);
     if (threadIdx.x == 0) output[row] += total;
 }
 
@@ -1047,6 +1150,114 @@ __global__ void swiglu_kernel(float* gate, const float* up, int I) {
     if (index < I) gate[index] = gate[index] / (1.0f + expf(-gate[index])) * up[index];
 }
 
+__global__ void router_top_k_kernel(const float* logits, float* probabilities,
+                                    int* ids, float* weights,
+                                    int experts, int top_k) {
+    if (blockIdx.x || threadIdx.x) return;
+    float maximum = -3.402823466e+38F;
+    for (int expert = 0; expert < experts; ++expert)
+        maximum = fmaxf(maximum, logits[expert]);
+    float total = 0.0f;
+    for (int expert = 0; expert < experts; ++expert) {
+        probabilities[expert] = expf(logits[expert] - maximum);
+        total += probabilities[expert];
+    }
+    for (int expert = 0; expert < experts; ++expert)
+        probabilities[expert] /= total;
+    float selected_total = 0.0f;
+    for (int slot = 0; slot < top_k; ++slot) {
+        int selected = -1;
+        for (int expert = 0; expert < experts; ++expert) {
+            bool used = false;
+            for (int previous = 0; previous < slot; ++previous)
+                used = used || ids[previous] == expert;
+            if (!used && (selected < 0 ||
+                          probabilities[expert] > probabilities[selected]))
+                selected = expert;
+        }
+        ids[slot] = selected;
+        selected_total += probabilities[selected];
+    }
+    for (int slot = 0; slot < top_k; ++slot) {
+        weights[slot] = probabilities[ids[slot]] / selected_total;
+    }
+}
+
+__global__ void expert_gate_up_q4_kernel(
+    const q3x_q4::Block* packed, const float* input, float* output,
+    const int* ids, int experts, int rows, int columns, int top_k) {
+    const int output_row = blockIdx.x;
+    const int slot = output_row / rows;
+    const int row = output_row % rows;
+    if (slot >= top_k) return;
+    const int source_expert = ids[slot];
+    if (source_expert >= experts) return;
+    const int blocks = columns / q3x_q4::BLOCK_SIZE;
+    const q3x_q4::Block* weight = packed +
+        (static_cast<size_t>(source_expert) * rows + row) * blocks;
+    float sum = 0.0f;
+    for (int column = threadIdx.x; column < columns; column += blockDim.x) {
+        const q3x_q4::Block& block = weight[column / q3x_q4::BLOCK_SIZE];
+        const int within = column % q3x_q4::BLOCK_SIZE;
+        const uint8_t byte = block.values[within % 16];
+        const int quant = within < 16 ? byte & 0x0f : byte >> 4;
+        sum += f16(block.scale) * (quant - 8) * input[column];
+    }
+    __shared__ float shared[BLOCK];
+    const float total = block_sum(sum, shared);
+    if (threadIdx.x == 0) output[static_cast<size_t>(slot) * rows + row] = total;
+}
+
+__global__ void expert_swiglu_kernel(const float* gate_up, float* hidden,
+                                     int intermediate, int top_k) {
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= top_k * intermediate) return;
+    const int slot = index / intermediate;
+    const int channel = index % intermediate;
+    const float gate = gate_up[static_cast<size_t>(slot) * 2 * intermediate + channel];
+    const float up = gate_up[static_cast<size_t>(slot) * 2 * intermediate +
+                             intermediate + channel];
+    hidden[index] = gate / (1.0f + expf(-gate)) * up;
+}
+
+__global__ void expert_down_weighted_q4_kernel(
+    const q3x_q4::Block* packed, const float* hidden,
+    const int* ids, const float* routing_weights, float* output,
+    int experts, int rows, int columns, int top_k) {
+    const int row = blockIdx.x;
+    if (row >= rows) return;
+    const int blocks = columns / q3x_q4::BLOCK_SIZE;
+    float sum = 0.0f;
+    for (int slot = 0; slot < top_k; ++slot) {
+        const int source_expert = ids[slot];
+        if (source_expert >= experts) continue;
+        const q3x_q4::Block* weight = packed +
+            (static_cast<size_t>(source_expert) * rows + row) * blocks;
+        float expert_sum = 0.0f;
+        for (int column = threadIdx.x; column < columns; column += blockDim.x) {
+            const q3x_q4::Block& block = weight[column / q3x_q4::BLOCK_SIZE];
+            const int within = column % q3x_q4::BLOCK_SIZE;
+            const uint8_t byte = block.values[within % 16];
+            const int quant = within < 16 ? byte & 0x0f : byte >> 4;
+            expert_sum += f16(block.scale) * (quant - 8) *
+                          hidden[static_cast<size_t>(slot) * columns + column];
+        }
+        sum += routing_weights[slot] * expert_sum;
+    }
+    __shared__ float shared[BLOCK];
+    const float total = block_sum(sum, shared);
+    if (threadIdx.x == 0) output[row] += total;
+}
+
+__global__ void shared_scaled_add_kernel(float* output, const float* shared,
+                                         const float* gate, int count) {
+    const int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < count) {
+        const float scale = 1.0f / (1.0f + expf(-gate[0]));
+        output[index] += scale * shared[index];
+    }
+}
+
 __global__ void conv_kernel(float* qkv, const BF16* weight, float* history,
                             int DQKV) {
     const int channel = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1281,15 +1492,24 @@ const q3x_q8::Block* q8_weight(const Linear& linear) {
     return static_cast<const q3x_q8::Block*>(linear.weight);
 }
 
+const q3x_q4::Block* q4_weight(const Linear& linear) {
+    return static_cast<const q3x_q4::Block*>(linear.weight);
+}
+
 void embed(const Linear& table, const int* tokens, const int* position,
            float* output, cudaStream_t stream) {
     const int blocks = (table.columns + BLOCK - 1) / BLOCK;
     if (table.type == q3x_model::MATRIX_BF16) {
         embed_kernel<<<blocks, BLOCK, 0, stream>>>(
             bf16_weight(table), tokens, position, output, table.columns);
-    } else {
+    } else if (table.type == q3x_model::MATRIX_Q8_0) {
         embed_q8_kernel<<<blocks, BLOCK, 0, stream>>>(
             q8_weight(table), tokens, position, output, table.columns);
+    } else if (table.type == q3x_model::MATRIX_Q4_0) {
+        embed_q4_kernel<<<blocks, BLOCK, 0, stream>>>(
+            q4_weight(table), tokens, position, output, table.columns);
+    } else {
+        Q3X_ASSERT(false, "CUDA unknown embedding type=%u", table.type);
     }
 }
 
@@ -1300,9 +1520,11 @@ void batch_embed(const Linear& table, const int* tokens, int start, int count,
     if (table.type == q3x_model::MATRIX_BF16) {
         batch_embed_kernel<<<blocks, BLOCK, 0, stream>>>(
             bf16_weight(table), tokens, start, count, output, table.columns);
-    } else {
+    } else if (table.type == q3x_model::MATRIX_Q8_0) {
         batch_embed_q8_kernel<<<blocks, BLOCK, 0, stream>>>(
             q8_weight(table), tokens, start, count, output, table.columns);
+    } else {
+        Q3X_ASSERT(false, "CUDA batch embedding unsupported type=%u", table.type);
     }
 }
 
@@ -1311,9 +1533,14 @@ void mv(const Linear& linear, const float* input, float* output,
     if (linear.type == q3x_model::MATRIX_BF16) {
         mv_kernel<<<linear.rows, BLOCK, 0, stream>>>(
             bf16_weight(linear), input, output, linear.rows, linear.columns);
-    } else {
+    } else if (linear.type == q3x_model::MATRIX_Q8_0) {
         mv_q8_kernel<<<linear.rows, BLOCK, 0, stream>>>(
             q8_weight(linear), input, output, linear.rows, linear.columns);
+    } else if (linear.type == q3x_model::MATRIX_Q4_0) {
+        mv_q4_kernel<<<linear.rows, BLOCK, 0, stream>>>(
+            q4_weight(linear), input, output, linear.rows, linear.columns);
+    } else {
+        Q3X_ASSERT(false, "CUDA unknown matrix type=%u", linear.type);
     }
 }
 
@@ -1322,9 +1549,14 @@ void mv_add(const Linear& linear, const float* input, float* output,
     if (linear.type == q3x_model::MATRIX_BF16) {
         mv_add_kernel<<<linear.rows, BLOCK, 0, stream>>>(
             bf16_weight(linear), input, output, linear.rows, linear.columns);
-    } else {
+    } else if (linear.type == q3x_model::MATRIX_Q8_0) {
         mv_add_q8_kernel<<<linear.rows, BLOCK, 0, stream>>>(
             q8_weight(linear), input, output, linear.rows, linear.columns);
+    } else if (linear.type == q3x_model::MATRIX_Q4_0) {
+        mv_add_q4_kernel<<<linear.rows, BLOCK, 0, stream>>>(
+            q4_weight(linear), input, output, linear.rows, linear.columns);
+    } else {
+        Q3X_ASSERT(false, "CUDA unknown add matrix type=%u", linear.type);
     }
 }
 
@@ -1345,6 +1577,8 @@ void batch_mv(cublasHandle_t handle, const Linear& linear,
             count, add);
         return;
     }
+    Q3X_ASSERT(linear.type == q3x_model::MATRIX_BF16,
+               "CUDA batch matrix unsupported type=%u", linear.type);
     Q3X_ASSERT(converted, "BF16 batch matrix conversion buffer is null");
     const int values = count * linear.columns;
     fp32_to_bf16_kernel<<<(values + BLOCK - 1) / BLOCK, BLOCK, 0, stream>>>(
@@ -1470,6 +1704,35 @@ void ffn(const Layer& layer, const float* input, Work& work, float* output,
     swiglu_kernel<<<(I + BLOCK - 1) / BLOCK, BLOCK, 0, stream>>>(
         work.ffn_gate, work.ffn_up, I);
     mv_add(layer.down, work.ffn_gate, output, stream);
+}
+
+void moe(const MoeWeights& weights, const float* input, Work& work, float* output,
+         const q3x_model::ModelConfig& c, cudaStream_t stream) {
+    mv(weights.router, input, work.router_logits, stream);
+    router_top_k_kernel<<<1, 1, 0, stream>>>(
+        work.router_logits, work.router_probabilities,
+        work.expert_ids, work.expert_weights, c.experts, c.top_k);
+
+    expert_gate_up_q4_kernel<<<c.top_k * 2 * c.I, BLOCK, 0, stream>>>(
+        static_cast<const q3x_q4::Block*>(weights.gate_up.weight), input,
+        work.expert_gate_up, work.expert_ids, c.experts,
+        2 * c.I, c.H, c.top_k);
+    expert_swiglu_kernel<<<(c.top_k * c.I + BLOCK - 1) / BLOCK,
+                            BLOCK, 0, stream>>>(
+        work.expert_gate_up, work.expert_hidden, c.I, c.top_k);
+    expert_down_weighted_q4_kernel<<<c.H, BLOCK, 0, stream>>>(
+        static_cast<const q3x_q4::Block*>(weights.down.weight),
+        work.expert_hidden, work.expert_ids, work.expert_weights,
+        output, c.experts, c.H, c.I, c.top_k);
+
+    mv(weights.shared_gate, input, work.ffn_gate, stream);
+    mv(weights.shared_up, input, work.ffn_up, stream);
+    swiglu_kernel<<<(c.shared_I + BLOCK - 1) / BLOCK, BLOCK, 0, stream>>>(
+        work.ffn_gate, work.ffn_up, c.shared_I);
+    mv(weights.shared_down, work.ffn_gate, work.delta_output, stream);
+    mv(weights.shared_scale, input, work.router_logits, stream);
+    shared_scaled_add_kernel<<<(c.H + BLOCK - 1) / BLOCK, BLOCK, 0, stream>>>(
+        output, work.delta_output, work.router_logits, c.H);
 }
 
 void batch_deltanet_fp32(const DeltaWeights& weights,
@@ -1717,7 +1980,10 @@ void forward(const Model& model, StateData& state, bool compute_logits) {
                       work.normalized, work, work.hidden, AH, KVH, stream);
         }
         rms(work.hidden, layer.post_norm, H, work.normalized, stream);
-        ffn(layer, work.normalized, work, work.hidden, I, stream);
+        if (c.experts)
+            moe(layer.moe, work.normalized, work, work.hidden, c, stream);
+        else
+            ffn(layer, work.normalized, work, work.hidden, I, stream);
     }
     if (compute_logits) {
         rms(work.hidden, model.final_norm, H, work.normalized, stream);
@@ -1801,11 +2067,13 @@ bool Model::load(const char* path, const char** error) {
         return fail("wrong model.bin magic");
     const uint32_t id = q3x_model::header_field(file, q3x_model::MODEL_ID);
     config = q3x_model::config_for_id(id);
-    if (!config) return fail("unsupported Qwen3.5 model ID");
+    if (!config) return fail("unsupported Qwen model ID");
     if (!q3x_model::header_matches(file, size, *config))
-        return fail("Qwen3.5 model.bin header mismatch");
+        return fail("Qwen model.bin header mismatch");
 
     cudaError_t status = cudaMalloc(&weights, size);
+    if (status == cudaErrorMemoryAllocation)
+        return fail("CUDA model does not fit in device memory");
     if (status != cudaSuccess) return fail("CUDA model allocation failed");
     status = cudaMemcpy(weights, file, size, cudaMemcpyHostToDevice);
     if (status != cudaSuccess) return fail("CUDA model upload failed");
@@ -1814,60 +2082,107 @@ bool Model::load(const char* path, const char** error) {
     const auto& c = *config;
     const int AS = c.AH * c.AD, KVW = c.KVH * c.AD;
     const int DO = c.VH * c.VD, DQKV = 2 * c.KH * c.KD + DO;
-    auto linear = [&](int rows, int columns) {
-        Q3X_ASSERT(columns % q3x_q8::BLOCK_SIZE == 0,
-                   "CUDA matrix columns=%d block=%d",
-                   columns, q3x_q8::BLOCK_SIZE);
-        if (c.matrix_type == q3x_model::MATRIX_BF16) {
+    auto bf16 = [&](size_t count) {
+        return qwen3x_cuda::take<BF16>(weights, size, cursor, count, error);
+    };
+    auto fp32 = [&](size_t count) {
+        return qwen3x_cuda::take<float>(weights, size, cursor, count, error);
+    };
+    auto linear = [&](int rows, int columns,
+                      q3x_model::MatrixType type) -> Linear {
+        switch (type) {
+        case q3x_model::MATRIX_BF16:
             return Linear {qwen3x_cuda::take<BF16>(
                                weights, size, cursor,
                                static_cast<size_t>(rows) * columns, error),
-                           rows, columns, c.matrix_type};
+                           rows, columns, type};
+        case q3x_model::MATRIX_Q8_0:
+            Q3X_ASSERT(columns % q3x_q8::BLOCK_SIZE == 0,
+                       "CUDA Q8 matrix rows=%d columns=%d", rows, columns);
+            return Linear {qwen3x_cuda::take<q3x_q8::Block>(
+                               weights, size, cursor,
+                               static_cast<size_t>(rows) * columns /
+                               q3x_q8::BLOCK_SIZE, error),
+                           rows, columns, type};
+        case q3x_model::MATRIX_Q4_0:
+            Q3X_ASSERT(columns % q3x_q4::BLOCK_SIZE == 0,
+                       "CUDA Q4 matrix rows=%d columns=%d", rows, columns);
+            return Linear {qwen3x_cuda::take<q3x_q4::Block>(
+                               weights, size, cursor,
+                               static_cast<size_t>(rows) * columns /
+                               q3x_q4::BLOCK_SIZE, error),
+                           rows, columns, type};
         }
-        return Linear {qwen3x_cuda::take<q3x_q8::Block>(
-                           weights, size, cursor,
-                           static_cast<size_t>(rows) * columns /
-                           q3x_q8::BLOCK_SIZE, error),
-                       rows, columns, c.matrix_type};
+        Q3X_ASSERT(false, "unknown CUDA loader matrix type=%u", type);
+        return Linear {};
+    };
+    auto model_linear = [&](int rows, int columns) {
+        return linear(rows, columns, c.matrix_type);
+    };
+    auto expert = [&](int rows, int columns) {
+        Q3X_ASSERT(c.matrix_type == q3x_model::MATRIX_Q4_0 &&
+                   columns % q3x_q4::BLOCK_SIZE == 0,
+                   "CUDA expert matrix rows=%d columns=%d type=%u",
+                   rows, columns, c.matrix_type);
+        return qwen3x_cuda::ExpertLinear {
+            qwen3x_cuda::take<q3x_q4::Block>(
+                weights, size, cursor,
+                static_cast<size_t>(c.experts) * rows * columns /
+                q3x_q4::BLOCK_SIZE, error),
+            c.experts, rows, columns, c.matrix_type,
+        };
     };
     layers.reset(new (std::nothrow) Layer[c.N]);
     if (!layers) return fail("cannot allocate CUDA model layer table");
-    embedding = linear(c.V, c.H);
-    lm_head = c.tied_embeddings ? embedding : linear(c.V, c.H);
-    final_norm = qwen3x_cuda::take<BF16>(weights, size, cursor, c.H, error);
+    embedding = model_linear(c.V, c.H);
+    lm_head = c.tied_embeddings ? embedding : model_linear(c.V, c.H);
+    final_norm = bf16(c.H);
     for (int i = 0; i < c.N; ++i) {
         Layer& l = layers[i];
-        l.input_norm = qwen3x_cuda::take<BF16>(weights, size, cursor, c.H, error);
+        l.input_norm = bf16(c.H);
         if (i % c.AI != c.AI - 1) {
-            l.delta.qkv = linear(DQKV, c.H); l.delta.z = linear(DO, c.H);
-            l.delta.a = linear(c.VH, c.H); l.delta.b = linear(c.VH, c.H);
-            l.delta.conv = qwen3x_cuda::take<BF16>(
-                weights, size, cursor, static_cast<size_t>(DQKV) * c.CK, error);
-            l.delta.alog = qwen3x_cuda::take<float>(
-                weights, size, cursor, c.VH, error);
-            l.delta.dt = qwen3x_cuda::take<BF16>(
-                weights, size, cursor, c.VH, error);
-            l.delta.norm = qwen3x_cuda::take<float>(
-                weights, size, cursor, c.VD, error);
-            l.delta.out = linear(c.H, DO);
+            l.delta.qkv = model_linear(DQKV, c.H);
+            l.delta.z = model_linear(DO, c.H);
+            l.delta.a = model_linear(c.VH, c.H);
+            l.delta.b = model_linear(c.VH, c.H);
+            l.delta.conv = bf16(static_cast<size_t>(DQKV) * c.CK);
+            l.delta.alog = fp32(c.VH);
+            l.delta.dt = bf16(c.VH);
+            l.delta.norm = fp32(c.VD);
+            l.delta.out = model_linear(c.H, DO);
         } else {
-            l.attention.q = linear(2 * AS, c.H);
-            l.attention.k = linear(KVW, c.H);
-            l.attention.v = linear(KVW, c.H);
-            l.attention.qnorm = qwen3x_cuda::take<BF16>(
-                weights, size, cursor, c.AD, error);
-            l.attention.knorm = qwen3x_cuda::take<BF16>(
-                weights, size, cursor, c.AD, error);
-            l.attention.out = linear(c.H, AS);
+            l.attention.q = model_linear(2 * AS, c.H);
+            l.attention.k = model_linear(KVW, c.H);
+            l.attention.v = model_linear(KVW, c.H);
+            l.attention.qnorm = bf16(c.AD);
+            l.attention.knorm = bf16(c.AD);
+            l.attention.out = model_linear(c.H, AS);
         }
-        l.post_norm = qwen3x_cuda::take<BF16>(weights, size, cursor, c.H, error);
-        l.gate = linear(c.I, c.H);
-        l.up = linear(c.I, c.H);
-        l.down = linear(c.H, c.I);
+        l.post_norm = bf16(c.H);
+        if (c.experts) {
+            l.moe.router = linear(c.experts, c.H, q3x_model::MATRIX_BF16);
+            l.moe.gate_up = expert(2 * c.I, c.H);
+            l.moe.down = expert(c.H, c.I);
+            l.moe.shared_gate = model_linear(c.shared_I, c.H);
+            l.moe.shared_up = model_linear(c.shared_I, c.H);
+            l.moe.shared_down = model_linear(c.H, c.shared_I);
+            l.moe.shared_scale = linear(1, c.H, q3x_model::MATRIX_BF16);
+        } else {
+            l.gate = model_linear(c.I, c.H);
+            l.up = model_linear(c.I, c.H);
+            l.down = model_linear(c.H, c.I);
+        }
     }
     if (*error) return fail(*error);
     if (cursor != size)
-        return fail("model.bin size does not match selected Qwen3.5 schema");
+        return fail("model.bin size does not match selected Qwen schema");
+    if (c.experts) {
+        size_t free_memory = 0, total_memory = 0;
+        CUDA_OK(cudaMemGetInfo(&free_memory, &total_memory));
+        LOG_INFO("CUDA Qwen3.6 weights device_allocation_bytes=%zu "
+                 "free_bytes=%zu total_bytes=%zu",
+                 size, free_memory, total_memory);
+    }
     close_file();
     return true;
 }
@@ -1940,7 +2255,15 @@ void state_forward(Model* model, State* state,
         data.device_tokens + data.position, tokens,
         static_cast<size_t>(count) * sizeof(int),
         cudaMemcpyHostToDevice, data.stream));
-    if (count == 1) {
+    if (model->config->experts) {
+        CUDA_OK(cudaMemcpyAsync(data.device_position, &data.position,
+                                sizeof(int), cudaMemcpyHostToDevice,
+                                data.stream));
+        for (int index = 0; index < count; ++index) {
+            qwen3x_cuda::forward(*model, data,
+                                 compute_logits && index + 1 == count);
+        }
+    } else if (count == 1) {
         if (!data.forward_graph) {
             data.forward_graph = qwen3x_cuda::capture_forward(
                 *model, data, false);

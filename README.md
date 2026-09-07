@@ -97,6 +97,42 @@ context。pi 可以流式 thinking 和 tool calls，完成分段读文件、revi
 16K prompt prefill 为 56.54 秒（290 tok/s），随后 decode 为 21.5 tok/s。结果记录在
 [`eval/q8-9b.md`](eval/q8-9b.md)。
 
+### Qwen3.6-35B-A3B Q4_0
+
+Qwen3.6 支持范围限定为官方 35B-A3B 的纯文本 backbone，checkpoint 固定为 revision
+`995ad96eacd98c81ed38be0c5b274b04031597b0`；vision encoder 和 MTP 不进入 model.bin。所有
+大矩阵使用与 llama.cpp byte layout 相同的 Q4_0，router、norm 等小权重保留 BF16/FP32。
+CPU 直接 mmap 同一个约 18.19 GiB 的 model.bin，不创建 BF16/FP32 权重副本，实际常驻内存
+由访问页和系统 page cache 决定。CUDA 使用最直接的单一 device allocation：整个 model.bin
+通过一次 `cudaMalloc`/copy 上传，所有 routed experts 都使用 device pointer。当前不实现 CPU
+offload、expert streaming 或自动显存规划。WSL/WDDM 上的 CUDA 驱动允许该 allocation 超过
+物理显存并自行分页；这不是 qwen3x 提供的 offload 策略，其他平台能否加载取决于 CUDA
+allocator 和可用显存。
+
+准备固定 revision 的 checkpoint 和 Q4_0 model.bin：
+
+```sh
+make model-35b
+```
+
+固定 revision 的产物是 19,528,534,784 bytes（18.1874 GiB），SHA-256 是
+`3e1de932b9031bbbfceb2513fa76b2cd2e586043423ee48a8b666d77807c24fa`。
+
+CPU 验收会生成逐位置完整 logits、greedy tokens、checkpoint/cache 结果和跨机器 Metal
+测试向量；CUDA 使用同一组对齐测试：
+
+```sh
+make cpu-35b-smoke
+make cuda-35b-smoke
+```
+
+CPU 输出位于 `build/qwen36-35b-cpu-smoke/`，CUDA 输出位于
+`build/qwen36-35b-cuda-smoke/`，可复制到 M5 的 handoff 位于
+`build/qwen36-35b-metal-smoke/`。当前 Metal backend 已有 dense Q4_0 embed/matrix 路径，
+但会明确拒绝尚未实现的 35B MoE；后续 Mac 适配复用同一 model.bin 和 handoff vectors。
+固定上游、格式、实测结果与限制见
+[`eval/qwen36-35b-q4.md`](eval/qwen36-35b-q4.md)。
+
 显存更小或只想快速迭代时仍可使用现有 4B BF16 路径：
 
 ```sh

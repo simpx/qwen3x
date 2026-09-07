@@ -123,7 +123,7 @@ llama-smoke-run:
 $(LIBRARY): $(CPU_SRC) $(CPU_HEADERS) Makefile $(ENGINE_DIR)/engine.cpp $(ENGINE_DIR)/runtime.cpp \
 		$(ENGINE_DIR)/log.cpp $(ENGINE_DIR)/qwen3x.h \
 		$(ENGINE_DIR)/internal.h $(ENGINE_DIR)/model_config.h \
-		$(ENGINE_DIR)/q8.h $(SPDLOG_SRC)
+		$(ENGINE_DIR)/q4.h $(ENGINE_DIR)/q8.h $(SPDLOG_SRC)
 	mkdir -p "$(dir $(LIBRARY))"
 	$(CXX) $(ENGINE_CXXFLAGS) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) \
 		-DQ3X_CPU_OPT=$(CPU_OPT) $(CPU_SRC) \
@@ -134,7 +134,7 @@ $(LIBRARY): $(CPU_SRC) $(CPU_HEADERS) Makefile $(ENGINE_DIR)/engine.cpp $(ENGINE
 $(CUDA_LIBRARY): $(ENGINE_DIR)/arch/cuda/engine.cu $(ENGINE_DIR)/runtime.cpp \
 		$(ENGINE_DIR)/log.cpp $(ENGINE_DIR)/qwen3x.h \
 		$(ENGINE_DIR)/internal.h $(ENGINE_DIR)/model_config.h \
-		$(ENGINE_DIR)/q8.h $(SPDLOG_SRC)
+		$(ENGINE_DIR)/q4.h $(ENGINE_DIR)/q8.h $(SPDLOG_SRC)
 	mkdir -p "$(dir $(CUDA_LIBRARY))"
 	nvcc -O3 -std=c++17 -arch=native \
 		-Xcompiler=-fPIC,-fno-exceptions,-fno-rtti,-Wall,-Wextra \

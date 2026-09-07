@@ -590,6 +590,8 @@ bool Model::load(const char* path, const char** error) {
     if (!config) return mapped_fail("unsupported Qwen model ID");
     if (!q3x_model::header_matches(file, size, *config))
         return mapped_fail("Qwen model.bin header mismatch");
+    if (config->experts)
+        return mapped_fail("MoE not supported by Metal yet");
     size_t cursor = q3x_model::HEADER_SIZE, base = 0;
     auto take = [&](size_t bytes) {
         if (*error) return size_t(0);
