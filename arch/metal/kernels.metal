@@ -1,5 +1,6 @@
-// Qwen3.5 Metal correctness kernels. Activations/state stay FP32; weights stay
-// BF16, Q8_0 or Q4_0. Every dispatch uses 256 threads per threadgroup.
+// Qwen3x Metal kernels. Activations/state stay FP32; weights stay
+// BF16, Q8_0 or Q4_0. Most dispatches use 256 threads per threadgroup;
+// Q4_0 matrix-vector uses one SIMD group per output row.
 #include <metal_stdlib>
 using namespace metal;
 
@@ -88,15 +89,93 @@ kernel void mv_q8(device const Q8Block* w [[buffer(0)]],
 kernel void mv_q4(device const Q4Block* w [[buffer(0)]],
                   device const float* x [[buffer(1)]], device float* out [[buffer(2)]],
                   constant uint2& p [[buffer(3)]], uint row [[threadgroup_position_in_grid]],
-                  uint tid [[thread_index_in_threadgroup]]) {
-    float sum = 0.0f;
-    for (uint i = tid; i < p.x; i += BLOCK) {
-        device const Q4Block& b = w[ulong(row) * (p.x / 32) + i / 32];
-        sum += float(as_type<half>(b.scale)) * q4(b, i % 32) * x[i];
+                  uint lane [[thread_index_in_simdgroup]]) {
+    float4 sums = 0.0f;
+    const uint blocks = p.x / 32;
+    for (uint base = lane * 8; base < p.x; base += 1024) {
+        #pragma unroll
+        for (uint part = 0; part < 4; ++part) {
+            const uint column = base + part * 256;
+            if (column >= p.x) continue;
+            device const Q4Block& b = w[ulong(row) * blocks + column / 32];
+            const uint offset = column % 16;
+            const uint shift = column % 32 < 16 ? 0 : 4;
+            const float4 low = float4(
+                int((b.values[offset] >> shift) & 15) - 8,
+                int((b.values[offset + 1] >> shift) & 15) - 8,
+                int((b.values[offset + 2] >> shift) & 15) - 8,
+                int((b.values[offset + 3] >> shift) & 15) - 8);
+            const float4 high = float4(
+                int((b.values[offset + 4] >> shift) & 15) - 8,
+                int((b.values[offset + 5] >> shift) & 15) - 8,
+                int((b.values[offset + 6] >> shift) & 15) - 8,
+                int((b.values[offset + 7] >> shift) & 15) - 8);
+            const float scale = float(as_type<half>(b.scale));
+            sums[part] += scale *
+                (dot(low, *reinterpret_cast<device const float4*>(x + column)) +
+                 dot(high, *reinterpret_cast<device const float4*>(x + column + 4)));
+        }
     }
-    threadgroup float shared[BLOCK];
-    const float total = sum_group(sum, shared, tid);
-    if (tid == 0) out[row] = total + (p.y ? out[row] : 0.0f);
+    const float total = simd_sum(sums.x + sums.y + sums.z + sums.w);
+    if (lane == 0) out[row] = total + (p.y ? out[row] : 0.0f);
+}
+
+// p = {rows, columns, token_count, add_to_output}. One SIMD group reuses a
+// decoded matrix row across four token rows.
+kernel void batch_mv_q4(device const Q4Block* w [[buffer(0)]],
+                        device const float* input [[buffer(1)]],
+                        device float* output [[buffer(2)]],
+                        constant uint4& p [[buffer(3)]],
+                        uint2 group [[threadgroup_position_in_grid]],
+                        uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint TOKEN_TILE = 4;
+    const uint row = group.x, token_start = group.y * TOKEN_TILE;
+    if (row >= p.x || token_start >= p.z) return;
+    const uint blocks = p.y / 32;
+    float4 sums[TOKEN_TILE] = {};
+    for (uint base = lane * 8; base < p.y; base += 1024) {
+        #pragma unroll
+        for (uint part = 0; part < 4; ++part) {
+            const uint column = base + part * 256;
+            if (column >= p.y) continue;
+            device const Q4Block& b = w[ulong(row) * blocks + column / 32];
+            const uint offset = column % 16;
+            const uint shift = column % 32 < 16 ? 0 : 4;
+            const float4 low = float4(
+                int((b.values[offset] >> shift) & 15) - 8,
+                int((b.values[offset + 1] >> shift) & 15) - 8,
+                int((b.values[offset + 2] >> shift) & 15) - 8,
+                int((b.values[offset + 3] >> shift) & 15) - 8);
+            const float4 high = float4(
+                int((b.values[offset + 4] >> shift) & 15) - 8,
+                int((b.values[offset + 5] >> shift) & 15) - 8,
+                int((b.values[offset + 6] >> shift) & 15) - 8,
+                int((b.values[offset + 7] >> shift) & 15) - 8);
+            const float scale = float(as_type<half>(b.scale));
+            #pragma unroll
+            for (uint token_part = 0; token_part < TOKEN_TILE; ++token_part) {
+                const uint token = token_start + token_part;
+                if (token < p.z) {
+                    device const float* x = input + ulong(token) * p.y + column;
+                    sums[token_part][part] += scale *
+                        (dot(low, *reinterpret_cast<device const float4*>(x)) +
+                         dot(high, *reinterpret_cast<device const float4*>(x + 4)));
+                }
+            }
+        }
+    }
+    #pragma unroll
+    for (uint token_part = 0; token_part < TOKEN_TILE; ++token_part) {
+        const uint token = token_start + token_part;
+        if (token < p.z) {
+            const float total = simd_sum(sums[token_part].x + sums[token_part].y +
+                                         sums[token_part].z + sums[token_part].w);
+            if (lane == 0) {
+                device float& value = output[ulong(token) * p.x + row];
+                value = total + (p.w ? value : 0.0f);
+            }
+        }
+    }
 }
 kernel void rms(device const float* x [[buffer(0)]], device const ushort* w [[buffer(1)]],
                  device float* out [[buffer(2)]], constant uint& n [[buffer(3)]],

@@ -47,7 +47,7 @@ struct Layer {
 };
 struct Kernels {
     id<MTLComputePipelineState> embed_bf16, embed_q8, embed_q4;
-    id<MTLComputePipelineState> mv_bf16, mv_q8, mv_q4, rms, swiglu;
+    id<MTLComputePipelineState> mv_bf16, mv_q8, mv_q4, batch_mv_q4, rms, swiglu;
     id<MTLComputePipelineState> conv, prepare_delta_qk, delta_rule, gated_rms;
     id<MTLComputePipelineState> prepare_query, prepare_key, store_kv, attention;
     bool load(id<MTLDevice> device, const char** error) {
@@ -72,6 +72,7 @@ struct Kernels {
         embed_bf16 = make("embed_bf16"); embed_q8 = make("embed_q8");
         embed_q4 = make("embed_q4");
         mv_bf16 = make("mv_bf16"); mv_q8 = make("mv_q8"); mv_q4 = make("mv_q4");
+        batch_mv_q4 = make("batch_mv_q4");
         rms = make("rms"); swiglu = make("swiglu"); conv = make("conv");
         prepare_delta_qk = make("prepare_delta_qk"); delta_rule = make("delta_rule");
         gated_rms = make("gated_rms"); prepare_query = make("prepare_query");
@@ -169,12 +170,20 @@ struct State {
     }
 };
 
-void launch(id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> pipeline, int groups) {
+void launch_grid(id<MTLComputeCommandEncoder> enc,
+                 id<MTLComputePipelineState> pipeline,
+                 MTLSize groups, MTLSize threads) {
     [enc setComputePipelineState:pipeline];
-    [enc dispatchThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerThreadgroup:MTLSizeMake(BLOCK, 1, 1)];
+    [enc dispatchThreadgroups:groups threadsPerThreadgroup:threads];
     // State/Work intentionally reuse buffers. Make dispatch-to-dispatch RAW/WAR
     // dependencies explicit, including read/write aliases within one buffer.
     [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+}
+void launch(id<MTLComputeCommandEncoder> enc,
+            id<MTLComputePipelineState> pipeline, int groups,
+            int threads = BLOCK) {
+    launch_grid(enc, pipeline, MTLSizeMake(groups, 1, 1),
+                MTLSizeMake(threads, 1, 1));
 }
 void embed(id<MTLComputeCommandEncoder> enc, const Model& model, State& state, int token) {
     const Linear& w = model.embedding;
@@ -198,7 +207,9 @@ void mv(id<MTLComputeCommandEncoder> enc, const Model& model, id<MTLBuffer> weig
     switch (w.type) {
     case q3x_model::MATRIX_BF16: launch(enc, model.kernels.mv_bf16, w.rows); break;
     case q3x_model::MATRIX_Q8_0: launch(enc, model.kernels.mv_q8, w.rows); break;
-    case q3x_model::MATRIX_Q4_0: launch(enc, model.kernels.mv_q4, w.rows); break;
+    case q3x_model::MATRIX_Q4_0:
+        launch(enc, model.kernels.mv_q4, w.rows, 32);
+        break;
     }
 }
 void rms(id<MTLComputeCommandEncoder> enc, const Model& model, id<MTLBuffer> weights,

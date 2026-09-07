@@ -135,6 +135,49 @@ void compare_state(const cpu::State& a, const gpu::State& b) {
         compare(a.layer[i].value, b.kv.data(b.layer[i].value), used, "value cache");
     }
 }
+void check_batch_q4(cpu::Model& a, gpu::Model& b) {
+    const int rows = a.embedding.rows, columns = a.embedding.cols, tokens = 7;
+    std::vector<float> input(tokens * columns), expected(tokens * rows);
+    for (size_t i = 0; i < input.size(); ++i)
+        input[i] = (int(i * 13 % 101) - 50) / 128.0f;
+    for (int token = 0; token < tokens; ++token)
+        cpu::mv(a.embedding, input.data() + token * columns,
+                expected.data() + token * rows);
+    id<MTLBuffer> input_buffer = [b.device newBufferWithBytes:input.data()
+        length:input.size() * sizeof(float) options:MTLResourceStorageModeShared];
+    id<MTLBuffer> output_buffer = [b.device newBufferWithLength:expected.size() * sizeof(float)
+        options:MTLResourceStorageModeShared];
+    id<MTLCommandQueue> queue = [b.device newCommandQueue];
+    Q3X_ASSERT(input_buffer && output_buffer && queue, "batch Q4 test allocation");
+    auto dispatch = [&](bool add) {
+        id<MTLCommandBuffer> command = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> enc = [command computeCommandEncoder];
+        Q3X_ASSERT(command && enc, "batch Q4 test command allocation");
+        const uint32_t p[] = {static_cast<uint32_t>(rows),
+                              static_cast<uint32_t>(columns),
+                              static_cast<uint32_t>(tokens), add ? 1u : 0u};
+        [enc setBuffer:b.weights offset:b.embedding.offset atIndex:0];
+        [enc setBuffer:input_buffer offset:0 atIndex:1];
+        [enc setBuffer:output_buffer offset:0 atIndex:2];
+        [enc setBytes:p length:sizeof(p) atIndex:3];
+        gpu::launch_grid(enc, b.kernels.batch_mv_q4,
+                         MTLSizeMake(rows, (tokens + 3) / 4, 1),
+                         MTLSizeMake(32, 1, 1));
+        [enc endEncoding]; [command commit]; [command waitUntilCompleted];
+        Q3X_ASSERT(command.status == MTLCommandBufferStatusCompleted,
+                   "batch Q4 test execution failed");
+    };
+    dispatch(false);
+    compare(expected.data(), static_cast<const float*>(output_buffer.contents),
+            expected.size(), "batch matrix");
+    auto* output = static_cast<float*>(output_buffer.contents);
+    for (size_t i = 0; i < expected.size(); ++i) {
+        output[i] = (int(i % 17) - 8) / 32.0f;
+        expected[i] += output[i];
+    }
+    dispatch(true);
+    compare(expected.data(), output, expected.size(), "batch matrix add");
+}
 void check_delta_decay(gpu::Model& model) {
     constexpr int heads = 4, KD = 128, VD = 128;
     std::vector<float> q(heads * KD), k(heads * KD), v(heads * VD);
@@ -182,6 +225,7 @@ void run(id<MTLDevice> device, q3x_model::MatrixType type) {
     Q3X_ASSERT(b.kernels.load(device, &error), "Metal pipelines: %s", error);
     if (type == q3x_model::MATRIX_BF16) check_delta_decay(b);
     fixture.build(a, b, config);
+    if (type == q3x_model::MATRIX_Q4_0) check_batch_q4(a, b);
     cpu::State ac(config, 17); gpu::State bc(b, 17);
     const char* type_name = type == q3x_model::MATRIX_BF16 ? "BF16"
                           : type == q3x_model::MATRIX_Q8_0 ? "Q8_0" : "Q4_0";
