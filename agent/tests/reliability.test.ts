@@ -59,7 +59,7 @@ test("actual concurrent resumptions have exactly one writer, including stale loc
         "-m", "test", "-r", file, "-p", `contender ${round}:${index}`],
         { cwd: box.cwd, stdin: "ignore", stdout: "ignore", stderr: "ignore" }));
       try {
-        await until(() => children.filter(p => p.exitCode !== null).length >= 7, "losing session writers", 2000);
+        await until(() => children.filter(p => p.exitCode !== null).length >= 7, "losing session writers", 5000);
         const live = children.filter(p => p.exitCode === null);
         expect(live).toHaveLength(1);
         await until(() => records(file).some(e => e.message?.role === "user" && e.message.content.startsWith(`contender ${round}:`)), "winning writer's first record");

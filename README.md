@@ -130,7 +130,9 @@ make serve-27b
 ```
 
 它生成 `build/qwen38-27b-q4_0-model.bin`，并固定使用 Metal、单 Session 和 32768 context。
-该路径不宣称 CUDA 兼容；当前真实吞吐、峰值内存和长上下文容量仍需用下述 benchmark 验收。
+该路径不宣称 CUDA 兼容。当前真机的格式、正确性、短/长上下文吞吐、32K Session、HTTP 和
+pi coding task 记录在 [`eval/q4-27b-macos.md`](eval/q4-27b-macos.md)。27B Q4_0 路径已经完成
+该文档所列验收；q3x 和完整 EvalScope 不属于这条 27B 目标。
 
 ### Apple M5 Pro / Metal 4（实验性）
 
@@ -156,8 +158,9 @@ logits、recurrent/KV state、prefill、checkpoint restore 和 reset；没有可
 非零，不能视为通过。CI 同时构建 macOS CPU/Metal；如果托管 runner 不提供 GPU，会明确
 标记 GPU 测试未运行。合成测试不代替真实模型的数值验收。
 
-当前已通过 macOS ARM64 的 CPU 测试及完整 Metal 编译；托管 CI 未提供 Apple GPU，
-因此 GPU 数值测试和真实模型验收仍未完成。[Actions](https://github.com/simpx/qwen3x/actions)
+当前已在 Apple M5 Pro 上通过完整 `metal-test`，并用真实 27B Q4_0 对齐 batch/逐 token
+完整 logits；托管 CI 未提供 Apple GPU，仍只负责构建而不冒充真机数值测试。具体结果见
+[`27B Q4 Metal 验收`](eval/q4-27b-macos.md)。[Actions](https://github.com/simpx/qwen3x/actions)
 中的 `qwen3x-metal-macos-arm64` 附件保留实验性可执行文件、smoke 程序和测试 dylib。
 在对应 commit 的仓库根目录解压其中的 tar.gz 后，可直接运行
 `MTL_DEBUG_LAYER=1 ./build/metal-test`，不需要在本机安装 Xcode；附件不包含模型。
@@ -170,9 +173,11 @@ logits、recurrent/KV state、prefill、checkpoint restore 和 reset；没有可
 ./build/qwen3x-metal -c "你好" --session-context 128 --max-tokens 16
 ```
 
-首版 prefill 逐 token 执行完整 forward，没有批量矩阵优化；长 prompt 的吞吐和 40K
-context 的真实内存占用尚未测量。9B 的权重本身约 8.86 GiB，统一内存还要供系统、KV
-和 recurrent state 使用；不要按 CUDA 显存数字直接推断 Mac 的可用容量。
+BF16/Q8 prefill 仍逐 token 执行完整 forward；27B Q4_0 使用固定四 token batch，在保持
+DeltaNet 状态顺序和 causal attention 的同时复用矩阵权重。当前 27B 的 128-token prefill
+为 `23.61 tok/s`，短上下文 decode 为 `13.22 tok/s`；32K Session 与模型合计分配约
+18.39 GiB。512-token prefill/decode 为 `22.28/11.92 tok/s`；4096-token 时降至
+`17.69/6.89 tok/s`，TTFT 约 231 秒。统一内存容量不能按 CUDA 显存数字推断。
 
 性能改动统一用同一 Engine、单 Session 测量；每种 prompt 长度先预热一次，再取三次
 中位数：
@@ -185,7 +190,8 @@ caffeinate -i python3 scripts/bench_session.py \
 caffeinate -i python3 scripts/bench_session.py \
   --library build/metal/libqwen3x-metal.dylib \
   --model build/qwen38-27b-q4_0-model.bin --context 32768 \
-  --output build/bench-27b.json
+  --prompts 128 512 4096 --decode 128 --repeats 3 \
+  --output build/bench-27b-q4.json
 ```
 
 这个入口不绑定具体模型，可通过 `--model`、`--context`、`--prompts` 和 `--decode` 验收
@@ -342,7 +348,8 @@ third_party/        固定版本的 JSON、HTTP 和日志依赖
 build/              下载的 checkpoint、生成的模型和编译产物
 ```
 
-开发阶段 model 和 render 数据分开，方便调试；稳定后再考虑打包为一个模型文件。
+model 和 render 数据保持分开：各官方型号只管理自己的权重文件，固定的
+`qwen3x-render.bin` 保存所有支持型号共享的 tokenizer 数据。
 
 ## 历史
 

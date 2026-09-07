@@ -6,7 +6,8 @@
 ## 项目目标
 
 qwen3x 是一个个人开发的、极简、本地优先的 Qwen C++ 推理引擎，用于教学、研究和 PoC。
-型号范围固定为 Qwen3.5-0.8B、2B、4B、9B 和 27B，不在本项目中扩展到其他架构或型号。
+型号范围固定为 Qwen3.5-0.8B、2B、4B、9B 和 Qwen3.8-27B，不在本项目中扩展到其他架构
+或型号。
 
 项目希望用尽可能少的代码展示一条真实、完整、可运行的推理数据流。读者应当能从
 `main()` 出发，一直读到模型 forward：
@@ -137,24 +138,18 @@ engine 只认识自身需要的明确类型。
 
 ## 分发产物
 
-目标分发形态只有两个文件：
+目标分发形态只有三个文件：
 
 ```text
 qwen3x                    平台对应的单个可执行文件
-qwen35-0.8b-model.bin     该模型运行所需的单个数据文件
+qwen35-0.8b-model.bin     所选官方型号对应的单个权重文件
+qwen3x-render.bin         所有支持型号共用的固定 tokenizer 数据
 ```
 
-可执行文件包含程序逻辑、HTTP 服务、Qwen template 和通用协议实现；model bin 包含权重、
-tokenizer 数据及其他随模型变化的数据。使用其他型号时只替换对应 model bin。
-
-开发阶段为了调试和快速迭代，暂时保留：
-
-```text
-qwen35-0.8b-model.bin
-qwen3x-render.bin
-```
-
-`render.bin` 稳定后合并进 model bin。官方 checkpoint、转换中间文件和测试向量都是开发
+可执行文件包含程序逻辑、HTTP 服务、固定 Qwen3.8 chat template 和通用协议实现；model bin
+只管理随官方型号变化的权重，文件名前缀保留原模型家族，例如 `qwen35-0.8b-model.bin` 和
+`qwen38-27b-q4_0-model.bin`；固定的 `qwen3x-render.bin` 独立保存共享 tokenizer 数据。
+使用其他型号时只替换对应 model bin。官方 checkpoint、转换中间文件和测试向量都是开发
 产物，不属于最终分发集合。
 
 ## 数据与目录
