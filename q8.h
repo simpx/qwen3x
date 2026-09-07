@@ -3,7 +3,7 @@
 
 #include <cstdint>
 
-namespace q35_q8 {
+namespace q3x_q8 {
 
 constexpr int BLOCK_SIZE = 32;
 
@@ -14,6 +14,6 @@ struct Block {
 
 static_assert(sizeof(Block) == 34, "Q8_0 block layout mismatch");
 
-}  // namespace q35_q8
+}  // namespace q3x_q8
 
 #endif

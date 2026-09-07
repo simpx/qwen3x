@@ -13,15 +13,15 @@
 namespace {
 
 size_t q8_9b_file_size() {
-    const q35_model::ModelConfig& c = q35_model::QWEN35_9B;
-    size_t cursor = q35_model::HEADER_SIZE;
+    const q3x_model::ModelConfig& c = q3x_model::QWEN35_9B;
+    size_t cursor = q3x_model::HEADER_SIZE;
     auto tensor = [&](size_t bytes) {
         cursor += (64 - cursor % 64) % 64;
         cursor += bytes;
     };
     auto linear = [&](int rows, int columns) {
         tensor(static_cast<size_t>(rows) * columns /
-               q35_q8::BLOCK_SIZE * sizeof(q35_q8::Block));
+               q3x_q8::BLOCK_SIZE * sizeof(q3x_q8::Block));
     };
     const int AS = c.AH * c.AD;
     const int KVW = c.KVH * c.AD;
@@ -29,29 +29,29 @@ size_t q8_9b_file_size() {
     const int DQKV = 2 * c.KH * c.KD + DO;
     linear(c.V, c.H);
     linear(c.V, c.H);
-    tensor(static_cast<size_t>(c.H) * sizeof(q35_backend::BF16));
+    tensor(static_cast<size_t>(c.H) * sizeof(q3x_backend::BF16));
     for (int layer = 0; layer < c.N; ++layer) {
-        tensor(static_cast<size_t>(c.H) * sizeof(q35_backend::BF16));
+        tensor(static_cast<size_t>(c.H) * sizeof(q3x_backend::BF16));
         if (layer % c.AI != c.AI - 1) {
             linear(DQKV, c.H);
             linear(DO, c.H);
             linear(c.VH, c.H);
             linear(c.VH, c.H);
             tensor(static_cast<size_t>(DQKV) * c.CK *
-                   sizeof(q35_backend::BF16));
+                   sizeof(q3x_backend::BF16));
             tensor(static_cast<size_t>(c.VH) * sizeof(float));
-            tensor(static_cast<size_t>(c.VH) * sizeof(q35_backend::BF16));
+            tensor(static_cast<size_t>(c.VH) * sizeof(q3x_backend::BF16));
             tensor(static_cast<size_t>(c.VD) * sizeof(float));
             linear(c.H, DO);
         } else {
             linear(2 * AS, c.H);
             linear(KVW, c.H);
             linear(KVW, c.H);
-            tensor(static_cast<size_t>(c.AD) * sizeof(q35_backend::BF16));
-            tensor(static_cast<size_t>(c.AD) * sizeof(q35_backend::BF16));
+            tensor(static_cast<size_t>(c.AD) * sizeof(q3x_backend::BF16));
+            tensor(static_cast<size_t>(c.AD) * sizeof(q3x_backend::BF16));
             linear(c.H, AS);
         }
-        tensor(static_cast<size_t>(c.H) * sizeof(q35_backend::BF16));
+        tensor(static_cast<size_t>(c.H) * sizeof(q3x_backend::BF16));
         linear(c.I, c.H);
         linear(c.I, c.H);
         linear(c.H, c.I);
@@ -59,11 +59,11 @@ size_t q8_9b_file_size() {
     return cursor;
 }
 
-std::array<uint8_t, q35_model::HEADER_SIZE> q8_9b_header() {
-    std::array<uint8_t, q35_model::HEADER_SIZE> header {};
-    std::memcpy(header.data(), "Q35MODL\0", 8);
-    const q35_model::ModelConfig& c = q35_model::QWEN35_9B;
-    const uint32_t fields[q35_model::CONFIG_FIELD_COUNT] = {
+std::array<uint8_t, q3x_model::HEADER_SIZE> q8_9b_header() {
+    std::array<uint8_t, q3x_model::HEADER_SIZE> header {};
+    std::memcpy(header.data(), "Q3XMODL\0", 8);
+    const q3x_model::ModelConfig& c = q3x_model::QWEN35_9B;
+    const uint32_t fields[q3x_model::CONFIG_FIELD_COUNT] = {
         c.id, static_cast<uint32_t>(c.V), static_cast<uint32_t>(c.H),
         static_cast<uint32_t>(c.I), static_cast<uint32_t>(c.N),
         static_cast<uint32_t>(c.AI), static_cast<uint32_t>(c.AH),
@@ -71,9 +71,9 @@ std::array<uint8_t, q35_model::HEADER_SIZE> q8_9b_header() {
         static_cast<uint32_t>(c.RD), static_cast<uint32_t>(c.KH),
         static_cast<uint32_t>(c.VH), static_cast<uint32_t>(c.KD),
         static_cast<uint32_t>(c.VD), static_cast<uint32_t>(c.CK),
-        q35_model::MAX_CONTEXT,
+        q3x_model::MAX_CONTEXT,
     };
-    std::memcpy(header.data() + q35_model::HEADER_PREFIX_SIZE,
+    std::memcpy(header.data() + q3x_model::HEADER_PREFIX_SIZE,
                 fields, sizeof(fields));
     return header;
 }
@@ -83,7 +83,7 @@ void write_exact(int fd, const void* data, size_t size, off_t offset) {
 }
 
 void check_loader(const char* path, bool expected, const char* expected_error) {
-    q35_backend::Model model;
+    q3x_backend::Model model;
     const char* error = nullptr;
     assert(model.load(path, &error) == expected);
     if (expected) {
@@ -95,7 +95,7 @@ void check_loader(const char* path, bool expected, const char* expected_error) {
 }
 
 void loader_test() {
-    char path[] = "/tmp/qwen35-q8-loader-XXXXXX";
+    char path[] = "/tmp/qwen3x-q8-loader-XXXXXX";
     const int fd = mkstemp(path);
     assert(fd >= 0);
     const auto header = q8_9b_header();
@@ -123,15 +123,15 @@ void loader_test() {
     restore();
     const uint32_t unknown_id = 9001;
     write_exact(fd, &unknown_id, sizeof(unknown_id),
-                q35_model::HEADER_PREFIX_SIZE +
-                q35_model::MODEL_ID * sizeof(uint32_t));
+                q3x_model::HEADER_PREFIX_SIZE +
+                q3x_model::MODEL_ID * sizeof(uint32_t));
     check_loader(path, false, "unsupported Qwen model ID");
 
     restore();
     const uint32_t wrong_hidden = 4095;
     write_exact(fd, &wrong_hidden, sizeof(wrong_hidden),
-                q35_model::HEADER_PREFIX_SIZE +
-                q35_model::HIDDEN_SIZE * sizeof(uint32_t));
+                q3x_model::HEADER_PREFIX_SIZE +
+                q3x_model::HIDDEN_SIZE * sizeof(uint32_t));
     check_loader(path, false, "header mismatch");
 
     close(fd);
@@ -141,11 +141,11 @@ void loader_test() {
 }  // namespace
 
 int main() {
-    q35_q8::Block blocks[4]{};
+    q3x_q8::Block blocks[4]{};
     const uint16_t scales[4] = {0x3c00, 0x3800, 0x4000, 0x3400};
     for (int block = 0; block < 4; ++block) {
         blocks[block].scale = scales[block];
-        for (int index = 0; index < q35_q8::BLOCK_SIZE; ++index)
+        for (int index = 0; index < q3x_q8::BLOCK_SIZE; ++index)
             blocks[block].values[index] = static_cast<int8_t>((index % 9) - 4 + block);
     }
     float input[64];
@@ -157,49 +157,49 @@ int main() {
     for (int row = 0; row < 2; ++row) {
         for (int block = 0; block < 2; ++block) {
             float inner = 0.0f;
-            for (int index = 0; index < q35_q8::BLOCK_SIZE; ++index) {
+            for (int index = 0; index < q3x_q8::BLOCK_SIZE; ++index) {
                 inner += blocks[row * 2 + block].values[index] *
-                         input[block * q35_q8::BLOCK_SIZE + index];
+                         input[block * q3x_q8::BLOCK_SIZE + index];
             }
             expected[row] += decoded_scales[row * 2 + block] * inner;
         }
     }
 
-    q35_backend::Linear matrix {
-        blocks, 2, 64, q35_model::MATRIX_Q8_0,
+    q3x_backend::Linear matrix {
+        blocks, 2, 64, q3x_model::MATRIX_Q8_0,
     };
     float output[2]{};
-    q35_backend::mv(matrix, input, output);
+    q3x_backend::mv(matrix, input, output);
     assert(std::abs(output[0] - expected[0]) < 1e-6f);
     assert(std::abs(output[1] - expected[1]) < 1e-6f);
 
     float embedding[64]{};
-    q35_backend::embed(matrix, 1, embedding);
+    q3x_backend::embed(matrix, 1, embedding);
     for (int block = 0; block < 2; ++block) {
-        for (int index = 0; index < q35_q8::BLOCK_SIZE; ++index) {
+        for (int index = 0; index < q3x_q8::BLOCK_SIZE; ++index) {
             const float value = decoded_scales[2 + block] *
                                 blocks[2 + block].values[index];
-            assert(embedding[block * q35_q8::BLOCK_SIZE + index] == value);
+            assert(embedding[block * q3x_q8::BLOCK_SIZE + index] == value);
         }
     }
 
     // Exercise the macOS row-parallel path, whose threshold deliberately
     // stays above the tiny fixed-vector check above.
     constexpr int rows = 1024;
-    std::vector<q35_q8::Block> parallel_weights(rows * 2);
+    std::vector<q3x_q8::Block> parallel_weights(rows * 2);
     for (int row = 0; row < rows; ++row) {
         parallel_weights[row * 2] = blocks[0];
         parallel_weights[row * 2 + 1] = blocks[1];
     }
     std::vector<float> parallel_output(rows);
-    q35_backend::Linear parallel_matrix {
-        parallel_weights.data(), rows, 64, q35_model::MATRIX_Q8_0,
+    q3x_backend::Linear parallel_matrix {
+        parallel_weights.data(), rows, 64, q3x_model::MATRIX_Q8_0,
     };
-    q35_backend::mv(parallel_matrix, input, parallel_output.data());
+    q3x_backend::mv(parallel_matrix, input, parallel_output.data());
     for (float value : parallel_output)
         assert(std::abs(value - expected[0]) < 1e-6f);
 
-    q35_q4::Block q4_blocks[2]{};
+    q3x_q4::Block q4_blocks[2]{};
     for (int block = 0; block < 2; ++block) {
         q4_blocks[block].scale = scales[block];
         for (int index = 0; index < 16; ++index) {
@@ -210,22 +210,22 @@ int main() {
     }
     float q4_expected = 0.0f;
     for (int block = 0; block < 2; ++block)
-        for (int index = 0; index < q35_q4::BLOCK_SIZE; ++index)
+        for (int index = 0; index < q3x_q4::BLOCK_SIZE; ++index)
             q4_expected += decoded_scales[block] *
-                           q35_q4::value(q4_blocks[block], index) *
-                           input[block * q35_q4::BLOCK_SIZE + index];
-    q35_backend::Linear q4_matrix {
-        q4_blocks, 1, 64, q35_model::MATRIX_Q4_0,
+                           q3x_q4::value(q4_blocks[block], index) *
+                           input[block * q3x_q4::BLOCK_SIZE + index];
+    q3x_backend::Linear q4_matrix {
+        q4_blocks, 1, 64, q3x_model::MATRIX_Q4_0,
     };
     float q4_output = 0.0f;
-    q35_backend::mv(q4_matrix, input, &q4_output);
+    q3x_backend::mv(q4_matrix, input, &q4_output);
     assert(std::abs(q4_output - q4_expected) < 1e-6f);
 
     float q4_embedding[64]{};
-    q35_backend::embed(q4_matrix, 0, q4_embedding);
+    q3x_backend::embed(q4_matrix, 0, q4_embedding);
     for (int index = 0; index < 64; ++index)
         assert(q4_embedding[index] == decoded_scales[index / 32] *
-                                      q35_q4::value(q4_blocks[index / 32], index % 32));
+                                      q3x_q4::value(q4_blocks[index / 32], index % 32));
 
     loader_test();
     std::puts("q8-cpu-test: ok");

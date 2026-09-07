@@ -18,7 +18,7 @@
 #define JSON_NOEXCEPTION
 #include "third_party/nlohmann/json.hpp"
 
-namespace q35_render {
+namespace q3x_render {
 namespace {
 
 using Json = nlohmann::ordered_json;
@@ -159,27 +159,6 @@ private:
         return true;
     }
 
-    bool argument_text(Json& value, std::string* output) {
-        if (value.is_array() || value.is_object()) {
-            return json_text(value, output);
-        } else if (value.is_null()) {
-            *output = "None";
-        } else if (value.is_boolean()) {
-            *output = value.get<bool>() ? "True" : "False";
-        } else if (value.is_number_unsigned()) {
-            *output = std::to_string(value.get<uint64_t>());
-        } else if (value.is_number_integer()) {
-            *output = std::to_string(value.get<int64_t>());
-        } else if (value.is_number_float()) {
-            return float_text(value.get<double>(), output);
-        } else if (value.is_string()) {
-            *output = move_string(value);
-        } else {
-            return fail("unsupported tool argument");
-        }
-        return true;
-    }
-
     bool string_field_equals(const Json& object, const char* field,
                              const char* expected) const {
         const auto value = object.find(field);
@@ -260,7 +239,11 @@ private:
         for (auto& item : object->items()) {
             ToolArgument argument;
             argument.name = item.key();
-            if (!argument_text(item.value(), &argument.text)) return false;
+            if (item.value().is_string()) {
+                argument.text = move_string(item.value());
+            } else if (!json_text(item.value(), &argument.text)) {
+                return false;
+            }
             output->arguments.push_back(std::move(argument));
         }
         return true;
@@ -740,4 +723,4 @@ std::string completion_usage_chunk_json(const std::string& id,
     return body.dump();
 }
 
-}  // namespace q35_render
+}  // namespace q3x_render

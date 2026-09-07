@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Thin command-line client for the qwen35 Chat Completions endpoint."""
+"""Thin command-line client for the qwen3x Chat Completions endpoint."""
 
 import argparse
 import json
@@ -32,7 +32,7 @@ class TraceAction(argparse.Action):
 
 def argument_parser():
     parser = argparse.ArgumentParser(
-        description="Send a message trace to a local OpenAI-compatible qwen35 server."
+        description="Send a message trace to a local OpenAI-compatible qwen3x server."
     )
     parser.add_argument("-m", "--model", default=DEFAULT_MODEL)
     parser.add_argument("--host", default=DEFAULT_HOST)

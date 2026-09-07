@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pack Qwen3.5 render tables into render.cpp's dependency-free format.
+"""Pack supported Qwen render tables into render.cpp's dependency-free format.
 
 The runtime format contains raw byte tokens, merge pairs and the small slice of
 Unicode data needed by Qwen's NFC normalizer and pre-tokenizer.  Converting the
@@ -23,10 +23,8 @@ from tokenizers import (
 )
 
 
-MAGIC = b"Q35RND1\0"
-VERSION = 1
 MODEL_VOCAB_SIZE = 248320
-HEADER = struct.Struct("<8sIIQ9I")
+HEADER = struct.Struct("<Q9I")
 
 LETTER = 1
 MARK = 2
@@ -34,7 +32,7 @@ NUMBER = 4
 SPACE = 8
 
 # Little-endian file order:
-#   fixed header (magic, version, header/file sizes, nine table counts)
+#   fixed header (file size and nine table counts)
 #   source metadata, byte IDs, base vocab, merges, added tokens
 #   Unicode category ranges, combining classes, decompositions, compositions
 # Variable strings are u32 byte length followed by bytes. There are no offsets:
@@ -277,12 +275,12 @@ def main():
         and contract["ignore_merges"] is False
     )
     if not valid:
-        raise SystemExit("tokenizer is not the fixed Qwen3.5 ByteLevel-BPE contract")
+        raise SystemExit("tokenizer is not the fixed supported Qwen ByteLevel-BPE contract")
 
     vocab = tokenizer["model"]["vocab"]
     base_count = len(vocab)
     if base_count != 248044 or set(vocab.values()) != set(range(base_count)):
-        raise SystemExit("Qwen3.5 base vocabulary must contain dense IDs 0..248043")
+        raise SystemExit("Qwen base vocabulary must contain dense IDs 0..248043")
 
     byte_to_character = byte_alphabet()
     inverse = {character: byte for byte, character in byte_to_character.items()}
@@ -316,7 +314,7 @@ def main():
         ) as output:
             temporary = Path(output.name)
             output.write(HEADER.pack(
-                MAGIC, VERSION, HEADER.size, 0,
+                0,
                 MODEL_VOCAB_SIZE, base_count, decodable_count,
                 len(merges), len(added), len(ranges), len(combining),
                 len(decompositions), len(compositions),
@@ -346,7 +344,7 @@ def main():
             file_size = output.tell()
             output.seek(0)
             output.write(HEADER.pack(
-                MAGIC, VERSION, HEADER.size, file_size,
+                file_size,
                 MODEL_VOCAB_SIZE, base_count, decodable_count,
                 len(merges), len(added), len(ranges), len(combining),
                 len(decompositions), len(compositions),

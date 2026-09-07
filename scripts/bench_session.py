@@ -2,7 +2,7 @@
 """Warm/repeated C ABI runtime benchmark; the shared library is a test adapter.
 
 Example (run alone, with no inference server using the GPU):
-  caffeinate -i python3 scripts/bench_session.py --library build/metal/libqwen35-metal.dylib \
+  caffeinate -i python3 scripts/bench_session.py --library build/metal/libqwen3x-metal.dylib \
     --model build/qwen35-9b-q8_0-model.bin --output build/bench-9b.json
 """
 
@@ -23,7 +23,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "reference"))
-from qwen35 import Engine, set_log_callback  # noqa: E402
+from qwen3x import Engine, set_log_callback  # noqa: E402
 
 
 def mac_memory():

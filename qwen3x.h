@@ -1,5 +1,5 @@
-#ifndef QWEN35_H
-#define QWEN35_H
+#ifndef QWEN3X_H
+#define QWEN3X_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -9,34 +9,34 @@
 extern "C" {
 #endif
 
-typedef struct q35_engine q35_engine;
-typedef struct q35_session q35_session;
-typedef struct q35_session_manager q35_session_manager;
+typedef struct q3x_engine q3x_engine;
+typedef struct q3x_session q3x_session;
+typedef struct q3x_session_manager q3x_session_manager;
 
 enum {
-    Q35_OK = 0,
-    Q35_ERROR = -1,
-    Q35_BUSY = -2,
+    Q3X_OK = 0,
+    Q3X_ERROR = -1,
+    Q3X_BUSY = -2,
 };
 
 /* Engine: one loaded, read-only supported Qwen text model. */
 
 typedef enum {
-    Q35_LOG_TRACE = -1,
-    Q35_LOG_DEBUG = 0,
-    Q35_LOG_INFO = 1,
-    Q35_LOG_WARN = 2,
-    Q35_LOG_ERROR = 3,
-} q35_log_level;
+    Q3X_LOG_TRACE = -1,
+    Q3X_LOG_DEBUG = 0,
+    Q3X_LOG_INFO = 1,
+    Q3X_LOG_WARN = 2,
+    Q3X_LOG_ERROR = 3,
+} q3x_log_level;
 
 /*
  * Called synchronously on the thread that produced the log. All strings are
  * valid only during the call. The host owns user_data and the callback's
  * lifetime; callbacks should be fast, must not throw, and must not call back
- * into q35 APIs.
+ * into q3x APIs.
  */
-typedef void (*q35_log_callback)(void* user_data,
-                                 q35_log_level level,
+typedef void (*q3x_log_callback)(void* user_data,
+                                 q3x_log_level level,
                                  const char* file,
                                  int line,
                                  const char* message);
@@ -44,22 +44,22 @@ typedef void (*q35_log_callback)(void* user_data,
 /*
  * Process-wide logger shared by Engine, Session and SessionManager.
  * Configure it before starting native work. Do not change it until every
- * concurrent q35 call has stopped.
+ * concurrent q3x call has stopped.
  */
-void q35_log_set_callback(q35_log_callback callback,
+void q3x_log_set_callback(q3x_log_callback callback,
                           void* user_data,
-                          q35_log_level level);
+                          q3x_log_level level);
 
 typedef struct {
     const char* bin_path;
     /* Use lightweight State updates and a fixed logits bank instead of model math. */
     bool mock;
-} q35_engine_options;
+} q3x_engine_options;
 
-int q35_engine_create(const q35_engine_options* options, q35_engine** out,
+int q3x_engine_create(const q3x_engine_options* options, q3x_engine** out,
                       char* err, size_t errlen);
-void q35_engine_destroy(q35_engine* engine);
-uint32_t q35_engine_model_id(const q35_engine* engine);
+void q3x_engine_destroy(q3x_engine* engine);
+uint32_t q3x_engine_model_id(const q3x_engine* engine);
 
 /*
  * Session: one mutable token timeline containing State, Work and logits.
@@ -67,15 +67,15 @@ uint32_t q35_engine_model_id(const q35_engine* engine);
  * single-writer and must not be advanced concurrently.
  */
 
-int q35_session_create(q35_engine* engine, int context_size, q35_session** out,
+int q3x_session_create(q3x_engine* engine, int context_size, q3x_session** out,
                        char* err, size_t errlen);
-void q35_session_destroy(q35_session* session);
+void q3x_session_destroy(q3x_session* session);
 
 /* Stable UUID for this Session's lifetime; pointer dies with the Session. */
-const char* q35_session_id(const q35_session* session);
+const char* q3x_session_id(const q3x_session* session);
 
 /* Clear the token timeline while retaining all allocated buffers. */
-int q35_session_reset(q35_session* session, char* err, size_t errlen);
+int q3x_session_reset(q3x_session* session, char* err, size_t errlen);
 
 /*
  * Bring the Session to exactly tokens[count]. If its live State or saved checkpoint
@@ -86,33 +86,33 @@ int q35_session_reset(q35_session* session, char* err, size_t errlen);
  * Session's additional checkpoint. checkpoint_at must be in [1,count], or -1
  * to keep the existing checkpoint without creating a new one.
  */
-int q35_session_sync(q35_session* session, const int* tokens, int count,
+int q3x_session_sync(q3x_session* session, const int* tokens, int count,
                      int checkpoint_at,
                      int* cached_tokens,
                      char* err, size_t errlen);
 
 /* Append one token and update State/logits. */
-int q35_session_eval(q35_session* session, int token,
+int q3x_session_eval(q3x_session* session, int token,
                      char* err, size_t errlen);
 
-int q35_session_position(const q35_session* session);
-int q35_session_argmax(const q35_session* session);
+int q3x_session_position(const q3x_session* session);
+int q3x_session_argmax(const q3x_session* session);
 
 /*
  * Sample one token from logits. top_k <= 0 disables top-k filtering.
  * presence_penalty is applied once to each distinct generated token; prompt
  * tokens are deliberately excluded, matching vLLM/OpenAI semantics.
  */
-int q35_session_sample(q35_session* session, float temperature, int top_k,
+int q3x_session_sample(q3x_session* session, float temperature, int top_k,
                        float top_p, float presence_penalty,
                        const int* generated_tokens, int generated_count,
                        uint64_t* rng);
 
-bool q35_token_is_stop(int token);
-int q35_vocab_size(void);
+bool q3x_token_is_stop(int token);
+int q3x_vocab_size(void);
 
-/* Copy the current logits[V]. capacity must be at least q35_vocab_size(). */
-int q35_session_copy_logits(const q35_session* session, float* output, int capacity,
+/* Copy the current logits[V]. capacity must be at least q3x_vocab_size(). */
+int q3x_session_copy_logits(const q3x_session* session, float* output, int capacity,
                             char* err, size_t errlen);
 
 /*
@@ -124,11 +124,11 @@ int q35_session_copy_logits(const q35_session* session, float* output, int capac
  * Engine must outlive its SessionManager.
  */
 
-int q35_session_manager_create(q35_engine* engine, int session_count,
-                               int context_size, q35_session_manager** out,
+int q3x_session_manager_create(q3x_engine* engine, int session_count,
+                               int context_size, q3x_session_manager** out,
                                char* err, size_t errlen);
 /* No Session may remain acquired when the manager is destroyed. */
-void q35_session_manager_destroy(q35_session_manager* manager);
+void q3x_session_manager_destroy(q3x_session_manager* manager);
 
 /*
  * Select and acquire one Session exclusively.
@@ -137,19 +137,19 @@ void q35_session_manager_destroy(q35_session_manager* manager);
  * 2. Otherwise use a FREE/LRU Entry.
  *
  * The function only selects the Session and marks it BUSY; the caller must
- * still call q35_session_sync(). Returns Q35_BUSY when every Session is BUSY.
+ * still call q3x_session_sync(). Returns Q3X_BUSY when every Session is BUSY.
  */
-int q35_session_manager_acquire(q35_session_manager* manager,
+int q3x_session_manager_acquire(q3x_session_manager* manager,
                                 const int* tokens, int count,
-                                q35_session** out,
+                                q3x_session** out,
                                 char* err, size_t errlen);
 
 /*
  * Release exclusive access. keep=true retains the Session as IDLE for future
  * prefix reuse. keep=false resets it and makes the Entry FREE.
  */
-void q35_session_manager_release(q35_session_manager* manager,
-                                 q35_session* session, bool keep);
+void q3x_session_manager_release(q3x_session_manager* manager,
+                                 q3x_session* session, bool keep);
 
 #ifdef __cplusplus
 }

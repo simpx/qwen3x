@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal read/write/bash agent for a local qwen35 server."""
+"""Minimal read/write/bash agent for a local qwen3x server."""
 
 import argparse
 from datetime import datetime, timezone
@@ -89,7 +89,7 @@ class AgentError(RuntimeError):
 
 def argument_parser():
     parser = argparse.ArgumentParser(
-        description="Run a minimal coding agent against a qwen35 server."
+        description="Run a minimal coding agent against a qwen3x server."
     )
     parser.add_argument("prompt", nargs="?", help="one-shot task; omit for a REPL")
     parser.add_argument("-m", "--model", default=DEFAULT_MODEL)

@@ -1,9 +1,9 @@
 // main.cpp -- one-process Qwen3.5 inference program.
 //
-//   qwen35 -p "raw prompt"
-//   qwen35 -c "chat message"
-//   qwen35 -l --host 127.0.0.1 --port 8000
-//   qwen35 --bench PREFILL_TOKENS DECODE_TOKENS
+//   qwen3x -p "raw prompt"
+//   qwen3x -c "chat message"
+//   qwen3x -l --host 127.0.0.1 --port 8000
+//   qwen3x --bench PREFILL_TOKENS DECODE_TOKENS
 //
 // Prompt mode tokenizes raw text. Chat mode constructs a ChatRequest directly.
 // Listen mode adds the HTTP/JSON boundary. Bench mode bypasses both renderer and
@@ -51,7 +51,7 @@ namespace {
 constexpr size_t ERROR_SIZE = 512;
 constexpr size_t MAX_REQUEST_BYTES = 16 * 1024 * 1024;
 constexpr const char* DEFAULT_MODEL = "qwen35-0.8b-model.bin";
-constexpr const char* DEFAULT_RENDER = "qwen35-0.8b-render.bin";
+constexpr const char* DEFAULT_RENDER = "qwen3x-render.bin";
 
 enum class Mode { None, Prompt, Chat, Listen, Bench };
 
@@ -65,7 +65,7 @@ struct Options {
     std::string log_file;
     std::string audit_file;
     std::string logits_output_dir = "data";
-    q35_log_level log_level = Q35_LOG_ERROR;
+    q3x_log_level log_level = Q3X_LOG_ERROR;
     int port = 8000;
     int slots = 1;
     int context = 40960;
@@ -86,25 +86,25 @@ struct Options {
 
 struct Runtime {
     Options options;
-    q35_engine* engine = nullptr;
-    q35_session_manager* manager = nullptr;
-    std::unique_ptr<q35_render::Renderer> renderer;
+    q3x_engine* engine = nullptr;
+    q3x_session_manager* manager = nullptr;
+    std::unique_ptr<q3x_render::Renderer> renderer;
     int think_end_token = -1;
     std::atomic<int> inflight{0};
 
     ~Runtime() {
-        if (manager) q35_session_manager_destroy(manager);
-        if (engine) q35_engine_destroy(engine);
+        if (manager) q3x_session_manager_destroy(manager);
+        if (engine) q3x_engine_destroy(engine);
     }
 };
 
 struct SessionLease {
-    q35_session_manager* manager = nullptr;
-    q35_session* session = nullptr;
+    q3x_session_manager* manager = nullptr;
+    q3x_session* session = nullptr;
     bool keep = false;
 
     ~SessionLease() {
-        if (session) q35_session_manager_release(manager, session, keep);
+        if (session) q3x_session_manager_release(manager, session, keep);
     }
 };
 
@@ -137,7 +137,7 @@ void audit_record(const char* event, const std::string& request_id,
                   const std::string& session_id,
                   const std::string& detail = {},
                   const std::string& payload = {}) {
-    q35_internal::audit_write(
+    q3x_internal::audit_write(
         event, request_id.c_str(), session_id.empty() ? "-" : session_id.c_str(),
         detail.c_str(), payload.data(), payload.size());
 }
@@ -401,12 +401,12 @@ bool parse_options(int argc, char** argv, Options* options,
                 return false;
             }
         } else if (argument == "--log-level") {
-            if (value == "trace") options->log_level = Q35_LOG_TRACE;
-            else if (value == "debug") options->log_level = Q35_LOG_DEBUG;
-            else if (value == "info") options->log_level = Q35_LOG_INFO;
+            if (value == "trace") options->log_level = Q3X_LOG_TRACE;
+            else if (value == "debug") options->log_level = Q3X_LOG_DEBUG;
+            else if (value == "info") options->log_level = Q3X_LOG_INFO;
             else if (value == "warn" || value == "warning") {
-                options->log_level = Q35_LOG_WARN;
-            } else if (value == "error") options->log_level = Q35_LOG_ERROR;
+                options->log_level = Q3X_LOG_WARN;
+            } else if (value == "error") options->log_level = Q3X_LOG_ERROR;
             else {
                 *error = "invalid --log-level";
                 return false;
@@ -442,12 +442,12 @@ bool parse_options(int argc, char** argv, Options* options,
         return false;
     }
     if (!options->log_level_set && options->mode == Mode::Listen) {
-        options->log_level = Q35_LOG_INFO;
+        options->log_level = Q3X_LOG_INFO;
     }
     if (options->mode == Mode::Bench) {
         const int64_t required = static_cast<int64_t>(options->bench_prefill) +
                                  options->bench_decode;
-        if (required > q35_backend::max_context()) {
+        if (required > q3x_backend::max_context()) {
             *error = "benchmark exceeds the model context";
             return false;
         }
@@ -475,7 +475,7 @@ void usage(const char* program) {
         "listen: [--audit-log PATH]\n"
         "defaults: 1 session slot, 40960-token context\n"
         "        log default: info for --listen, error otherwise\n"
-        "defaults beside qwen35: %s and %s\n", program, program, program,
+        "defaults beside qwen3x: %s and %s\n", program, program, program,
         program, program,
         DEFAULT_MODEL, DEFAULT_RENDER);
 }
@@ -493,8 +493,8 @@ std::string make_id(const char* prefix) {
     return text;
 }
 
-std::string session_id(const q35_session* session) {
-    const char* id = q35_session_id(session);
+std::string session_id(const q3x_session* session) {
+    const char* id = q3x_session_id(session);
     return id ? id : "-";
 }
 
@@ -531,7 +531,7 @@ void api_error(httplib::Response& response, int status,
                const char* type = "invalid_request_error",
                const char* param = nullptr, const char* code = nullptr) {
     json_response(response, status,
-                  q35_render::error_json(message, type, param, code));
+                  q3x_render::error_json(message, type, param, code));
 }
 
 bool authenticate(const httplib::Request& request,
@@ -548,7 +548,7 @@ bool authenticate(const httplib::Request& request,
 }
 
 bool split_output(const Runtime& runtime,
-                  const q35_render::CompletionRequest& request,
+                  const q3x_render::CompletionRequest& request,
                   const std::vector<int>& tokens,
                   std::string* reasoning, std::string* content,
                   std::string* error) {
@@ -606,15 +606,15 @@ std::pair<std::string, bool> stop_view(
 
 using Publish = std::function<bool(const char* field, const std::string& text)>;
 
-bool generate(Runtime& runtime, const q35_render::CompletionRequest& request,
-              const std::vector<int>& prompt, q35_session* session,
+bool generate(Runtime& runtime, const q3x_render::CompletionRequest& request,
+              const std::vector<int>& prompt, q3x_session* session,
               const Publish& publish, GenerationResult* result,
               std::string* error) {
     char native_error[ERROR_SIZE]{};
     const auto started = std::chrono::steady_clock::now();
-    if (q35_session_sync(session, prompt.data(), static_cast<int>(prompt.size()),
+    if (q3x_session_sync(session, prompt.data(), static_cast<int>(prompt.size()),
                          static_cast<int>(prompt.size()), &result->cached_tokens,
-                         native_error, sizeof(native_error)) != Q35_OK) {
+                         native_error, sizeof(native_error)) != Q3X_OK) {
         result->stop_cause = "generation_error";
         *error = native_error;
         return false;
@@ -636,8 +636,8 @@ bool generate(Runtime& runtime, const q35_render::CompletionRequest& request,
         }
         const int token = request.temperature == 0.0f &&
                           request.presence_penalty == 0.0f
-            ? q35_session_argmax(session)
-            : q35_session_sample(
+            ? q3x_session_argmax(session)
+            : q3x_session_sample(
                 session, request.temperature, request.top_k, request.top_p,
                 request.presence_penalty,
                 penalty_tokens.empty() ? nullptr : penalty_tokens.data(),
@@ -647,7 +647,7 @@ bool generate(Runtime& runtime, const q35_render::CompletionRequest& request,
             *error = "sampling failed";
             return false;
         }
-        if (q35_token_is_stop(token)) {
+        if (q3x_token_is_stop(token)) {
             const bool thinking_open =
                 request.chat.options.enable_thinking &&
                 std::find(result->tokens.begin(), result->tokens.end(),
@@ -711,8 +711,8 @@ bool generate(Runtime& runtime, const q35_render::CompletionRequest& request,
             break;
         }
         if (static_cast<int>(result->tokens.size()) == request.max_tokens) break;
-        if (q35_session_eval(session, token,
-                             native_error, sizeof(native_error)) != Q35_OK) {
+        if (q3x_session_eval(session, token,
+                             native_error, sizeof(native_error)) != Q3X_OK) {
             result->stop_cause = "generation_error";
             *error = native_error;
             return false;
@@ -760,11 +760,11 @@ bool generate(Runtime& runtime, const q35_render::CompletionRequest& request,
 bool prepare_request(Runtime& runtime, AccessLog* access,
                      const httplib::Request& http,
                      httplib::Response& response,
-                     q35_render::CompletionRequest* request,
-                     q35_render::RenderedPrompt* prompt) {
+                     q3x_render::CompletionRequest* request,
+                     q3x_render::RenderedPrompt* prompt) {
     const auto started = Clock::now();
     access->stage = "parse";
-    const q35_render::Status status = q35_render::parse_completion_request(
+    const q3x_render::Status status = q3x_render::parse_completion_request(
         http.body, runtime.options.served_model,
         runtime.options.max_tokens, *request);
     if (!status.ok()) {
@@ -834,16 +834,16 @@ bool prepare_request(Runtime& runtime, AccessLog* access,
     return true;
 }
 
-q35_session* acquire(Runtime& runtime, const std::string& request_id,
+q3x_session* acquire(Runtime& runtime, const std::string& request_id,
                      const std::vector<int>& prompt,
                      httplib::Response& response) {
     const auto started = Clock::now();
-    q35_session* session = nullptr;
+    q3x_session* session = nullptr;
     char error[ERROR_SIZE]{};
-    const int status = q35_session_manager_acquire(
+    const int status = q3x_session_manager_acquire(
         runtime.manager, prompt.data(), static_cast<int>(prompt.size()),
         &session, error, sizeof(error));
-    if (status == Q35_BUSY) {
+    if (status == Q3X_BUSY) {
         LOG_WARN("request rejected request_id=%s stage=session status=429 "
                  "error=%s", request_id.c_str(),
                  error[0] ? error : "all sessions are busy");
@@ -851,7 +851,7 @@ q35_session* acquire(Runtime& runtime, const std::string& request_id,
                   "rate_limit_error", nullptr, "engine_busy");
         return nullptr;
     }
-    if (status != Q35_OK) {
+    if (status != Q3X_OK) {
         LOG_ERROR("request failed request_id=%s stage=session status=500 "
                   "error=%s", request_id.c_str(),
                   error[0] ? error : "cannot acquire Session");
@@ -873,8 +873,8 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
                  access->request_id.c_str());
         return false;
     }
-    q35_render::CompletionRequest request;
-    q35_render::RenderedPrompt prompt;
+    q3x_render::CompletionRequest request;
+    q3x_render::RenderedPrompt prompt;
     if (!prepare_request(runtime, access.get(), http, response,
                          &request, &prompt)) return false;
     audit_record("render", access->request_id, "",
@@ -882,7 +882,7 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
                  prompt.text);
 
     access->stage = "session";
-    q35_session* session = acquire(
+    q3x_session* session = acquire(
         runtime, access->request_id, prompt.tokens, response);
     if (!session) return false;
     auto lease = std::make_shared<SessionLease>();
@@ -923,13 +923,13 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
         }
         audit_generation(*access, result, "");
         lease->keep = true;
-        q35_render::CompletionUsage usage{
+        q3x_render::CompletionUsage usage{
             static_cast<int>(prompt.tokens.size()), result.cached_tokens,
             static_cast<int>(result.tokens.size())};
-        std::vector<q35_render::ToolCall> tool_calls;
+        std::vector<q3x_render::ToolCall> tool_calls;
         std::string content = result.content;
         if (!request.chat.tools.empty()) {
-            const bool parsed = q35_render::parse_generated_tool_calls(
+            const bool parsed = q3x_render::parse_generated_tool_calls(
                 result.content, &content, &tool_calls, &error);
             const std::string detail = "completion_id=" + completion_id +
                 " ok=" + (parsed ? "1" : "0") +
@@ -947,11 +947,11 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
                 return false;
             }
         }
-        for (q35_render::ToolCall& call : tool_calls) {
+        for (q3x_render::ToolCall& call : tool_calls) {
             call.id = make_id("call_");
         }
         if (!tool_calls.empty()) result.finish_reason = "tool_calls";
-        json_response(response, 200, q35_render::completion_json(
+        json_response(response, 200, q3x_render::completion_json(
             completion_id, created, runtime.options.served_model,
             result.reasoning, content,
             request.chat.options.enable_thinking,
@@ -974,7 +974,7 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
                          access->session_id, "status=200 stream=1");
             auto release = [&](bool keep) {
                 if (!lease->session) return;
-                q35_session_manager_release(
+                q3x_session_manager_release(
                     lease->manager, lease->session, keep);
                 lease->session = nullptr;
             };
@@ -1006,7 +1006,7 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
                 access->response_bytes += event.size();
                 return true;
             };
-            if (!send(q35_render::completion_chunk_json(
+            if (!send(q3x_render::completion_chunk_json(
                     completion_id, created, runtime.options.served_model,
                     "role", "assistant"))) {
                 interrupted("stream_start");
@@ -1019,7 +1019,7 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
             const Publish publish = [&](const char* field,
                                         const std::string& text) {
                 if (buffer_for_tools) return sink.is_writable();
-                return send(q35_render::completion_chunk_json(
+                return send(q3x_render::completion_chunk_json(
                     completion_id, created, runtime.options.served_model,
                     field, text));
             };
@@ -1036,7 +1036,7 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
                               error.c_str());
                 }
                 if (error == "client disconnected") return false;
-                if (!sink.is_writable() || !send(q35_render::error_json(
+                if (!sink.is_writable() || !send(q3x_render::error_json(
                         result.retryable ? retryable_error(error) : error,
                         "server_error", nullptr,
                         result.retryable ? "incomplete_generation" : nullptr))) {
@@ -1052,9 +1052,9 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
             }
             audit_generation(*access, result, "");
             if (buffer_for_tools) {
-                std::vector<q35_render::ToolCall> tool_calls;
+                std::vector<q3x_render::ToolCall> tool_calls;
                 std::string content;
-                const bool parsed = q35_render::parse_generated_tool_calls(
+                const bool parsed = q3x_render::parse_generated_tool_calls(
                     result.content, &content, &tool_calls, &error);
                 const std::string detail = "completion_id=" + completion_id +
                     " ok=" + (parsed ? "1" : "0") +
@@ -1067,7 +1067,7 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
                              access->request_id.c_str(), completion_id.c_str(),
                              error.c_str());
                     record_generation(access.get(), result);
-                    if (!send(q35_render::error_json(
+                    if (!send(q3x_render::error_json(
                             retryable_error(error), "server_error", nullptr,
                             "incomplete_tool_call"))) {
                         interrupted("tool_parse_error");
@@ -1082,14 +1082,14 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
                 }
                 if (request.chat.options.enable_thinking &&
                     !result.reasoning.empty() &&
-                    !send(q35_render::completion_chunk_json(
+                    !send(q3x_render::completion_chunk_json(
                         completion_id, created, runtime.options.served_model,
                         "reasoning_content", result.reasoning))) {
                     interrupted("stream_reasoning");
                     return false;
                 }
                 if (!content.empty() &&
-                    !send(q35_render::completion_chunk_json(
+                    !send(q3x_render::completion_chunk_json(
                         completion_id, created, runtime.options.served_model,
                         "content", content))) {
                     interrupted("stream_content");
@@ -1097,7 +1097,7 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
                 }
                 for (size_t index = 0; index < tool_calls.size(); ++index) {
                     tool_calls[index].id = make_id("call_");
-                    if (!send(q35_render::completion_tool_call_chunk_json(
+                    if (!send(q3x_render::completion_tool_call_chunk_json(
                             completion_id, created,
                             runtime.options.served_model,
                             static_cast<int>(index), tool_calls[index],
@@ -1109,17 +1109,17 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
                 if (!tool_calls.empty()) result.finish_reason = "tool_calls";
             }
             record_generation(access.get(), result);
-            if (!send(q35_render::completion_chunk_json(
+            if (!send(q3x_render::completion_chunk_json(
                     completion_id, created, runtime.options.served_model,
                     nullptr, "", result.finish_reason.c_str()))) {
                 interrupted("stream_finish");
                 return false;
             }
-            q35_render::CompletionUsage usage{
+            q3x_render::CompletionUsage usage{
                 static_cast<int>(prompt.tokens.size()), result.cached_tokens,
                 static_cast<int>(result.tokens.size())};
             if (request.include_usage &&
-                !send(q35_render::completion_usage_chunk_json(
+                !send(q3x_render::completion_usage_chunk_json(
                     completion_id, created, runtime.options.served_model,
                     usage))) {
                 interrupted("stream_usage");
@@ -1144,7 +1144,7 @@ bool initialize(Runtime* runtime, std::string* error) {
     LOG_INFO("renderer load started bin=%s",
              runtime->options.render_path.c_str());
     std::string render_error;
-    runtime->renderer.reset(q35_render::Renderer::create(
+    runtime->renderer.reset(q3x_render::Renderer::create(
         runtime->options.render_path, &render_error));
     if (!runtime->renderer) {
         *error = render_error;
@@ -1161,15 +1161,15 @@ bool initialize(Runtime* runtime, std::string* error) {
              elapsed_since(render_started));
 
     char native_error[ERROR_SIZE]{};
-    q35_engine_options engine_options{
+    q3x_engine_options engine_options{
         runtime->options.model_path.c_str(), runtime->options.mock};
-    if (q35_engine_create(&engine_options, &runtime->engine,
-                          native_error, sizeof(native_error)) != Q35_OK) {
+    if (q3x_engine_create(&engine_options, &runtime->engine,
+                          native_error, sizeof(native_error)) != Q3X_OK) {
         *error = native_error;
         return false;
     }
     if (!runtime->options.served_model_set) {
-        switch (q35_engine_model_id(runtime->engine)) {
+        switch (q3x_engine_model_id(runtime->engine)) {
         case 800:
             runtime->options.served_model = "qwen3.5-0.8b";
             break;
@@ -1179,37 +1179,40 @@ bool initialize(Runtime* runtime, std::string* error) {
         case 9000:
             runtime->options.served_model = "qwen3.5-9b";
             break;
+        case 38027:
+            runtime->options.served_model = "qwen3.8-27b";
+            break;
         default:
             *error = "loaded model has no served model name";
             return false;
         }
     }
-    if (q35_session_manager_create(
+    if (q3x_session_manager_create(
             runtime->engine, runtime->options.slots, runtime->options.context,
-            &runtime->manager, native_error, sizeof(native_error)) != Q35_OK) {
+            &runtime->manager, native_error, sizeof(native_error)) != Q3X_OK) {
         *error = native_error;
         return false;
     }
     return true;
 }
 
-bool save_logits(Runtime& runtime, const q35_render::RenderedPrompt& prompt,
-                 q35_session* session, std::string* error) {
+bool save_logits(Runtime& runtime, const q3x_render::RenderedPrompt& prompt,
+                 q3x_session* session, std::string* error) {
     static_assert(sizeof(int) == 4, "token files contain int32 values");
     static_assert(sizeof(float) == 4, "logit files contain float32 values");
 
     char native_error[ERROR_SIZE]{};
-    if (q35_session_sync(
+    if (q3x_session_sync(
             session, prompt.tokens.data(), static_cast<int>(prompt.tokens.size()),
-            -1, nullptr, native_error, sizeof(native_error)) != Q35_OK) {
+            -1, nullptr, native_error, sizeof(native_error)) != Q3X_OK) {
         *error = native_error;
         return false;
     }
 
-    std::vector<float> logits(static_cast<size_t>(q35_vocab_size()));
-    if (q35_session_copy_logits(
+    std::vector<float> logits(static_cast<size_t>(q3x_vocab_size()));
+    if (q3x_session_copy_logits(
             session, logits.data(), static_cast<int>(logits.size()),
-            native_error, sizeof(native_error)) != Q35_OK) {
+            native_error, sizeof(native_error)) != Q3X_OK) {
         *error = native_error;
         return false;
     }
@@ -1253,18 +1256,18 @@ bool save_logits(Runtime& runtime, const q35_render::RenderedPrompt& prompt,
 }
 
 int run_cli(Runtime& runtime, std::string* error) {
-    q35_render::CompletionRequest request;
+    q3x_render::CompletionRequest request;
     request.model = runtime.options.served_model;
     request.max_tokens = runtime.options.max_tokens;
     request.temperature = 0.0f;
 
-    q35_render::RenderedPrompt prompt;
+    q3x_render::RenderedPrompt prompt;
     if (runtime.options.mode == Mode::Prompt) {
         prompt.text = runtime.options.prompt;
         if (!runtime.renderer->encode(prompt.text, &prompt.tokens, error)) return 1;
     } else {
-        q35_render::Message message;
-        message.role = q35_render::Role::User;
+        q3x_render::Message message;
+        message.role = q3x_render::Role::User;
         message.content = runtime.options.prompt;
         request.chat.messages.push_back(std::move(message));
         if (!runtime.renderer->render(request.chat, &prompt, error)) return 1;
@@ -1282,11 +1285,11 @@ int run_cli(Runtime& runtime, std::string* error) {
     }
 
     char native_error[ERROR_SIZE]{};
-    q35_session* session = nullptr;
-    if (q35_session_manager_acquire(
+    q3x_session* session = nullptr;
+    if (q3x_session_manager_acquire(
             runtime.manager, prompt.tokens.data(),
             static_cast<int>(prompt.tokens.size()), &session,
-            native_error, sizeof(native_error)) != Q35_OK) {
+            native_error, sizeof(native_error)) != Q3X_OK) {
         *error = native_error;
         return 1;
     }
@@ -1315,20 +1318,20 @@ int run_cli(Runtime& runtime, std::string* error) {
 
 int run_benchmark(const Options& options, std::string* error) {
     char native_error[ERROR_SIZE]{};
-    q35_engine* engine = nullptr;
-    q35_engine_options engine_options{options.model_path.c_str(), options.mock};
-    if (q35_engine_create(&engine_options, &engine,
-                          native_error, sizeof(native_error)) != Q35_OK) {
+    q3x_engine* engine = nullptr;
+    q3x_engine_options engine_options{options.model_path.c_str(), options.mock};
+    if (q3x_engine_create(&engine_options, &engine,
+                          native_error, sizeof(native_error)) != Q3X_OK) {
         *error = native_error;
         return 1;
     }
 
-    q35_session_manager* manager = nullptr;
-    if (q35_session_manager_create(
+    q3x_session_manager* manager = nullptr;
+    if (q3x_session_manager_create(
             engine, options.slots, options.context, &manager,
-            native_error, sizeof(native_error)) != Q35_OK) {
+            native_error, sizeof(native_error)) != Q3X_OK) {
         *error = native_error;
-        q35_engine_destroy(engine);
+        q3x_engine_destroy(engine);
         return 1;
     }
 
@@ -1337,34 +1340,34 @@ int run_benchmark(const Options& options, std::string* error) {
         prompt[index] = 100 + index % 1000;
     }
 
-    q35_session* session = nullptr;
-    if (q35_session_manager_acquire(
+    q3x_session* session = nullptr;
+    if (q3x_session_manager_acquire(
             manager, prompt.data(), options.bench_prefill, &session,
-            native_error, sizeof(native_error)) != Q35_OK) {
+            native_error, sizeof(native_error)) != Q3X_OK) {
         *error = native_error;
-        q35_session_manager_destroy(manager);
-        q35_engine_destroy(engine);
+        q3x_session_manager_destroy(manager);
+        q3x_engine_destroy(engine);
         return 1;
     }
 
     const auto prefill_started = std::chrono::steady_clock::now();
-    int status = q35_session_sync(
+    int status = q3x_session_sync(
         session, prompt.data(), options.bench_prefill, options.bench_prefill,
         nullptr, native_error, sizeof(native_error));
     const auto decode_started = std::chrono::steady_clock::now();
-    if (status == Q35_OK) {
+    if (status == Q3X_OK) {
         for (int index = 0; index < options.bench_decode; ++index) {
-            status = q35_session_eval(session, 100,
+            status = q3x_session_eval(session, 100,
                                       native_error, sizeof(native_error));
-            if (status != Q35_OK) break;
+            if (status != Q3X_OK) break;
         }
     }
     const auto finished = std::chrono::steady_clock::now();
 
-    q35_session_manager_release(manager, session, false);
-    q35_session_manager_destroy(manager);
-    q35_engine_destroy(engine);
-    if (status != Q35_OK) {
+    q3x_session_manager_release(manager, session, false);
+    q3x_session_manager_destroy(manager);
+    q3x_engine_destroy(engine);
+    if (status != Q3X_OK) {
         *error = native_error;
         return 1;
     }
@@ -1417,7 +1420,7 @@ int serve(Runtime& runtime, std::string* error) {
         request_id(response);
         if (!authenticate(request, response)) return;
         json_response(response, 200,
-                      q35_render::models_json(runtime.options.served_model));
+                      q3x_render::models_json(runtime.options.served_model));
     });
     server.Post("/v1/chat/completions", [&](const httplib::Request& request,
                                             httplib::Response& response) {
@@ -1496,25 +1499,25 @@ int main(int argc, char** argv) {
     std::string error;
     if (!parse_options(argc, argv, &options, &error)) {
         usage(argv[0]);
-        std::fprintf(stderr, "qwen35: %s\n", error.c_str());
+        std::fprintf(stderr, "qwen3x: %s\n", error.c_str());
         return 2;
     }
 
     char log_error[ERROR_SIZE]{};
-    if (!q35_internal::log_configure(
+    if (!q3x_internal::log_configure(
             options.log_level,
             options.log_file.empty() ? nullptr : options.log_file.c_str(),
             options.log_max_bytes, options.log_backups,
             log_error, sizeof(log_error))) {
-        std::fprintf(stderr, "qwen35: %s\n", log_error);
+        std::fprintf(stderr, "qwen3x: %s\n", log_error);
         return 1;
     }
 
     int result = 1;
-    if (!options.audit_file.empty() && !q35_internal::audit_configure(
+    if (!options.audit_file.empty() && !q3x_internal::audit_configure(
             options.audit_file.c_str(), log_error, sizeof(log_error))) {
-        std::fprintf(stderr, "qwen35: %s\n", log_error);
-        q35_internal::log_shutdown();
+        std::fprintf(stderr, "qwen3x: %s\n", log_error);
+        q3x_internal::log_shutdown();
         return 1;
     }
     if (options.mode == Mode::Bench) {
@@ -1532,7 +1535,7 @@ int main(int argc, char** argv) {
         }
     }
     if (result != 0) LOG_ERROR("%s", error.c_str());
-    q35_internal::audit_shutdown();
-    q35_internal::log_shutdown();
+    q3x_internal::audit_shutdown();
+    q3x_internal::log_shutdown();
     return result;
 }

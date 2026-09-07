@@ -19,12 +19,20 @@ MODEL = Path(os.environ.get(
     "TOKENIZER", PROJECT / "build/models/Qwen3.5-0.8B"
 ))
 RENDER_BIN = Path(os.environ.get(
-    "RENDER_BIN", PROJECT / "build/qwen35-0.8b-render.bin"
+    "RENDER_BIN", PROJECT / "build/qwen3x-render.bin"
 ))
 DRIVER = Path(os.environ.get("RENDER_TEST", PROJECT / "build/render-test"))
-CHAT_TEMPLATE = (PROJECT / "reference/chat_template.jinja").read_text(
+CHAT_TEMPLATE = Path(os.environ.get(
+    "CHAT_TEMPLATE", PROJECT / "reference/chat_template.jinja"
+)).read_text(
     encoding="utf-8"
 )
+
+
+def reference_options(options):
+    result = dict(options)
+    result["reasoning_effort"] = "medium"
+    return result
 
 
 def chat_case(name):
@@ -284,14 +292,15 @@ class RenderTest(unittest.TestCase):
                 request = {"messages": messages, "tools": tools, **options}
                 payload = json.dumps(request, ensure_ascii=False).encode()
                 expected_text = self.tokenizer.apply_chat_template(
-                    messages, tools=tools, tokenize=False, **options
+                    messages, tools=tools, tokenize=False,
+                    **reference_options(options)
                 )
                 actual_text = self.driver("chat", payload).decode()
                 self.assertEqual(actual_text, expected_text)
 
                 expected_ids = self.tokenizer.apply_chat_template(
                     messages, tools=tools, tokenize=True,
-                    return_dict=False, **options
+                    return_dict=False, **reference_options(options)
                 )
                 actual_ids = list(map(int, self.driver(
                     "chat-ids", payload
@@ -392,7 +401,8 @@ class RenderTest(unittest.TestCase):
             request = {"messages": messages, "tools": tools, **options}
             requests.append(json.dumps(request, ensure_ascii=False))
             expected.append(self.tokenizer.apply_chat_template(
-                messages, tools=tools, tokenize=False, **options
+                messages, tools=tools, tokenize=False,
+                **reference_options(options)
             ))
 
         payload = ("\n".join(requests) + "\n").encode()
@@ -417,6 +427,7 @@ class RenderTest(unittest.TestCase):
             messages, tokenize=False, add_generation_prompt=True,
             enable_thinking=False, preserve_thinking=True,
             add_vision_id=False,
+            reasoning_effort="medium",
         )
         messages[1]["tool_calls"][0]["function"]["arguments"] = json.dumps(
             arguments, ensure_ascii=False
@@ -468,19 +479,11 @@ class RenderTest(unittest.TestCase):
         self.assert_bad_render_bin(original + b"x", "size does not match header")
 
         damaged = bytearray(original)
-        damaged[0] ^= 0xff
-        self.assert_bad_render_bin(damaged, "invalid render data magic")
-
-        damaged = bytearray(original)
-        struct.pack_into("<I", damaged, 12, 0)
-        self.assert_bad_render_bin(damaged, "unsupported render data header")
-
-        damaged = bytearray(original)
-        struct.pack_into("<Q", damaged, 16, len(original) + 1)
+        struct.pack_into("<Q", damaged, 0, len(original) + 1)
         self.assert_bad_render_bin(damaged, "size does not match header")
 
         damaged = bytearray(original)
-        struct.pack_into("<I", damaged, 44, 0xffffffff)
+        struct.pack_into("<I", damaged, 28, 0xffffffff)
         self.assert_bad_render_bin(damaged, "impossible Unicode counts")
 
 

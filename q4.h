@@ -3,7 +3,7 @@
 
 #include <cstdint>
 
-namespace q35_q4 {
+namespace q3x_q4 {
 
 constexpr int BLOCK_SIZE = 32;
 
@@ -22,6 +22,6 @@ inline int value(const Block& block, int index) {
     return quant - 8;
 }
 
-}  // namespace q35_q4
+}  // namespace q3x_q4
 
 #endif

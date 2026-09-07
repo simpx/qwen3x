@@ -240,7 +240,7 @@ def run_scene(scene, options, output):
     scene_output = output / scene
     scene_output.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix=f"qwen35-{scene}-") as directory:
+    with tempfile.TemporaryDirectory(prefix=f"qwen3x-{scene}-") as directory:
         cwd = Path(directory)
         setup = prepare_fixture(scene, cwd)
         initial_snapshot = git_snapshot(cwd)
@@ -337,7 +337,7 @@ def argument_parser():
     parser.add_argument("scene", choices=(*SCENES, "all"))
     parser.add_argument("--url", default=agent.DEFAULT_URL)
     parser.add_argument("--model", default=agent.DEFAULT_MODEL)
-    parser.add_argument("--backend", default="qwen35")
+    parser.add_argument("--backend", default="qwen3x")
     parser.add_argument("--artifact")
     parser.add_argument("--source")
     parser.add_argument("--revision")

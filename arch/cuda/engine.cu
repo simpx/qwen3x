@@ -8,7 +8,7 @@
 //   Work:  one Session-owned GPU scratch area reused by every forward
 //
 // Prefill runs the same layers over explicit token chunks; decode captures the
-// one-token forward as a CUDA Graph. Both stay behind q35_backend::state_forward()
+// one-token forward as a CUDA Graph. Both stay behind q3x_backend::state_forward()
 // and do not enter runtime.cpp.
 
 #include <algorithm>
@@ -32,12 +32,12 @@
 #include "model_config.h"
 #include "q8.h"
 
-namespace qwen35_cuda {
+namespace qwen3x_cuda {
 
 constexpr int AD = 256, RD = 64;
 constexpr int KH = 16, KD = 128, VD = 128, CK = 4;
 constexpr int DQK = KH * KD;
-constexpr int MAX_CONTEXT = q35_model::MAX_CONTEXT;
+constexpr int MAX_CONTEXT = q3x_model::MAX_CONTEXT;
 constexpr int END_OF_TEXT_TOKEN = 248044, IM_END_TOKEN = 248046;
 constexpr float EPS = 1e-6f, THETA = 10000000.0f;
 constexpr int BLOCK = 256;
@@ -46,29 +46,29 @@ using BF16 = uint16_t;
 
 void cuda_fatal(cudaError_t status, const char* operation) {
     if (status == cudaSuccess) return;
-    q35_internal::report_assertion(
+    q3x_internal::report_assertion(
         "CUDA operation succeeded", __FILE__, __LINE__, "%s: %s",
         operation, cudaGetErrorString(status));
     std::abort();
 }
 
-#define CUDA_OK(call) qwen35_cuda::cuda_fatal((call), #call)
+#define CUDA_OK(call) qwen3x_cuda::cuda_fatal((call), #call)
 
 void cublas_fatal(cublasStatus_t status, const char* operation) {
     if (status == CUBLAS_STATUS_SUCCESS) return;
-    q35_internal::report_assertion(
+    q3x_internal::report_assertion(
         "cuBLAS operation succeeded", __FILE__, __LINE__, "%s: %s",
         operation, cublasGetStatusString(status));
     std::abort();
 }
 
-#define CUBLAS_OK(call) qwen35_cuda::cublas_fatal((call), #call)
+#define CUBLAS_OK(call) qwen3x_cuda::cublas_fatal((call), #call)
 
 struct Linear {
     const void* weight = nullptr;
     int rows = 0;
     int columns = 0;
-    q35_model::MatrixType type = q35_model::MATRIX_BF16;
+    q3x_model::MatrixType type = q3x_model::MATRIX_BF16;
 };
 
 struct DeltaWeights {
@@ -93,16 +93,16 @@ struct Layer {
     AttentionWeights attention;
 };
 
-}  // namespace qwen35_cuda
+}  // namespace qwen3x_cuda
 
-namespace q35_backend {
+namespace q3x_backend {
 
 struct Model {
-    const q35_model::ModelConfig* config = nullptr;
-    qwen35_cuda::Linear embedding, lm_head;
-    const qwen35_cuda::BF16* final_norm = nullptr;
+    const q3x_model::ModelConfig* config = nullptr;
+    qwen3x_cuda::Linear embedding, lm_head;
+    const qwen3x_cuda::BF16* final_norm = nullptr;
     void* weights = nullptr;
-    std::unique_ptr<qwen35_cuda::Layer[]> layers;
+    std::unique_ptr<qwen3x_cuda::Layer[]> layers;
 
     ~Model() {
         if (weights) cudaFree(weights);
@@ -110,11 +110,11 @@ struct Model {
     bool load(const char* path, const char** error);
 };
 
-}  // namespace q35_backend
+}  // namespace q3x_backend
 
-namespace qwen35_cuda {
+namespace qwen3x_cuda {
 
-using q35_backend::Model;
+using q3x_backend::Model;
 
 struct DeviceFloatStorage {
     float* memory = nullptr;
@@ -122,14 +122,14 @@ struct DeviceFloatStorage {
     size_t used = 0;
 
     void allocate(size_t size) {
-        Q35_ASSERT(size > 0, "CUDA storage size=%zu", size);
+        Q3X_ASSERT(size > 0, "CUDA storage size=%zu", size);
         CUDA_OK(cudaMalloc(&memory, size * sizeof(float)));
         count = size;
         used = 0;
     }
 
     float* take(size_t size) {
-        Q35_ASSERT(used <= count && size <= count - used,
+        Q3X_ASSERT(used <= count && size <= count - used,
                    "CUDA storage exhausted used=%zu take=%zu count=%zu",
                    used, size, count);
         float* result = memory + used;
@@ -138,7 +138,7 @@ struct DeviceFloatStorage {
     }
 
     void finish() const {
-        Q35_ASSERT(used == count, "CUDA storage unused=%zu count=%zu",
+        Q3X_ASSERT(used == count, "CUDA storage unused=%zu count=%zu",
                    count - used, count);
     }
 
@@ -203,7 +203,7 @@ struct Work {
         key = cursor; cursor += KVW;
         value = cursor; cursor += KVW;
         attention_output = cursor; cursor += AS;
-        Q35_ASSERT(cursor == storage + count,
+        Q3X_ASSERT(cursor == storage + count,
                    "CUDA Work layout cursor=%p end=%p",
                    static_cast<void*>(cursor),
                    static_cast<void*>(storage + count));
@@ -270,7 +270,7 @@ struct BatchWork {
         attention_output = cursor; cursor += static_cast<size_t>(PREFILL_CHUNK) * AS;
         ffn_gate = cursor; cursor += static_cast<size_t>(PREFILL_CHUNK) * I;
         ffn_up = cursor; cursor += static_cast<size_t>(PREFILL_CHUNK) * I;
-        Q35_ASSERT(cursor == storage + PREFILL_CHUNK * stride,
+        Q3X_ASSERT(cursor == storage + PREFILL_CHUNK * stride,
                    "CUDA BatchWork layout cursor=%p end=%p",
                    static_cast<void*>(cursor),
                    static_cast<void*>(storage + PREFILL_CHUNK * stride));
@@ -285,7 +285,7 @@ struct BatchWork {
 };
 
 struct StateData {
-    const q35_model::ModelConfig* config = nullptr;
+    const q3x_model::ModelConfig* config = nullptr;
     int position = 0;
     int capacity = 0;
     int checkpoint_position = 0;
@@ -305,15 +305,15 @@ struct StateData {
     BatchWork batch;
     std::unique_ptr<float[]> host_logits;
 
-    StateData(const q35_model::ModelConfig& c, int context_size)
+    StateData(const q3x_model::ModelConfig& c, int context_size)
         : config(&c), capacity(context_size),
           layer(new (std::nothrow) LayerState[c.N]),
           host_logits(new (std::nothrow) float[c.V]) {
         const int H = c.H, I = c.I, N = c.N, AI = c.AI;
         const int AH = c.AH, KVH = c.KVH, VH = c.VH;
-        Q35_ASSERT(layer && host_logits,
+        Q3X_ASSERT(layer && host_logits,
                    "CUDA State allocation failed layers=%d logits=%d", c.N, c.V);
-        Q35_ASSERT(c.AD == AD && c.RD == RD && c.KH == KH && c.KD == KD &&
+        Q3X_ASSERT(c.AD == AD && c.RD == RD && c.KH == KH && c.KD == KD &&
                    c.VD == VD && c.CK == CK,
                    "CUDA fixed dimensions model=%s", c.name);
         const int KVW = KVH * AD;
@@ -330,8 +330,8 @@ struct StateData {
         CUBLAS_OK(cublasSetStream(cublas, stream));
         work.allocate(c.V, H, I, AH, KVH, VH);
         batch.allocate(H, I, AH, KVH, VH,
-                       c.matrix_type == q35_model::MATRIX_BF16 &&
-                       c.id == q35_model::QWEN35_4B.id);
+                       c.matrix_type == q3x_model::MATRIX_BF16 &&
+                       c.id == q3x_model::QWEN35_4B.id);
         recurrent.allocate(recurrent_count);
         kv_cache.allocate(static_cast<size_t>(attention_layers) * 2 * cache_count);
         checkpoint.allocate(recurrent_count + c.V);
@@ -435,16 +435,16 @@ __global__ void embed_kernel(const BF16* table, const int* tokens,
     }
 }
 
-__global__ void embed_q8_kernel(const q35_q8::Block* table,
+__global__ void embed_q8_kernel(const q3x_q8::Block* table,
                                 const int* tokens, const int* position,
                                 float* output, int H) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index < H) {
         const int token = tokens[*position];
-        const int blocks = H / q35_q8::BLOCK_SIZE;
-        const q35_q8::Block& block = table[
-            static_cast<size_t>(token) * blocks + index / q35_q8::BLOCK_SIZE];
-        output[index] = f16(block.scale) * block.values[index % q35_q8::BLOCK_SIZE];
+        const int blocks = H / q3x_q8::BLOCK_SIZE;
+        const q3x_q8::Block& block = table[
+            static_cast<size_t>(token) * blocks + index / q3x_q8::BLOCK_SIZE];
+        output[index] = f16(block.scale) * block.values[index % q3x_q8::BLOCK_SIZE];
     }
 }
 
@@ -475,20 +475,20 @@ __global__ void mv_add_kernel(const BF16* weight, const float* input,
     if (threadIdx.x == 0) output[row] += total;
 }
 
-__device__ float dot_row_q8(const q35_q8::Block* weight, int row,
+__device__ float dot_row_q8(const q3x_q8::Block* weight, int row,
                             const float* input, int columns, float* shared) {
-    const int blocks = columns / q35_q8::BLOCK_SIZE;
-    const q35_q8::Block* source = weight + static_cast<size_t>(row) * blocks;
+    const int blocks = columns / q3x_q8::BLOCK_SIZE;
+    const q3x_q8::Block* source = weight + static_cast<size_t>(row) * blocks;
     float sum = 0.0f;
     for (int column = threadIdx.x; column < columns; column += blockDim.x) {
-        const q35_q8::Block& block = source[column / q35_q8::BLOCK_SIZE];
-        sum += f16(block.scale) * block.values[column % q35_q8::BLOCK_SIZE] *
+        const q3x_q8::Block& block = source[column / q3x_q8::BLOCK_SIZE];
+        sum += f16(block.scale) * block.values[column % q3x_q8::BLOCK_SIZE] *
                input[column];
     }
     return block_sum(sum, shared);
 }
 
-__global__ void mv_q8_kernel(const q35_q8::Block* weight,
+__global__ void mv_q8_kernel(const q3x_q8::Block* weight,
                              const float* input, float* output,
                              int rows, int columns) {
     const int row = blockIdx.x;
@@ -498,7 +498,7 @@ __global__ void mv_q8_kernel(const q35_q8::Block* weight,
     if (threadIdx.x == 0) output[row] = total;
 }
 
-__global__ void mv_add_q8_kernel(const q35_q8::Block* weight,
+__global__ void mv_add_q8_kernel(const q3x_q8::Block* weight,
                                  const float* input, float* output,
                                  int rows, int columns) {
     const int row = blockIdx.x;
@@ -595,7 +595,7 @@ __global__ void batch_embed_kernel(const BF16* table, const int* tokens,
     }
 }
 
-__global__ void batch_embed_q8_kernel(const q35_q8::Block* table,
+__global__ void batch_embed_q8_kernel(const q3x_q8::Block* table,
                                       const int* tokens, int start, int count,
                                       float* output, int H) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -603,12 +603,12 @@ __global__ void batch_embed_q8_kernel(const q35_q8::Block* table,
         const int token_index = index / H;
         const int hidden_index = index % H;
         const int token = tokens[start + token_index];
-        const int blocks = H / q35_q8::BLOCK_SIZE;
-        const q35_q8::Block& block = table[
+        const int blocks = H / q3x_q8::BLOCK_SIZE;
+        const q3x_q8::Block& block = table[
             static_cast<size_t>(token) * blocks +
-            hidden_index / q35_q8::BLOCK_SIZE];
+            hidden_index / q3x_q8::BLOCK_SIZE];
         output[index] = f16(block.scale) *
-                        block.values[hidden_index % q35_q8::BLOCK_SIZE];
+                        block.values[hidden_index % q3x_q8::BLOCK_SIZE];
     }
 }
 
@@ -655,10 +655,10 @@ constexpr int Q8_COLUMN_TILE = 32;
 
 // One CTA computes output[128 tokens, 64 rows]. Each Q8 block is unpacked once
 // into shared memory, then reused by every token in the tile.
-__global__ void batch_mv_q8_kernel(const q35_q8::Block* weight,
+__global__ void batch_mv_q8_kernel(const q3x_q8::Block* weight,
                                    const float* input, float* output,
                                    int rows, int columns, int count, bool add) {
-    const int blocks = columns / q35_q8::BLOCK_SIZE;
+    const int blocks = columns / q3x_q8::BLOCK_SIZE;
     __shared__ float weight_tile[Q8_ROW_TILE][Q8_COLUMN_TILE + 1];
     __shared__ float input_tile[Q8_TOKEN_TILE][Q8_COLUMN_TILE + 1];
     __shared__ float scale_tile[Q8_ROW_TILE];
@@ -673,10 +673,10 @@ __global__ void batch_mv_q8_kernel(const q35_q8::Block* weight,
             const int source_row = blockIdx.x * Q8_ROW_TILE + tile_row;
             float value = 0.0f;
             if (source_row < rows) {
-                const q35_q8::Block& block = weight[
+                const q3x_q8::Block& block = weight[
                     static_cast<size_t>(source_row) * blocks +
-                    (column + tile_column) / q35_q8::BLOCK_SIZE];
-                value = block.values[tile_column % q35_q8::BLOCK_SIZE];
+                    (column + tile_column) / q3x_q8::BLOCK_SIZE];
+                value = block.values[tile_column % q3x_q8::BLOCK_SIZE];
             }
             weight_tile[tile_row][tile_column] = value;
         }
@@ -685,7 +685,7 @@ __global__ void batch_mv_q8_kernel(const q35_q8::Block* weight,
             const int source_row = blockIdx.x * Q8_ROW_TILE + tile_row;
             scale_tile[tile_row] = source_row < rows
                 ? f16(weight[static_cast<size_t>(source_row) * blocks +
-                             column / q35_q8::BLOCK_SIZE].scale)
+                             column / q3x_q8::BLOCK_SIZE].scale)
                 : 0.0f;
         }
         for (int index = thread; index < Q8_TOKEN_TILE * Q8_COLUMN_TILE;
@@ -1277,14 +1277,14 @@ const BF16* bf16_weight(const Linear& linear) {
     return static_cast<const BF16*>(linear.weight);
 }
 
-const q35_q8::Block* q8_weight(const Linear& linear) {
-    return static_cast<const q35_q8::Block*>(linear.weight);
+const q3x_q8::Block* q8_weight(const Linear& linear) {
+    return static_cast<const q3x_q8::Block*>(linear.weight);
 }
 
 void embed(const Linear& table, const int* tokens, const int* position,
            float* output, cudaStream_t stream) {
     const int blocks = (table.columns + BLOCK - 1) / BLOCK;
-    if (table.type == q35_model::MATRIX_BF16) {
+    if (table.type == q3x_model::MATRIX_BF16) {
         embed_kernel<<<blocks, BLOCK, 0, stream>>>(
             bf16_weight(table), tokens, position, output, table.columns);
     } else {
@@ -1297,7 +1297,7 @@ void batch_embed(const Linear& table, const int* tokens, int start, int count,
                  float* output, cudaStream_t stream) {
     const int values = count * table.columns;
     const int blocks = (values + BLOCK - 1) / BLOCK;
-    if (table.type == q35_model::MATRIX_BF16) {
+    if (table.type == q3x_model::MATRIX_BF16) {
         batch_embed_kernel<<<blocks, BLOCK, 0, stream>>>(
             bf16_weight(table), tokens, start, count, output, table.columns);
     } else {
@@ -1308,7 +1308,7 @@ void batch_embed(const Linear& table, const int* tokens, int start, int count,
 
 void mv(const Linear& linear, const float* input, float* output,
         cudaStream_t stream) {
-    if (linear.type == q35_model::MATRIX_BF16) {
+    if (linear.type == q3x_model::MATRIX_BF16) {
         mv_kernel<<<linear.rows, BLOCK, 0, stream>>>(
             bf16_weight(linear), input, output, linear.rows, linear.columns);
     } else {
@@ -1319,7 +1319,7 @@ void mv(const Linear& linear, const float* input, float* output,
 
 void mv_add(const Linear& linear, const float* input, float* output,
             cudaStream_t stream) {
-    if (linear.type == q35_model::MATRIX_BF16) {
+    if (linear.type == q3x_model::MATRIX_BF16) {
         mv_add_kernel<<<linear.rows, BLOCK, 0, stream>>>(
             bf16_weight(linear), input, output, linear.rows, linear.columns);
     } else {
@@ -1336,7 +1336,7 @@ void mv_add(const Linear& linear, const float* input, float* output,
 void batch_mv(cublasHandle_t handle, const Linear& linear,
               const float* input, float* output, int count, bool add,
               BF16* converted, cudaStream_t stream) {
-    if (linear.type == q35_model::MATRIX_Q8_0) {
+    if (linear.type == q3x_model::MATRIX_Q8_0) {
         const dim3 grid((linear.rows + Q8_ROW_TILE - 1) / Q8_ROW_TILE,
                         (count + Q8_TOKEN_TILE - 1) / Q8_TOKEN_TILE);
         const dim3 threads(Q8_THREADS_X, Q8_THREADS_Y);
@@ -1345,7 +1345,7 @@ void batch_mv(cublasHandle_t handle, const Linear& linear,
             count, add);
         return;
     }
-    Q35_ASSERT(converted, "BF16 batch matrix conversion buffer is null");
+    Q3X_ASSERT(converted, "BF16 batch matrix conversion buffer is null");
     const int values = count * linear.columns;
     fp32_to_bf16_kernel<<<(values + BLOCK - 1) / BLOCK, BLOCK, 0, stream>>>(
         input, converted, values);
@@ -1387,7 +1387,7 @@ void ffn_projections_q8(const Layer& layer, const float* input, Work& work,
 void delta_projections(const DeltaWeights& weights, const float* input,
                        Work& work, int DQKV, int DO, int VH,
                        cudaStream_t stream) {
-    if (weights.qkv.type == q35_model::MATRIX_BF16) {
+    if (weights.qkv.type == q3x_model::MATRIX_BF16) {
         delta_projections_kernel<<<DQKV + DO + 2 * VH, BLOCK, 0, stream>>>(
             bf16_weight(weights.qkv), bf16_weight(weights.z),
             bf16_weight(weights.a), bf16_weight(weights.b), input,
@@ -1401,7 +1401,7 @@ void delta_projections(const DeltaWeights& weights, const float* input,
 void attention_projections(const AttentionWeights& weights,
                            const float* input, Work& work, int AS, int KVW,
                            cudaStream_t stream) {
-    if (weights.q.type == q35_model::MATRIX_BF16) {
+    if (weights.q.type == q3x_model::MATRIX_BF16) {
         attention_projections_kernel<<<2 * AS + 2 * KVW, BLOCK, 0, stream>>>(
             bf16_weight(weights.q), bf16_weight(weights.k),
             bf16_weight(weights.v), input, work.query_and_gate,
@@ -1413,7 +1413,7 @@ void attention_projections(const AttentionWeights& weights,
 
 void ffn_projections(const Layer& layer, const float* input, Work& work,
                      int I, cudaStream_t stream) {
-    if (layer.gate.type == q35_model::MATRIX_BF16) {
+    if (layer.gate.type == q3x_model::MATRIX_BF16) {
         ffn_projections_kernel<<<2 * I, BLOCK, 0, stream>>>(
             bf16_weight(layer.gate), bf16_weight(layer.up), input,
             work.ffn_gate, work.ffn_up, layer.gate.columns, I);
@@ -1617,11 +1617,11 @@ void batch_ffn_matrix(cublasHandle_t handle, const Layer& layer,
 
 void prefill_chunk_fp32(const Model& model, StateData& state,
                         int start, int count, bool compute_logits) {
-    Q35_ASSERT(model.config, "CUDA prefill model config is null");
-    const q35_model::ModelConfig& c = *model.config;
+    Q3X_ASSERT(model.config, "CUDA prefill model config is null");
+    const q3x_model::ModelConfig& c = *model.config;
     const int H = c.H, I = c.I, N = c.N;
     const int AH = c.AH, KVH = c.KVH, VH = c.VH;
-    Q35_ASSERT(count > 0 && count <= PREFILL_CHUNK,
+    Q3X_ASSERT(count > 0 && count <= PREFILL_CHUNK,
                "CUDA prefill chunk count=%d limit=%d", count, PREFILL_CHUNK);
     BatchWork& work = state.batch;
     cudaStream_t stream = state.stream;
@@ -1656,11 +1656,11 @@ void prefill_chunk_fp32(const Model& model, StateData& state,
 
 void prefill_chunk_matrix(const Model& model, StateData& state,
                           int start, int count, bool compute_logits) {
-    Q35_ASSERT(model.config, "CUDA prefill model config is null");
-    const q35_model::ModelConfig& c = *model.config;
+    Q3X_ASSERT(model.config, "CUDA prefill model config is null");
+    const q3x_model::ModelConfig& c = *model.config;
     const int H = c.H, I = c.I, N = c.N;
     const int AH = c.AH, KVH = c.KVH, VH = c.VH;
-    Q35_ASSERT(count > 0 && count <= PREFILL_CHUNK,
+    Q3X_ASSERT(count > 0 && count <= PREFILL_CHUNK,
                "CUDA prefill chunk count=%d limit=%d", count, PREFILL_CHUNK);
     BatchWork& work = state.batch;
     cudaStream_t stream = state.stream;
@@ -1696,8 +1696,8 @@ void prefill_chunk_matrix(const Model& model, StateData& state,
 }
 
 void forward(const Model& model, StateData& state, bool compute_logits) {
-    Q35_ASSERT(model.config, "CUDA forward model config is null");
-    const q35_model::ModelConfig& c = *model.config;
+    Q3X_ASSERT(model.config, "CUDA forward model config is null");
+    const q3x_model::ModelConfig& c = *model.config;
     const int H = c.H, I = c.I, N = c.N;
     const int AH = c.AH, KVH = c.KVH, VH = c.VH;
     Work& work = state.work;
@@ -1759,14 +1759,14 @@ const T* take(const void* base, size_t size, size_t& cursor,
     return result;
 }
 
-}  // namespace qwen35_cuda
+}  // namespace qwen3x_cuda
 
-namespace q35_backend {
+namespace q3x_backend {
 
 bool Model::load(const char* path, const char** error) {
-    using qwen35_cuda::BF16;
-    using qwen35_cuda::Layer;
-    using qwen35_cuda::Linear;
+    using qwen3x_cuda::BF16;
+    using qwen3x_cuda::Layer;
+    using qwen3x_cuda::Linear;
 
     int fd = -1;
     size_t size = 0;
@@ -1787,7 +1787,7 @@ bool Model::load(const char* path, const char** error) {
     if (fd < 0) return fail("cannot open model.bin");
     struct stat information {};
     if (fstat(fd, &information) ||
-        information.st_size < static_cast<off_t>(q35_model::HEADER_SIZE)) {
+        information.st_size < static_cast<off_t>(q3x_model::HEADER_SIZE)) {
         return fail("bad model.bin");
     }
     size = static_cast<size_t>(information.st_size);
@@ -1797,17 +1797,12 @@ bool Model::load(const char* path, const char** error) {
         file = nullptr;
         return fail("mmap model.bin failed");
     }
-    if (std::memcmp(file, "Q35MODL\0", 8) != 0)
+    if (std::memcmp(file, "Q3XMODL\0", 8) != 0)
         return fail("wrong model.bin magic");
-    uint32_t version = 0, reserved = 0;
-    std::memcpy(&version, file + 8, sizeof(version));
-    std::memcpy(&reserved, file + 12, sizeof(reserved));
-    if (reserved != 0 || version != q35_model::FORMAT_VERSION)
-        return fail("unsupported model.bin version");
-    const uint32_t id = q35_model::header_field(file, q35_model::MODEL_ID);
-    config = q35_model::config_for_id(id);
+    const uint32_t id = q3x_model::header_field(file, q3x_model::MODEL_ID);
+    config = q3x_model::config_for_id(id);
     if (!config) return fail("unsupported Qwen3.5 model ID");
-    if (!q35_model::header_matches(file, size, *config))
+    if (!q3x_model::header_matches(file, size, *config))
         return fail("Qwen3.5 model.bin header mismatch");
 
     cudaError_t status = cudaMalloc(&weights, size);
@@ -1815,57 +1810,57 @@ bool Model::load(const char* path, const char** error) {
     status = cudaMemcpy(weights, file, size, cudaMemcpyHostToDevice);
     if (status != cudaSuccess) return fail("CUDA model upload failed");
 
-    size_t cursor = q35_model::HEADER_SIZE;
+    size_t cursor = q3x_model::HEADER_SIZE;
     const auto& c = *config;
     const int AS = c.AH * c.AD, KVW = c.KVH * c.AD;
     const int DO = c.VH * c.VD, DQKV = 2 * c.KH * c.KD + DO;
     auto linear = [&](int rows, int columns) {
-        Q35_ASSERT(columns % q35_q8::BLOCK_SIZE == 0,
+        Q3X_ASSERT(columns % q3x_q8::BLOCK_SIZE == 0,
                    "CUDA matrix columns=%d block=%d",
-                   columns, q35_q8::BLOCK_SIZE);
-        if (c.matrix_type == q35_model::MATRIX_BF16) {
-            return Linear {qwen35_cuda::take<BF16>(
+                   columns, q3x_q8::BLOCK_SIZE);
+        if (c.matrix_type == q3x_model::MATRIX_BF16) {
+            return Linear {qwen3x_cuda::take<BF16>(
                                weights, size, cursor,
                                static_cast<size_t>(rows) * columns, error),
                            rows, columns, c.matrix_type};
         }
-        return Linear {qwen35_cuda::take<q35_q8::Block>(
+        return Linear {qwen3x_cuda::take<q3x_q8::Block>(
                            weights, size, cursor,
                            static_cast<size_t>(rows) * columns /
-                           q35_q8::BLOCK_SIZE, error),
+                           q3x_q8::BLOCK_SIZE, error),
                        rows, columns, c.matrix_type};
     };
     layers.reset(new (std::nothrow) Layer[c.N]);
     if (!layers) return fail("cannot allocate CUDA model layer table");
     embedding = linear(c.V, c.H);
     lm_head = c.tied_embeddings ? embedding : linear(c.V, c.H);
-    final_norm = qwen35_cuda::take<BF16>(weights, size, cursor, c.H, error);
+    final_norm = qwen3x_cuda::take<BF16>(weights, size, cursor, c.H, error);
     for (int i = 0; i < c.N; ++i) {
         Layer& l = layers[i];
-        l.input_norm = qwen35_cuda::take<BF16>(weights, size, cursor, c.H, error);
+        l.input_norm = qwen3x_cuda::take<BF16>(weights, size, cursor, c.H, error);
         if (i % c.AI != c.AI - 1) {
             l.delta.qkv = linear(DQKV, c.H); l.delta.z = linear(DO, c.H);
             l.delta.a = linear(c.VH, c.H); l.delta.b = linear(c.VH, c.H);
-            l.delta.conv = qwen35_cuda::take<BF16>(
+            l.delta.conv = qwen3x_cuda::take<BF16>(
                 weights, size, cursor, static_cast<size_t>(DQKV) * c.CK, error);
-            l.delta.alog = qwen35_cuda::take<float>(
+            l.delta.alog = qwen3x_cuda::take<float>(
                 weights, size, cursor, c.VH, error);
-            l.delta.dt = qwen35_cuda::take<BF16>(
+            l.delta.dt = qwen3x_cuda::take<BF16>(
                 weights, size, cursor, c.VH, error);
-            l.delta.norm = qwen35_cuda::take<float>(
+            l.delta.norm = qwen3x_cuda::take<float>(
                 weights, size, cursor, c.VD, error);
             l.delta.out = linear(c.H, DO);
         } else {
             l.attention.q = linear(2 * AS, c.H);
             l.attention.k = linear(KVW, c.H);
             l.attention.v = linear(KVW, c.H);
-            l.attention.qnorm = qwen35_cuda::take<BF16>(
+            l.attention.qnorm = qwen3x_cuda::take<BF16>(
                 weights, size, cursor, c.AD, error);
-            l.attention.knorm = qwen35_cuda::take<BF16>(
+            l.attention.knorm = qwen3x_cuda::take<BF16>(
                 weights, size, cursor, c.AD, error);
             l.attention.out = linear(c.H, AS);
         }
-        l.post_norm = qwen35_cuda::take<BF16>(weights, size, cursor, c.H, error);
+        l.post_norm = qwen3x_cuda::take<BF16>(weights, size, cursor, c.H, error);
         l.gate = linear(c.I, c.H);
         l.up = linear(c.I, c.H);
         l.down = linear(c.H, c.I);
@@ -1878,13 +1873,13 @@ bool Model::load(const char* path, const char** error) {
 }
 
 struct State {
-    qwen35_cuda::StateData data;
-    State(const q35_model::ModelConfig& config, int context_size)
+    qwen3x_cuda::StateData data;
+    State(const q3x_model::ModelConfig& config, int context_size)
         : data(config, context_size) {}
 };
 
 Model* model_create(const char* path, char* err, size_t errlen) {
-    Q35_ASSERT(path, "CUDA model_create path is null");
+    Q3X_ASSERT(path, "CUDA model_create path is null");
     std::unique_ptr<Model> model(new (std::nothrow) Model());
     const char* message = nullptr;
     if (!model || !model->load(path, &message)) {
@@ -1899,10 +1894,10 @@ Model* model_create(const char* path, char* err, size_t errlen) {
 void model_destroy(Model* model) { delete model; }
 
 State* state_create(Model* model, int context_size) {
-    Q35_ASSERT(model, "CUDA state_create model is null");
-    Q35_ASSERT(context_size > 0 && context_size <= qwen35_cuda::MAX_CONTEXT,
+    Q3X_ASSERT(model, "CUDA state_create model is null");
+    Q3X_ASSERT(context_size > 0 && context_size <= qwen3x_cuda::MAX_CONTEXT,
                "CUDA state_create context_size=%d", context_size);
-    Q35_ASSERT(model->config, "CUDA state_create model config is null");
+    Q3X_ASSERT(model->config, "CUDA state_create model config is null");
     return new State(*model->config, context_size);
 }
 
@@ -1920,36 +1915,36 @@ void reset_state(State* state) {
 }
 
 void state_reset(State* state) {
-    Q35_ASSERT(state, "CUDA state_reset state is null");
+    Q3X_ASSERT(state, "CUDA state_reset state is null");
     reset_state(state);
 }
 
 void state_forward(Model* model, State* state,
                    const int* tokens, int count, bool compute_logits) {
-    Q35_ASSERT(model && state && tokens && count > 0,
+    Q3X_ASSERT(model && state && tokens && count > 0,
                "CUDA state_forward model=%p state=%p tokens=%p count=%d",
                static_cast<void*>(model), static_cast<void*>(state),
                static_cast<const void*>(tokens), count);
-    Q35_ASSERT(state->data.position >= 0 &&
+    Q3X_ASSERT(state->data.position >= 0 &&
                state->data.position + count <= state->data.capacity,
                "CUDA state_forward position=%d count=%d capacity=%d",
                state->data.position, count, state->data.capacity);
-    Q35_ASSERT(model->config, "CUDA state_forward model config is null");
+    Q3X_ASSERT(model->config, "CUDA state_forward model config is null");
     for (int index = 0; index < count; ++index) {
-        Q35_ASSERT(tokens[index] >= 0 && tokens[index] < model->config->V,
+        Q3X_ASSERT(tokens[index] >= 0 && tokens[index] < model->config->V,
                    "CUDA state_forward token[%d]=%d vocabulary=%d",
                    index, tokens[index], model->config->V);
     }
-    qwen35_cuda::StateData& data = state->data;
+    qwen3x_cuda::StateData& data = state->data;
     CUDA_OK(cudaMemcpyAsync(
         data.device_tokens + data.position, tokens,
         static_cast<size_t>(count) * sizeof(int),
         cudaMemcpyHostToDevice, data.stream));
     if (count == 1) {
         if (!data.forward_graph) {
-            data.forward_graph = qwen35_cuda::capture_forward(
+            data.forward_graph = qwen3x_cuda::capture_forward(
                 *model, data, false);
-            data.logits_graph = qwen35_cuda::capture_forward(
+            data.logits_graph = qwen3x_cuda::capture_forward(
                 *model, data, true);
         }
         CUDA_OK(cudaMemcpyAsync(data.device_position, &data.position,
@@ -1960,22 +1955,22 @@ void state_forward(Model* model, State* state,
                                 data.stream));
     } else {
         for (int offset = 0; offset < count;) {
-            const int chunk = std::min(qwen35_cuda::PREFILL_CHUNK,
+            const int chunk = std::min(qwen3x_cuda::PREFILL_CHUNK,
                                        count - offset);
             switch (model->config->id) {
-            case q35_model::QWEN35_08B.id:
-                qwen35_cuda::prefill_chunk_fp32(
+            case q3x_model::QWEN35_08B.id:
+                qwen3x_cuda::prefill_chunk_fp32(
                     *model, data, data.position + offset, chunk,
                     compute_logits && offset + chunk == count);
                 break;
-            case q35_model::QWEN35_4B.id:
-            case q35_model::QWEN35_9B.id:
-                qwen35_cuda::prefill_chunk_matrix(
+            case q3x_model::QWEN35_4B.id:
+            case q3x_model::QWEN35_9B.id:
+                qwen3x_cuda::prefill_chunk_matrix(
                     *model, data, data.position + offset, chunk,
                     compute_logits && offset + chunk == count);
                 break;
             default:
-                Q35_ASSERT(false, "CUDA state_forward unsupported model_id=%u",
+                Q3X_ASSERT(false, "CUDA state_forward unsupported model_id=%u",
                            model->config->id);
             }
             offset += chunk;
@@ -1991,8 +1986,8 @@ void state_forward(Model* model, State* state,
 }
 
 void state_checkpoint_save(State* state) {
-    Q35_ASSERT(state, "CUDA state_checkpoint_save state is null");
-    qwen35_cuda::StateData& data = state->data;
+    Q3X_ASSERT(state, "CUDA state_checkpoint_save state is null");
+    qwen3x_cuda::StateData& data = state->data;
     data.checkpoint_position = data.position;
     CUDA_OK(cudaMemcpyAsync(data.checkpoint_recurrent, data.recurrent.memory,
                             data.recurrent.count * sizeof(float),
@@ -2004,8 +1999,8 @@ void state_checkpoint_save(State* state) {
 }
 
 void state_checkpoint_restore(State* state) {
-    Q35_ASSERT(state, "CUDA state_checkpoint_restore state is null");
-    qwen35_cuda::StateData& data = state->data;
+    Q3X_ASSERT(state, "CUDA state_checkpoint_restore state is null");
+    qwen3x_cuda::StateData& data = state->data;
     CUDA_OK(cudaMemcpyAsync(data.recurrent.memory, data.checkpoint_recurrent,
                             data.recurrent.count * sizeof(float),
                             cudaMemcpyDeviceToDevice, data.stream));
@@ -2032,24 +2027,24 @@ int state_argmax(const State* state) {
 }
 
 void state_copy_logits(const State* state, float* output) {
-    Q35_ASSERT(state && output, "CUDA state_copy_logits state=%p output=%p",
+    Q3X_ASSERT(state && output, "CUDA state_copy_logits state=%p output=%p",
                static_cast<const void*>(state), static_cast<void*>(output));
     CUDA_OK(cudaMemcpy(output, state->data.work.logits,
                        static_cast<size_t>(state->data.config->V) * sizeof(float),
                        cudaMemcpyDeviceToHost));
 }
 
-int vocab_size() { return q35_model::QWEN35_08B.V; }
-int max_context() { return qwen35_cuda::MAX_CONTEXT; }
+int vocab_size() { return q3x_model::QWEN35_08B.V; }
+int max_context() { return qwen3x_cuda::MAX_CONTEXT; }
 bool token_is_stop(int token) {
-    return token == qwen35_cuda::END_OF_TEXT_TOKEN ||
-           token == qwen35_cuda::IM_END_TOKEN;
+    return token == qwen3x_cuda::END_OF_TEXT_TOKEN ||
+           token == qwen3x_cuda::IM_END_TOKEN;
 }
 
 uint32_t model_id(const Model* model) {
-    Q35_ASSERT(model, "CUDA model_id model is null");
-    Q35_ASSERT(model->config, "CUDA model_id config is null");
+    Q3X_ASSERT(model, "CUDA model_id model is null");
+    Q3X_ASSERT(model->config, "CUDA model_id config is null");
     return model->config->id;
 }
 
-}  // namespace q35_backend
+}  // namespace q3x_backend

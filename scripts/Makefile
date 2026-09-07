@@ -22,7 +22,7 @@ CHECKPOINT_27B_REVISION ?= 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
 CHECKPOINT_27B ?= $(BUILD)/models/Qwen3.8-27B
 CHECKPOINT_27B_STAMP ?= $(BUILD)/.qwen3.8-27b-checkpoint
 MODEL_27B_BIN ?= $(BUILD)/qwen38-27b-q4_0-model.bin
-RENDER_BIN ?= $(BUILD)/qwen35-0.8b-render.bin
+RENDER_BIN ?= $(BUILD)/qwen3x-render.bin
 .PHONY: all sync checkpoint checkpoint-4b checkpoint-9b checkpoint-27b \
 	model model-4b model-9b model-27b render clean
 
@@ -92,7 +92,8 @@ $(MODEL_27B_BIN): pack_weights.py $(CHECKPOINT_27B_STAMP)
 render: $(RENDER_BIN)
 
 $(RENDER_BIN): pack_render.py $(CHECKPOINT_STAMP) \
-		$(CHECKPOINT)/tokenizer.json $(CHECKPOINT)/tokenizer_config.json
+		$(CHECKPOINT)/tokenizer.json \
+		$(CHECKPOINT)/tokenizer_config.json
 	mkdir -p "$(BUILD)"
 	cd "$(PROJECT)" && $(PYTHON) -m scripts.pack_render "$(CHECKPOINT)" "$@"
 

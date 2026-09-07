@@ -26,9 +26,9 @@
 #include "model_config.h"
 #include "q4.h"
 #include "q8.h"
-#include "qwen35.h"
+#include "qwen3x.h"
 
-namespace q35_backend {
+namespace q3x_backend {
 
 using FP32 = float;
 using BF16 = uint16_t;
@@ -39,7 +39,7 @@ static_assert(sizeof(FP32) == 4 && std::numeric_limits<FP32>::is_iec559);
 struct Linear {
     const void* w = nullptr;
     int rows = 0, cols = 0;
-    q35_model::MatrixType type = q35_model::MATRIX_BF16;
+    q3x_model::MatrixType type = q3x_model::MATRIX_BF16;
 };
 struct DeltaWeights {
     Linear qkv, z, a, b, out;
@@ -65,11 +65,11 @@ struct Storage {
     size_t count = 0, used = 0;
     void allocate(size_t n) {
         data.reset(new (std::nothrow) FP32[n]);
-        Q35_ASSERT(data, "FP32 allocation failed count=%zu", n);
+        Q3X_ASSERT(data, "FP32 allocation failed count=%zu", n);
         count = n;
     }
     FP32* take(size_t n) {
-        Q35_ASSERT(used <= count && n <= count - used,
+        Q3X_ASSERT(used <= count && n <= count - used,
                    "storage used=%zu take=%zu count=%zu", used, n, count);
         FP32* result = data.get() + used;
         used += n;
@@ -82,7 +82,7 @@ struct Work {
     FP32 *hidden, *normalized, *branch, *logits, *ffn_gate, *ffn_up;
     FP32 *delta_qkv, *delta_z, *delta_a, *delta_b, *delta_q, *delta_k, *delta_output;
     FP32 *query_and_gate, *query, *attention_gate, *key, *value, *attention_output;
-    explicit Work(const q35_model::ModelConfig& c) {
+    explicit Work(const q3x_model::ModelConfig& c) {
         const int DQKV = 2 * c.KH * c.KD + c.VH * c.VD;
         const int DO = c.VH * c.VD, AS = c.AH * c.AD, KVW = c.KVH * c.AD;
         storage.allocate(3ull * c.H + c.V + 2ull * c.I + DQKV + 4ull * DO +
@@ -106,19 +106,19 @@ struct Work {
         key = storage.take(KVW);
         value = storage.take(KVW);
         attention_output = storage.take(AS);
-        Q35_ASSERT(storage.used == storage.count, "Work storage layout mismatch");
+        Q3X_ASSERT(storage.used == storage.count, "Work storage layout mismatch");
     }
 };
 
 struct LayerState { FP32 *conv = nullptr, *memory = nullptr, *key = nullptr, *value = nullptr; };
 struct State {
-    const q35_model::ModelConfig* config;
+    const q3x_model::ModelConfig* config;
     int position = 0, capacity, checkpoint_position = 0;
     std::unique_ptr<LayerState[]> layer;
     std::unique_ptr<FP32[]> score, checkpoint_recurrent, checkpoint_logits;
     Storage recurrent, kv;
     Work work;
-    State(const q35_model::ModelConfig& c, int context) : config(&c), capacity(context), work(c) {
+    State(const q3x_model::ModelConfig& c, int context) : config(&c), capacity(context), work(c) {
         // Delta layer 保存固定 recurrent state；Attention layer 保存随 context 增长的 KV。
         const int delta_layers = c.N - c.N / c.AI, attention_layers = c.N / c.AI;
         const size_t conv = static_cast<size_t>(2 * c.KH * c.KD + c.VH * c.VD) * (c.CK - 1);
@@ -130,7 +130,7 @@ struct State {
         kv.allocate(static_cast<size_t>(attention_layers) * 2 * cache);
         checkpoint_recurrent.reset(new (std::nothrow) FP32[recurrent.count]);
         checkpoint_logits.reset(new (std::nothrow) FP32[c.V]);
-        Q35_ASSERT(layer && score && checkpoint_recurrent && checkpoint_logits,
+        Q3X_ASSERT(layer && score && checkpoint_recurrent && checkpoint_logits,
                    "State allocation failed model=%s context=%d", c.name, context);
         for (int i = 0; i < c.N; ++i) {
             if (i % c.AI != c.AI - 1) {
@@ -141,7 +141,7 @@ struct State {
                 layer[i].value = kv.take(cache);
             }
         }
-        Q35_ASSERT(recurrent.used == recurrent.count && kv.used == kv.count, "State layout mismatch");
+        Q3X_ASSERT(recurrent.used == recurrent.count && kv.used == kv.count, "State layout mismatch");
         reset();
     }
     void reset() {
@@ -154,7 +154,7 @@ struct Model {
     int fd = -1;
     size_t file_size = 0;
     const uint8_t* file = nullptr;
-    const q35_model::ModelConfig* config = nullptr;
+    const q3x_model::ModelConfig* config = nullptr;
     Linear embedding, lm_head;
     const BF16* final_norm = nullptr;
     std::unique_ptr<Layer[]> layer;
@@ -213,45 +213,45 @@ void embed_bf16(const Linear& table, int token, FP32* out) {
     for (int i = 0; i < table.cols; ++i) out[i] = f32(row[i]);
 }
 void embed_q8(const Linear& table, int token, FP32* out) {
-    const int blocks = table.cols / q35_q8::BLOCK_SIZE;
-    const q35_q8::Block* row = static_cast<const q35_q8::Block*>(table.w) +
+    const int blocks = table.cols / q3x_q8::BLOCK_SIZE;
+    const q3x_q8::Block* row = static_cast<const q3x_q8::Block*>(table.w) +
                                static_cast<size_t>(token) * blocks;
     for (int block = 0; block < blocks; ++block) {
         const FP32 scale = f16(row[block].scale);
-        for (int i = 0; i < q35_q8::BLOCK_SIZE; ++i)
-            out[block * q35_q8::BLOCK_SIZE + i] = scale * row[block].values[i];
+        for (int i = 0; i < q3x_q8::BLOCK_SIZE; ++i)
+            out[block * q3x_q8::BLOCK_SIZE + i] = scale * row[block].values[i];
     }
 }
 void embed_q4(const Linear& table, int token, FP32* out) {
-    const int blocks = table.cols / q35_q4::BLOCK_SIZE;
-    const q35_q4::Block* row = static_cast<const q35_q4::Block*>(table.w) +
+    const int blocks = table.cols / q3x_q4::BLOCK_SIZE;
+    const q3x_q4::Block* row = static_cast<const q3x_q4::Block*>(table.w) +
                                static_cast<size_t>(token) * blocks;
     for (int block = 0; block < blocks; ++block) {
         const FP32 scale = f16(row[block].scale);
-        for (int i = 0; i < q35_q4::BLOCK_SIZE; ++i)
-            out[block * q35_q4::BLOCK_SIZE + i] =
-                scale * q35_q4::value(row[block], i);
+        for (int i = 0; i < q3x_q4::BLOCK_SIZE; ++i)
+            out[block * q3x_q4::BLOCK_SIZE + i] =
+                scale * q3x_q4::value(row[block], i);
     }
 }
 void embed(const Linear& table, int token, FP32* out) {
-    Q35_ASSERT(token >= 0 && token < table.rows, "embedding token=%d rows=%d", token, table.rows);
+    Q3X_ASSERT(token >= 0 && token < table.rows, "embedding token=%d rows=%d", token, table.rows);
     switch (table.type) {
-    case q35_model::MATRIX_BF16: embed_bf16(table, token, out); break;
-    case q35_model::MATRIX_Q8_0: embed_q8(table, token, out); break;
-    case q35_model::MATRIX_Q4_0: embed_q4(table, token, out); break;
+    case q3x_model::MATRIX_BF16: embed_bf16(table, token, out); break;
+    case q3x_model::MATRIX_Q8_0: embed_q8(table, token, out); break;
+    case q3x_model::MATRIX_Q4_0: embed_q4(table, token, out); break;
     }
 }
-FP32 dot_q8(const q35_q8::Block* blocks, const FP32* x, int n) {
+FP32 dot_q8(const q3x_q8::Block* blocks, const FP32* x, int n) {
 #if defined(__ARM_NEON)
     float32x4_t sum = vdupq_n_f32(0.0f);
-    for (int block = 0; block < n / q35_q8::BLOCK_SIZE; ++block) {
+    for (int block = 0; block < n / q3x_q8::BLOCK_SIZE; ++block) {
         const int8x16_t q0 = vld1q_s8(blocks[block].values);
         const int8x16_t q1 = vld1q_s8(blocks[block].values + 16);
         const int16x8_t q00 = vmovl_s8(vget_low_s8(q0));
         const int16x8_t q01 = vmovl_s8(vget_high_s8(q0));
         const int16x8_t q10 = vmovl_s8(vget_low_s8(q1));
         const int16x8_t q11 = vmovl_s8(vget_high_s8(q1));
-        const FP32* input = x + block * q35_q8::BLOCK_SIZE;
+        const FP32* input = x + block * q3x_q8::BLOCK_SIZE;
         float32x4_t inner = vmulq_f32(
             vcvtq_f32_s32(vmovl_s16(vget_low_s16(q00))), vld1q_f32(input));
         inner = vfmaq_f32(inner,
@@ -273,22 +273,22 @@ FP32 dot_q8(const q35_q8::Block* blocks, const FP32* x, int n) {
     return vaddvq_f32(sum);
 #else
     FP32 sum = 0.0f;
-    for (int block = 0; block < n / q35_q8::BLOCK_SIZE; ++block) {
+    for (int block = 0; block < n / q3x_q8::BLOCK_SIZE; ++block) {
         FP32 inner = 0.0f;
-        for (int i = 0; i < q35_q8::BLOCK_SIZE; ++i)
-            inner += blocks[block].values[i] * x[block * q35_q8::BLOCK_SIZE + i];
+        for (int i = 0; i < q3x_q8::BLOCK_SIZE; ++i)
+            inner += blocks[block].values[i] * x[block * q3x_q8::BLOCK_SIZE + i];
         sum += f16(blocks[block].scale) * inner;
     }
     return sum;
 #endif
 }
-FP32 dot_q4(const q35_q4::Block* blocks, const FP32* x, int n) {
+FP32 dot_q4(const q3x_q4::Block* blocks, const FP32* x, int n) {
     FP32 sum = 0.0f;
-    for (int block = 0; block < n / q35_q4::BLOCK_SIZE; ++block) {
+    for (int block = 0; block < n / q3x_q4::BLOCK_SIZE; ++block) {
         FP32 inner = 0.0f;
-        for (int i = 0; i < q35_q4::BLOCK_SIZE; ++i)
-            inner += q35_q4::value(blocks[block], i) *
-                     x[block * q35_q4::BLOCK_SIZE + i];
+        for (int i = 0; i < q3x_q4::BLOCK_SIZE; ++i)
+            inner += q3x_q4::value(blocks[block], i) *
+                     x[block * q3x_q4::BLOCK_SIZE + i];
         sum += f16(blocks[block].scale) * inner;
     }
     return sum;
@@ -337,12 +337,12 @@ void mv_bf16(const Linear& w, const FP32* x, FP32* y) {
         y[row] = dot(weights + static_cast<size_t>(row) * w.cols, x, w.cols);
 }
 void mv_q8(const Linear& w, const FP32* x, FP32* y) {
-    const int blocks = w.cols / q35_q8::BLOCK_SIZE;
-    const q35_q8::Block* weights = static_cast<const q35_q8::Block*>(w.w);
+    const int blocks = w.cols / q3x_q8::BLOCK_SIZE;
+    const q3x_q8::Block* weights = static_cast<const q3x_q8::Block*>(w.w);
 #if defined(__APPLE__)
     struct Context {
         const Linear* w;
-        const q35_q8::Block* weights;
+        const q3x_q8::Block* weights;
         const FP32* x;
         FP32* y;
         int blocks;
@@ -368,16 +368,16 @@ void mv_q8(const Linear& w, const FP32* x, FP32* y) {
         y[row] = dot_q8(weights + static_cast<size_t>(row) * blocks, x, w.cols);
 }
 void mv_q4(const Linear& w, const FP32* x, FP32* y) {
-    const int blocks = w.cols / q35_q4::BLOCK_SIZE;
-    const q35_q4::Block* weights = static_cast<const q35_q4::Block*>(w.w);
+    const int blocks = w.cols / q3x_q4::BLOCK_SIZE;
+    const q3x_q4::Block* weights = static_cast<const q3x_q4::Block*>(w.w);
     for (int row = 0; row < w.rows; ++row)
         y[row] = dot_q4(weights + static_cast<size_t>(row) * blocks, x, w.cols);
 }
 void mv(const Linear& w, const FP32* x, FP32* y) {
     switch (w.type) {
-    case q35_model::MATRIX_BF16: mv_bf16(w, x, y); break;
-    case q35_model::MATRIX_Q8_0: mv_q8(w, x, y); break;
-    case q35_model::MATRIX_Q4_0: mv_q4(w, x, y); break;
+    case q3x_model::MATRIX_BF16: mv_bf16(w, x, y); break;
+    case q3x_model::MATRIX_Q8_0: mv_q8(w, x, y); break;
+    case q3x_model::MATRIX_Q4_0: mv_q4(w, x, y); break;
     }
 }
 FP32 dot(const FP32* a, const FP32* b, int n) {
@@ -408,7 +408,7 @@ void l2(FP32* x, int n) {
 }
 void rope(FP32* x, int position, int RD) {
     FP32 old[64];
-    Q35_ASSERT(RD <= 64, "RoPE dimension=%d", RD);
+    Q3X_ASSERT(RD <= 64, "RoPE dimension=%d", RD);
     std::memcpy(old, x, static_cast<size_t>(RD) * sizeof(FP32));
     for (int i = 0; i < RD / 2; ++i) {
         const FP32 angle = position / std::pow(THETA, 2.0f * i / RD);
@@ -431,7 +431,7 @@ void conv_step(FP32* x, const BF16* w, FP32* history, int DQKV, int CK) {
 void delta_rule(const FP32* q, const FP32* k, const FP32* v, FP32 decay, FP32 beta,
                 FP32* state, FP32* out, int KD, int VD) {
     FP32 predicted[128] = {};
-    Q35_ASSERT(VD <= 128, "Delta value dimension=%d", VD);
+    Q3X_ASSERT(VD <= 128, "Delta value dimension=%d", VD);
     // S <- decay*S; predicted <- k*S; S <- S+k*(v-predicted); out <- q*S.
     const FP32 scale = std::exp(decay);
     for (int i = 0; i < KD * VD; ++i) state[i] *= scale;
@@ -447,7 +447,7 @@ void delta_rule(const FP32* q, const FP32* k, const FP32* v, FP32 decay, FP32 be
 }
 
 void deltanet(const DeltaWeights& w, LayerState& state, const FP32* input,
-              Work& work, FP32* out, const q35_model::ModelConfig& c) {
+              Work& work, FP32* out, const q3x_model::ModelConfig& c) {
     const int DQK = c.KH * c.KD, DQKV = 2 * DQK + c.VH * c.VD;
     mv(w.qkv, input, work.delta_qkv);
     mv(w.z, input, work.delta_z);
@@ -479,7 +479,7 @@ void deltanet(const DeltaWeights& w, LayerState& state, const FP32* input,
 }
 
 void attention(const AttentionWeights& w, LayerState& state, FP32* score, int position,
-               const FP32* input, Work& work, FP32* out, const q35_model::ModelConfig& c) {
+               const FP32* input, Work& work, FP32* out, const q3x_model::ModelConfig& c) {
     const int AS = c.AH * c.AD, KVW = c.KVH * c.AD;
     mv(w.q, input, work.query_and_gate);
     mv(w.k, input, work.key);
@@ -532,9 +532,9 @@ void ffn(const Layer& layer, const FP32* input, Work& work, FP32* out, int I) {
     mv(layer.down, work.ffn_gate, out);
 }
 void forward(const Model& model, State& state, int token, bool compute_logits) {
-    const q35_model::ModelConfig& c = *model.config;
+    const q3x_model::ModelConfig& c = *model.config;
     Work& work = state.work;
-    Q35_ASSERT(token >= 0 && token < c.V && state.position < state.capacity,
+    Q3X_ASSERT(token >= 0 && token < c.V && state.position < state.capacity,
                "forward token=%d position=%d model=%s", token, state.position, c.name);
     embed(model.embedding, token, work.hidden);
     // embedding -> N * {norm, mixer, residual, norm, FFN, residual} -> logits。
@@ -583,35 +583,35 @@ bool Model::load(const char* path, const char** error) {
     fd = open(path, O_RDONLY);
     struct stat info {};
     if (fd < 0) return fail("cannot open model.bin");
-    if (fstat(fd, &info) || info.st_size < static_cast<off_t>(q35_model::HEADER_SIZE))
+    if (fstat(fd, &info) || info.st_size < static_cast<off_t>(q3x_model::HEADER_SIZE))
         return fail("bad model.bin");
     file_size = static_cast<size_t>(info.st_size);
     file = static_cast<const uint8_t*>(mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0));
     if (file == MAP_FAILED) { file = nullptr; return fail("mmap model.bin failed"); }
-    if (std::memcmp(file, "Q35MODL\0", 8) != 0) return fail("wrong model.bin magic");
-    const uint32_t id = q35_model::header_field(file, q35_model::MODEL_ID);
-    config = q35_model::config_for_id(id);
+    if (std::memcmp(file, "Q3XMODL\0", 8) != 0) return fail("wrong model.bin magic");
+    const uint32_t id = q3x_model::header_field(file, q3x_model::MODEL_ID);
+    config = q3x_model::config_for_id(id);
     if (!config) return fail("unsupported Qwen model ID");
-    if (!q35_model::header_matches(file, file_size, *config))
+    if (!q3x_model::header_matches(file, file_size, *config))
         return fail("Qwen model.bin header mismatch");
-    size_t cursor = q35_model::HEADER_SIZE;
+    size_t cursor = q3x_model::HEADER_SIZE;
     const auto& c = *config;
     const int AS = c.AH * c.AD, KVW = c.KVH * c.AD;
     const int DO = c.VH * c.VD, DQKV = 2 * c.KH * c.KD + DO;
     auto linear = [&](int rows, int cols) {
-        Q35_ASSERT(cols % 32 == 0, "matrix cols=%d is not divisible by 32", cols);
-        if (c.matrix_type == q35_model::MATRIX_BF16)
+        Q3X_ASSERT(cols % 32 == 0, "matrix cols=%d is not divisible by 32", cols);
+        if (c.matrix_type == q3x_model::MATRIX_BF16)
             return Linear {take<BF16>(file, file_size, cursor,
                                       static_cast<size_t>(rows) * cols, error),
                            rows, cols, c.matrix_type};
-        if (c.matrix_type == q35_model::MATRIX_Q8_0)
-            return Linear {take<q35_q8::Block>(file, file_size, cursor,
+        if (c.matrix_type == q3x_model::MATRIX_Q8_0)
+            return Linear {take<q3x_q8::Block>(file, file_size, cursor,
                                                static_cast<size_t>(rows) * cols /
-                                               q35_q8::BLOCK_SIZE, error),
+                                               q3x_q8::BLOCK_SIZE, error),
                            rows, cols, c.matrix_type};
-        return Linear {take<q35_q4::Block>(file, file_size, cursor,
+        return Linear {take<q3x_q4::Block>(file, file_size, cursor,
                                            static_cast<size_t>(rows) * cols /
-                                           q35_q4::BLOCK_SIZE, error),
+                                           q3x_q4::BLOCK_SIZE, error),
                        rows, cols, c.matrix_type};
     };
     layer.reset(new (std::nothrow) Layer[c.N]);
@@ -659,26 +659,26 @@ Model* model_create(const char* path, char* err, size_t errlen) {
 }
 void model_destroy(Model* model) { delete model; }
 State* state_create(Model* model, int context_size) {
-    Q35_ASSERT(model && model->config && context_size > 0 && context_size <= q35_model::MAX_CONTEXT,
+    Q3X_ASSERT(model && model->config && context_size > 0 && context_size <= q3x_model::MAX_CONTEXT,
                "state_create model=%p context=%d", static_cast<void*>(model), context_size);
     return new State(*model->config, context_size);
 }
 void state_destroy(State* state) { delete state; }
-void state_reset(State* state) { Q35_ASSERT(state, "state_reset null"); state->reset(); }
+void state_reset(State* state) { Q3X_ASSERT(state, "state_reset null"); state->reset(); }
 void state_forward(Model* model, State* state, const int* tokens, int count, bool logits) {
-    Q35_ASSERT(model && state && tokens && count > 0, "state_forward count=%d", count);
+    Q3X_ASSERT(model && state && tokens && count > 0, "state_forward count=%d", count);
     for (int i = 0; i < count; ++i) forward(*model, *state, tokens[i], logits && i + 1 == count);
 }
 void state_checkpoint_save(State* state) {
-    Q35_ASSERT(state, "checkpoint save null"); state->checkpoint_position = state->position;
+    Q3X_ASSERT(state, "checkpoint save null"); state->checkpoint_position = state->position;
     std::memcpy(state->checkpoint_recurrent.get(), state->recurrent.data.get(),
                 state->recurrent.count * sizeof(FP32));
     std::memcpy(state->checkpoint_logits.get(), state->work.logits,
                 static_cast<size_t>(state->config->V) * sizeof(FP32));
 }
 void state_checkpoint_restore(State* state) {
-    Q35_ASSERT(state, "checkpoint restore null");
-    Q35_ASSERT(state->checkpoint_position >= 0 && state->checkpoint_position <= state->capacity,
+    Q3X_ASSERT(state, "checkpoint restore null");
+    Q3X_ASSERT(state->checkpoint_position >= 0 && state->checkpoint_position <= state->capacity,
                "checkpoint position=%d capacity=%d", state->checkpoint_position, state->capacity);
     std::memcpy(state->recurrent.data.get(), state->checkpoint_recurrent.get(),
                 state->recurrent.count * sizeof(FP32));
@@ -692,12 +692,12 @@ int state_argmax(const State* state) {
                             state->work.logits + state->config->V) - state->work.logits);
 }
 void state_copy_logits(const State* state, float* output) {
-    Q35_ASSERT(state && output, "state_copy_logits null");
+    Q3X_ASSERT(state && output, "state_copy_logits null");
     std::memcpy(output, state->work.logits, static_cast<size_t>(state->config->V) * sizeof(FP32));
 }
-int vocab_size() { return q35_model::QWEN35_08B.V; }
-int max_context() { return q35_model::MAX_CONTEXT; }
+int vocab_size() { return q3x_model::QWEN35_08B.V; }
+int max_context() { return q3x_model::MAX_CONTEXT; }
 bool token_is_stop(int token) { return token == END_OF_TEXT_TOKEN || token == IM_END_TOKEN; }
 uint32_t model_id(const Model* model) { return model->config->id; }
 
-}  // namespace q35_backend
+}  // namespace q3x_backend

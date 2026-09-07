@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from qwen35 import Engine
+from qwen3x import Engine
 
 
 TOP_K = 10

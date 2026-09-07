@@ -18,9 +18,9 @@
 
 namespace {
 
-q35_log_callback log_callback = nullptr;
+q3x_log_callback log_callback = nullptr;
 void* log_user_data = nullptr;
-q35_log_level log_level = Q35_LOG_INFO;
+q3x_log_level log_level = Q3X_LOG_INFO;
 std::shared_ptr<spdlog::logger> process_logger;
 std::shared_ptr<spdlog::logger> audit_logger;
 
@@ -33,12 +33,12 @@ const char* file_name(const char* path) {
     return separator ? separator + 1 : path;
 }
 
-spdlog::level::level_enum spd_level(q35_log_level level) {
+spdlog::level::level_enum spd_level(q3x_log_level level) {
     switch (level) {
-        case Q35_LOG_TRACE: return spdlog::level::trace;
-        case Q35_LOG_DEBUG: return spdlog::level::debug;
-        case Q35_LOG_WARN: return spdlog::level::warn;
-        case Q35_LOG_ERROR: return spdlog::level::err;
+        case Q3X_LOG_TRACE: return spdlog::level::trace;
+        case Q3X_LOG_DEBUG: return spdlog::level::debug;
+        case Q3X_LOG_WARN: return spdlog::level::warn;
+        case Q3X_LOG_ERROR: return spdlog::level::err;
         default: return spdlog::level::info;
     }
 }
@@ -71,18 +71,18 @@ bool prepare_file(const char* file, const char* kind,
 
 }  // namespace
 
-void q35_log_set_callback(q35_log_callback callback,
+void q3x_log_set_callback(q3x_log_callback callback,
                           void* user_data,
-                          q35_log_level level) {
+                          q3x_log_level level) {
     log_callback = callback;
     log_user_data = user_data;
-    log_level = level >= Q35_LOG_TRACE && level <= Q35_LOG_ERROR
-        ? level : Q35_LOG_INFO;
+    log_level = level >= Q3X_LOG_TRACE && level <= Q3X_LOG_ERROR
+        ? level : Q3X_LOG_INFO;
 }
 
-namespace q35_internal {
+namespace q3x_internal {
 
-bool log_configure(q35_log_level level, const char* file,
+bool log_configure(q3x_log_level level, const char* file,
                    size_t max_bytes, size_t backups,
                    char* err, size_t errlen) {
     if (err && errlen) err[0] = '\0';
@@ -107,14 +107,14 @@ bool log_configure(q35_log_level level, const char* file,
     }
 
     process_logger = std::make_shared<spdlog::logger>(
-        "qwen35", sinks.begin(), sinks.end());
+        "qwen3x", sinks.begin(), sinks.end());
     process_logger->set_level(spd_level(level));
     process_logger->set_pattern(
         "[%Y-%m-%d %H:%M:%S.%e] [%t] [%^%l%$] [%s:%#] %v");
     process_logger->flush_on(
         file && file[0] ? spdlog::level::info : spdlog::level::warn);
     process_logger->set_error_handler([](const std::string& message) {
-        std::fprintf(stderr, "qwen35: logging error: %s\n", message.c_str());
+        std::fprintf(stderr, "qwen3x: logging error: %s\n", message.c_str());
     });
     log_level = level;
     return true;
@@ -149,7 +149,7 @@ bool audit_configure(const char* file, char* err, size_t errlen) {
     audit_logger->set_level(spdlog::level::info);
     audit_logger->flush_on(spdlog::level::info);
     audit_logger->set_error_handler([](const std::string& message) {
-        std::fprintf(stderr, "qwen35: audit logging error: %s\n",
+        std::fprintf(stderr, "qwen3x: audit logging error: %s\n",
                      message.c_str());
     });
     return true;
@@ -182,7 +182,7 @@ void audit_write(const char* event, const char* request_id,
     audit_logger->info(message);
 }
 
-void logf(q35_log_level level, const char* file, int line,
+void logf(q3x_log_level level, const char* file, int line,
           const char* format, ...) {
     if ((!process_logger && !log_callback) || level < log_level) return;
 
@@ -215,14 +215,14 @@ void report_assertion(const char* expression, const char* file, int line,
     std::snprintf(message, sizeof(message),
                   "assertion '%s' failed: %s",
                   expression ? expression : "?", detail);
-    std::fprintf(stderr, "qwen35: %s:%d: %s\n",
+    std::fprintf(stderr, "qwen3x: %s:%d: %s\n",
                  file_name(file), line, message);
     std::fflush(stderr);
 
-    if (log_callback && Q35_LOG_ERROR >= log_level) {
-        log_callback(log_user_data, Q35_LOG_ERROR,
+    if (log_callback && Q3X_LOG_ERROR >= log_level) {
+        log_callback(log_user_data, Q3X_LOG_ERROR,
                      file_name(file), line, message);
     }
 }
 
-}  // namespace q35_internal
+}  // namespace q3x_internal

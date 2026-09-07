@@ -76,7 +76,7 @@ argmax 仍必须完全相同。这个门槛来自全量 vector regression，不�
 `-b 128 -ub 128 -fa on -ctk f32 -ctv f32 --no-warmup`，qwen3x 使用固定的 CUDA FP32 state。
 
 llama.cpp 不是项目依赖：仓库不包含、下载、编译或链接它，默认 `make test` 也不运行这个
-检查。已经在仓库外准备好与 qwen3x model.bin 来自同一官方 checkpoint 的 Qwen3.5-9B
+检查。已经在仓库外准备好与 Qwen3.5-9B model.bin 来自同一官方 checkpoint 的
 Q8_0 GGUF，以及带 CUDA 的 `llama-debug` 后执行：
 
 ```sh

@@ -1,4 +1,4 @@
-"""Thin ctypes binding for the stable C ABI in qwen35.h."""
+"""Thin ctypes binding for qwen3x's stable C ABI."""
 
 from __future__ import annotations
 
@@ -19,13 +19,13 @@ class SessionBusy(EngineError):
     pass
 
 
-Q35_OK = 0
-Q35_BUSY = -2
+Q3X_OK = 0
+Q3X_BUSY = -2
 
-Q35_LOG_DEBUG = 0
-Q35_LOG_INFO = 1
-Q35_LOG_WARN = 2
-Q35_LOG_ERROR = 3
+Q3X_LOG_DEBUG = 0
+Q3X_LOG_INFO = 1
+Q3X_LOG_WARN = 2
+Q3X_LOG_ERROR = 3
 
 LogCallback = Callable[[int, str, int, str], None]
 _NativeLogCallback = ctypes.CFUNCTYPE(
@@ -55,35 +55,35 @@ def _configure(library: ctypes.CDLL) -> None:
     size_t = ctypes.c_size_t
     int_p = ctypes.POINTER(ctypes.c_int)
 
-    library.q35_log_set_callback.argtypes = [
+    library.q3x_log_set_callback.argtypes = [
         _NativeLogCallback, void_p, ctypes.c_int
     ]
-    library.q35_log_set_callback.restype = None
+    library.q3x_log_set_callback.restype = None
 
-    library.q35_engine_create.argtypes = [
+    library.q3x_engine_create.argtypes = [
         ctypes.POINTER(_EngineOptions), ctypes.POINTER(void_p), char_p, size_t
     ]
-    library.q35_engine_create.restype = ctypes.c_int
-    library.q35_engine_destroy.argtypes = [void_p]
-    library.q35_engine_destroy.restype = None
+    library.q3x_engine_create.restype = ctypes.c_int
+    library.q3x_engine_destroy.argtypes = [void_p]
+    library.q3x_engine_destroy.restype = None
 
-    library.q35_session_create.argtypes = [void_p, ctypes.c_int, ctypes.POINTER(void_p), char_p, size_t]
-    library.q35_session_create.restype = ctypes.c_int
-    library.q35_session_destroy.argtypes = [void_p]
-    library.q35_session_destroy.restype = None
-    library.q35_session_reset.argtypes = [void_p, char_p, size_t]
-    library.q35_session_reset.restype = ctypes.c_int
-    library.q35_session_sync.argtypes = [
+    library.q3x_session_create.argtypes = [void_p, ctypes.c_int, ctypes.POINTER(void_p), char_p, size_t]
+    library.q3x_session_create.restype = ctypes.c_int
+    library.q3x_session_destroy.argtypes = [void_p]
+    library.q3x_session_destroy.restype = None
+    library.q3x_session_reset.argtypes = [void_p, char_p, size_t]
+    library.q3x_session_reset.restype = ctypes.c_int
+    library.q3x_session_sync.argtypes = [
         void_p, int_p, ctypes.c_int, ctypes.c_int, int_p, char_p, size_t
     ]
-    library.q35_session_sync.restype = ctypes.c_int
-    library.q35_session_eval.argtypes = [void_p, ctypes.c_int, char_p, size_t]
-    library.q35_session_eval.restype = ctypes.c_int
-    library.q35_session_position.argtypes = [void_p]
-    library.q35_session_position.restype = ctypes.c_int
-    library.q35_session_argmax.argtypes = [void_p]
-    library.q35_session_argmax.restype = ctypes.c_int
-    library.q35_session_sample.argtypes = [
+    library.q3x_session_sync.restype = ctypes.c_int
+    library.q3x_session_eval.argtypes = [void_p, ctypes.c_int, char_p, size_t]
+    library.q3x_session_eval.restype = ctypes.c_int
+    library.q3x_session_position.argtypes = [void_p]
+    library.q3x_session_position.restype = ctypes.c_int
+    library.q3x_session_argmax.argtypes = [void_p]
+    library.q3x_session_argmax.restype = ctypes.c_int
+    library.q3x_session_sample.argtypes = [
         void_p,
         ctypes.c_float,
         ctypes.c_int,
@@ -93,37 +93,37 @@ def _configure(library: ctypes.CDLL) -> None:
         ctypes.c_int,
         ctypes.POINTER(ctypes.c_uint64),
     ]
-    library.q35_session_sample.restype = ctypes.c_int
-    library.q35_token_is_stop.argtypes = [ctypes.c_int]
-    library.q35_token_is_stop.restype = ctypes.c_bool
-    library.q35_vocab_size.argtypes = []
-    library.q35_vocab_size.restype = ctypes.c_int
-    library.q35_session_copy_logits.argtypes = [
+    library.q3x_session_sample.restype = ctypes.c_int
+    library.q3x_token_is_stop.argtypes = [ctypes.c_int]
+    library.q3x_token_is_stop.restype = ctypes.c_bool
+    library.q3x_vocab_size.argtypes = []
+    library.q3x_vocab_size.restype = ctypes.c_int
+    library.q3x_session_copy_logits.argtypes = [
         void_p,
         ctypes.POINTER(ctypes.c_float),
         ctypes.c_int,
         char_p,
         size_t,
     ]
-    library.q35_session_copy_logits.restype = ctypes.c_int
+    library.q3x_session_copy_logits.restype = ctypes.c_int
 
-    library.q35_session_manager_create.argtypes = [
+    library.q3x_session_manager_create.argtypes = [
         void_p, ctypes.c_int, ctypes.c_int, ctypes.POINTER(void_p), char_p, size_t
     ]
-    library.q35_session_manager_create.restype = ctypes.c_int
-    library.q35_session_manager_destroy.argtypes = [void_p]
-    library.q35_session_manager_destroy.restype = None
-    library.q35_session_manager_acquire.argtypes = [
+    library.q3x_session_manager_create.restype = ctypes.c_int
+    library.q3x_session_manager_destroy.argtypes = [void_p]
+    library.q3x_session_manager_destroy.restype = None
+    library.q3x_session_manager_acquire.argtypes = [
         void_p, int_p, ctypes.c_int, ctypes.POINTER(void_p), char_p, size_t
     ]
-    library.q35_session_manager_acquire.restype = ctypes.c_int
-    library.q35_session_manager_release.argtypes = [void_p, void_p, ctypes.c_bool]
-    library.q35_session_manager_release.restype = None
+    library.q3x_session_manager_acquire.restype = ctypes.c_int
+    library.q3x_session_manager_release.argtypes = [void_p, void_p, ctypes.c_bool]
+    library.q3x_session_manager_release.restype = None
 
 
 def set_log_callback(library_path: Path | str,
                      callback: LogCallback | None,
-                     level: int = Q35_LOG_INFO) -> None:
+                     level: int = Q3X_LOG_INFO) -> None:
     """Configure the process-wide native logger for this shared library."""
     library_path = Path(library_path).resolve()
     if not library_path.is_file():
@@ -145,7 +145,7 @@ def set_log_callback(library_path: Path | str,
 
     key = str(library_path)
     with _LOG_CALLBACK_LOCK:
-        library.q35_log_set_callback(native_callback, None, int(level))
+        library.q3x_log_set_callback(native_callback, None, int(level))
         if callback is None:
             _LOG_CALLBACKS.pop(key, None)
         else:
@@ -160,10 +160,10 @@ def _call(function, *arguments) -> None:
 
 
 def _check(result: int, error) -> None:
-    if result == Q35_OK:
+    if result == Q3X_OK:
         return
     message = error.value.decode("utf-8", errors="replace") or "native engine failed"
-    if result == Q35_BUSY:
+    if result == Q3X_BUSY:
         raise SessionBusy(message)
     raise EngineError(message)
 
@@ -191,17 +191,17 @@ class Engine:
             mock=mock,
         )
         _call(
-            self._library.q35_engine_create,
+            self._library.q3x_engine_create,
             ctypes.byref(options),
             ctypes.byref(self._handle),
         )
 
     @property
     def vocab_size(self) -> int:
-        return int(self._library.q35_vocab_size())
+        return int(self._library.q3x_vocab_size())
 
     def token_is_stop(self, token: int) -> bool:
-        return bool(self._library.q35_token_is_stop(int(token)))
+        return bool(self._library.q3x_token_is_stop(int(token)))
 
     def create_session(self, context_size: int) -> "Session":
         with self._lock:
@@ -209,7 +209,7 @@ class Engine:
                 raise EngineError("engine is closed")
             handle = ctypes.c_void_p()
             _call(
-                self._library.q35_session_create,
+                self._library.q3x_session_create,
                 self._handle,
                 int(context_size),
                 ctypes.byref(handle),
@@ -236,7 +236,7 @@ class Engine:
             for session in list(self._sessions):
                 session._close_native()
             self._sessions.clear()
-            self._library.q35_engine_destroy(self._handle)
+            self._library.q3x_engine_destroy(self._handle)
             self._handle = ctypes.c_void_p()
 
     def __enter__(self) -> "Engine":
@@ -265,7 +265,7 @@ class Session:
     def position(self) -> int:
         with self._lock:
             self._require_open()
-            return int(self._engine._library.q35_session_position(self._handle))
+            return int(self._engine._library.q3x_session_position(self._handle))
 
     def sync(self, tokens: Iterable[int], checkpoint_at: int | None = None) -> int:
         values = [int(token) for token in tokens]
@@ -278,7 +278,7 @@ class Session:
         with self._lock:
             self._require_open()
             _call(
-                self._engine._library.q35_session_sync,
+                self._engine._library.q3x_session_sync,
                 self._handle,
                 native,
                 len(values),
@@ -290,17 +290,17 @@ class Session:
     def eval(self, token: int) -> None:
         with self._lock:
             self._require_open()
-            _call(self._engine._library.q35_session_eval, self._handle, int(token))
+            _call(self._engine._library.q3x_session_eval, self._handle, int(token))
 
     def reset(self) -> None:
         with self._lock:
             self._require_open()
-            _call(self._engine._library.q35_session_reset, self._handle)
+            _call(self._engine._library.q3x_session_reset, self._handle)
 
     def argmax(self) -> int:
         with self._lock:
             self._require_open()
-            token = int(self._engine._library.q35_session_argmax(self._handle))
+            token = int(self._engine._library.q3x_session_argmax(self._handle))
             if token < 0:
                 raise EngineError("session has no logits; sync or eval tokens first")
             return token
@@ -318,7 +318,7 @@ class Session:
         native_rng = ctypes.c_uint64(rng)
         with self._lock:
             self._require_open()
-            token = int(self._engine._library.q35_session_sample(
+            token = int(self._engine._library.q3x_session_sample(
                 self._handle,
                 float(temperature),
                 int(top_k),
@@ -338,7 +338,7 @@ class Session:
             count = self._engine.vocab_size
             output = (ctypes.c_float * count)()
             _call(
-                self._engine._library.q35_session_copy_logits,
+                self._engine._library.q3x_session_copy_logits,
                 self._handle,
                 output,
                 count,
@@ -357,7 +357,7 @@ class Session:
         with self._lock:
             if self._handle:
                 if self._owns_native:
-                    self._engine._library.q35_session_destroy(self._handle)
+                    self._engine._library.q3x_session_destroy(self._handle)
                 self._handle = ctypes.c_void_p()
 
     def _detach(self) -> None:
@@ -389,7 +389,7 @@ class SessionManager:
         self._active: set[Session] = set()
         self.session_count = int(session_count)
         _call(
-            engine._library.q35_session_manager_create,
+            engine._library.q3x_session_manager_create,
             engine._handle,
             self.session_count,
             int(context_size),
@@ -409,7 +409,7 @@ class SessionManager:
             self._require_open()
             handle = ctypes.c_void_p()
             error = ctypes.create_string_buffer(ERROR_CAPACITY)
-            result = self._engine._library.q35_session_manager_acquire(
+            result = self._engine._library.q3x_session_manager_acquire(
                 self._handle, native, len(values), ctypes.byref(handle),
                 error, len(error),
             )
@@ -423,7 +423,7 @@ class SessionManager:
             self._require_open()
             if session not in self._active:
                 raise EngineError("session is not acquired from this manager")
-            self._engine._library.q35_session_manager_release(
+            self._engine._library.q3x_session_manager_release(
                 self._handle, session._handle, bool(keep)
             )
             self._active.remove(session)
@@ -441,7 +441,7 @@ class SessionManager:
                 return
             if self._active:
                 raise EngineError("cannot close SessionManager while a request is running")
-            self._engine._library.q35_session_manager_destroy(self._handle)
+            self._engine._library.q3x_session_manager_destroy(self._handle)
             self._handle = ctypes.c_void_p()
 
     def _require_open(self) -> None:

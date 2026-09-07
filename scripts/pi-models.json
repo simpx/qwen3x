@@ -23,6 +23,13 @@
           "input": ["text"],
           "contextWindow": 40960,
           "maxTokens": 4096
+        },
+        {
+          "id": "qwen3.8-27b",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 32768,
+          "maxTokens": 4096
         }
       ]
     }

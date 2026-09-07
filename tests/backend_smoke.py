@@ -16,7 +16,7 @@ import platform
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from reference.qwen35 import Engine
+from reference.qwen3x import Engine
 
 CASES = [
     {"name": "short", "tokens": [248044, 198, 198, 198, 198], "checkpoint": 3},

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare one qwen35 EvalScope run with a Transformers reference run."""
+"""Compare one qwen3x EvalScope run with a Transformers reference run."""
 
 from __future__ import annotations
 
@@ -139,8 +139,8 @@ def main() -> None:
                         help="fail unless every generated response is identical")
     args = parser.parse_args()
 
-    engine_manifest = read_json(args.engine / "qwen35-manifest.json")
-    reference_manifest = read_json(args.reference / "qwen35-manifest.json")
+    engine_manifest = read_json(args.engine / "qwen3x-manifest.json")
+    reference_manifest = read_json(args.reference / "qwen3x-manifest.json")
     for name, manifest in (("engine", engine_manifest), ("reference", reference_manifest)):
         if manifest.get("result") != "completed":
             raise SystemExit(f"{name} run is not completed")

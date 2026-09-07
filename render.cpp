@@ -1,4 +1,4 @@
-// render.cpp -- dependency-free Qwen3.5 text boundary.
+// render.cpp -- dependency-free Qwen text boundary.
 //
 // This file deliberately owns both directions around the model:
 //
@@ -9,9 +9,8 @@
 // boundary. scripts/pack_render.py turns the official tokenizer JSON into
 // token bytes, merge-ID triples and compact Unicode tables. render.cpp itself
 // therefore uses only the C++ standard library: no JSON parser, regex engine,
-// ICU, Rust or Jinja interpreter. The implementation is fixed to Qwen3.5's
-// tokenizer and to reference/chat_template.jinja, just like
-// engine.cpp is fixed to the 0.8B model data flow.
+// ICU, Rust or Jinja interpreter. The implementation uses one fixed Qwen3.8
+// template for every supported text model.
 
 #include "render.h"
 
@@ -27,10 +26,10 @@
 #include <utility>
 #include <vector>
 
-namespace q35_render {
+namespace q3x_render {
 namespace {
 
-// Fixed Qwen3.5 chat template. Read this section before the tokenizer below.
+// Fixed Qwen3.8 chat template. Read this section before the tokenizer.
 constexpr char IM_START[] = "<|im_start|>";
 constexpr char IM_END[] = "<|im_end|>";
 constexpr char THINK_START[] = "<think>";
@@ -71,12 +70,6 @@ Reminder:
 - If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls
 </IMPORTANT>)QWEN";
 
-// Standalone render.bin header. The same bytes can later live in the model pack.
-constexpr std::array<char, 8> RENDER_MAGIC = {
-    'Q', '3', '5', 'R', 'N', 'D', '1', '\0'
-};
-constexpr uint32_t RENDER_VERSION = 1;
-constexpr uint32_t RENDER_HEADER_SIZE = 60;
 constexpr uint64_t MAX_RENDER_SIZE = 64ull * 1024 * 1024;
 constexpr uint8_t LETTER = 1;
 constexpr uint8_t MARK = 2;
@@ -119,7 +112,7 @@ struct Renderer::Impl {
 
     bool load(const std::string& path, std::string* error);
 
-    // Qwen3.5 chat template -------------------------------------------------
+    // Qwen3.8 chat template ------------------------------------------------
 
     bool render_content(const Message& message, bool count_vision,
                         bool system, int& image_count, int& video_count,
@@ -196,11 +189,13 @@ struct Renderer::Impl {
             if (!render_trimmed_content(
                     messages[0], false, true, image_count, video_count,
                     options.add_vision_id, &content, error)) return false;
-            *output += IM_START;
-            *output += "system\n";
-            *output += content;
-            *output += IM_END;
-            *output += '\n';
+            if (!content.empty()) {
+                *output += IM_START;
+                *output += "system\n";
+                *output += content;
+                *output += IM_END;
+                *output += '\n';
+            }
         }
         return true;
     }
@@ -273,27 +268,6 @@ struct Renderer::Impl {
         std::string reasoning;
         if (message.has_reasoning) {
             reasoning = message.reasoning_content;
-        } else {
-            const size_t close = content.find(THINK_END);
-            if (close != std::string::npos) {
-                reasoning = content.substr(0, close);
-                while (!reasoning.empty() && reasoning.back() == '\n') {
-                    reasoning.pop_back();
-                }
-                const size_t open = reasoning.rfind(THINK_START);
-                if (open != std::string::npos) {
-                    reasoning.erase(0, open + sizeof(THINK_START) - 1);
-                }
-                while (!reasoning.empty() && reasoning.front() == '\n') {
-                    reasoning.erase(0, 1);
-                }
-
-                const size_t last_close = content.rfind(THINK_END);
-                content.erase(0, last_close + sizeof(THINK_END) - 1);
-                while (!content.empty() && content.front() == '\n') {
-                    content.erase(0, 1);
-                }
-            }
         }
 
         std::string trimmed_reasoning;
@@ -412,7 +386,7 @@ struct Renderer::Impl {
         return true;
     }
 
-    // Fixed Qwen3.5 tokenizer ----------------------------------------------
+    // Fixed shared Qwen tokenizer -----------------------------------------
 
     uint8_t flags(uint32_t codepoint) const {
         const auto found = std::upper_bound(
@@ -963,20 +937,6 @@ std::string lossy_utf8(const std::string& bytes) {
 bool Renderer::Impl::load(const std::string& path, std::string* error) {
     BinaryReader input(path);
     if (!input.ok()) return fail(error, input.error());
-    const std::string magic = input.bytes(RENDER_MAGIC.size());
-    if (!input.ok()) return fail(error, input.error());
-    if (!std::equal(magic.begin(), magic.end(), RENDER_MAGIC.begin())) {
-        return fail(error, "invalid render data magic");
-    }
-    const uint32_t version = input.u32();
-    if (!input.ok()) return fail(error, input.error());
-    if (version != RENDER_VERSION) {
-        return fail(error, "unsupported render data version");
-    }
-    if (input.u32() != RENDER_HEADER_SIZE) {
-        if (!input.ok()) return fail(error, input.error());
-        return fail(error, "unsupported render data header");
-    }
     if (input.u64() != input.size()) {
         if (!input.ok()) return fail(error, input.error());
         return fail(error, "render data size does not match header");
@@ -994,7 +954,7 @@ bool Renderer::Impl::load(const std::string& path, std::string* error) {
     if (model_vocab != 248320 || base_vocab != 248044 ||
         decodable < base_vocab || decodable > model_vocab ||
         merge_count != 247587 || added_count != 33) {
-        return fail(error, "render data does not match Qwen3.5");
+        return fail(error, "render data does not match Qwen tokenizer");
     }
     if (range_count > 0x110000 || combining_count > 0x110000 ||
         decomposition_count > 0x110000 || composition_count > 0x110000) {
@@ -1287,4 +1247,4 @@ bool Renderer::decode(const std::vector<int>& tokens, bool skip_special_tokens,
     return true;
 }
 
-}  // namespace q35_render
+}  // namespace q3x_render

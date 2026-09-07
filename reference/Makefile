@@ -18,18 +18,18 @@ PORT ?= 8002
 SERVED_MODEL ?= qwen3.5-0.8b-reference
 
 ENGINE_DIR ?= ..
-LIBRARY ?= build/libqwen35.so
-CUDA_LIBRARY ?= build/libqwen35-cuda.so
-METAL_LIBRARY := $(ENGINE_DIR)/build/metal/libqwen35-metal.dylib
+LIBRARY ?= build/libqwen3x.so
+CUDA_LIBRARY ?= build/libqwen3x-cuda.so
+METAL_LIBRARY := $(ENGINE_DIR)/build/metal/libqwen3x-metal.dylib
 BIN ?= $(ENGINE_DIR)/build/qwen35-0.8b-model.bin
 VECTORS ?= build/cpu
 REPORT ?= build/reference-report.json
 CUDA_REPORT ?= build/cuda-reference-report.json
 LLAMA_DEBUG ?= ../build/llama.cpp-b10516/build-cuda/bin/llama-debug
 LLAMA_GGUF ?= ../build/models/Unsloth-Qwen3.5-9B-GGUF/Qwen3.5-9B-Q8_0.gguf
-QWEN ?= ../build/qwen35-cuda
+QWEN ?= ../build/qwen3x-cuda
 QWEN_BIN ?= ../build/qwen35-9b-q8_0-model.bin
-QWEN_RENDER ?= ../build/qwen35-0.8b-render.bin
+QWEN_RENDER ?= ../build/qwen3x-render.bin
 CXX ?= c++
 CXXFLAGS ?=
 CUDA_LIB_DIR ?= /usr/local/cuda/targets/x86_64-linux/lib
@@ -98,12 +98,12 @@ compare-metal:
 		--report build/metal-reference-report.json --cxxflags "Metal FP32" $(COMPARE_ARGS)
 
 compare-4b:
-	$(MAKE) compare LIBRARY=build/libqwen35.so BIN=../build/qwen35-4b-model.bin \
+	$(MAKE) compare LIBRARY=build/libqwen3x.so BIN=../build/qwen35-4b-model.bin \
 		MODEL=../build/models/Qwen3.5-4B VECTORS=build/4b-mixed-fp32 \
 		REPORT=build/4b-cpu-reference-report.json COMPARE_ARGS=--behavior-only
 
 compare-cuda-4b:
-	$(MAKE) compare-cuda CUDA_LIBRARY=build/libqwen35-cuda.so BIN=../build/qwen35-4b-model.bin \
+	$(MAKE) compare-cuda CUDA_LIBRARY=build/libqwen3x-cuda.so BIN=../build/qwen35-4b-model.bin \
 		MODEL=../build/models/Qwen3.5-4B VECTORS=build/4b-mixed-fp32 \
 		CUDA_REPORT=build/4b-reference-report.json COMPARE_ARGS=--behavior-only
 
@@ -117,7 +117,7 @@ llama-smoke-run:
 		--qwen "$(QWEN)" --bin "$(QWEN_BIN)" --render "$(QWEN_RENDER)"
 
 $(LIBRARY): $(ENGINE_DIR)/engine.cpp $(ENGINE_DIR)/runtime.cpp \
-		$(ENGINE_DIR)/log.cpp $(ENGINE_DIR)/qwen35.h \
+		$(ENGINE_DIR)/log.cpp $(ENGINE_DIR)/qwen3x.h \
 		$(ENGINE_DIR)/internal.h $(ENGINE_DIR)/model_config.h \
 		$(ENGINE_DIR)/q8.h $(SPDLOG_SRC)
 	mkdir -p "$(dir $(LIBRARY))"
@@ -127,7 +127,7 @@ $(LIBRARY): $(ENGINE_DIR)/engine.cpp $(ENGINE_DIR)/runtime.cpp \
 		-pthread -o "$(LIBRARY)"
 
 $(CUDA_LIBRARY): $(ENGINE_DIR)/arch/cuda/engine.cu $(ENGINE_DIR)/runtime.cpp \
-		$(ENGINE_DIR)/log.cpp $(ENGINE_DIR)/qwen35.h \
+		$(ENGINE_DIR)/log.cpp $(ENGINE_DIR)/qwen3x.h \
 		$(ENGINE_DIR)/internal.h $(ENGINE_DIR)/model_config.h \
 		$(ENGINE_DIR)/q8.h $(SPDLOG_SRC)
 	mkdir -p "$(dir $(CUDA_LIBRARY))"

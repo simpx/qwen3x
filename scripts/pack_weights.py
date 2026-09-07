@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 ALIGNMENT = 64
-MAGIC = b"Q35MODL\0"
+MAGIC = b"Q3XMODL\0"
 HEADER = struct.Struct("<8s16I")
 MAX_CONTEXT = 262144
 Q8_BLOCK_SIZE = 32

@@ -32,14 +32,14 @@ correct -> simple -> readable -> usable -> fast
 
 ### 一个 C++ 程序
 
-- 一个 `qwen35` 可执行文件完成所有推理相关工作，包括 CLI、HTTP、JSON、chat template、
+- 一个 `qwen3x` 可执行文件完成所有推理相关工作，包括 CLI、HTTP、JSON、chat template、
   tokenizer、session、模型计算、sampling 和流式输出。
 - CLI 单次请求、Session benchmark 和 HTTP listen 是同一个程序的不同入口，共用同一套
   render、runtime 和 engine 数据流。
 - 部署时只启动这个进程。模型运行不依赖 Python、动态链接的项目库、内部 RPC、额外 worker
   或 tokenizer 服务。
-- `qwen35.h` 提供 Engine/Session 的窄 C ABI；正常构建将其实现直接链接进 `qwen35`。为了
-  逐 token 数值对齐，`reference/` 可以把同一实现临时编译成 `reference/build/libqwen35.so`
+- `qwen3x.h` 提供 Engine/Session 的窄 C ABI；正常构建将其实现直接链接进 `qwen3x`。为了
+  逐 token 数值对齐，`reference/` 可以把同一实现临时编译成 `reference/build/libqwen3x.so`
   供 ctypes 驱动。这个 shared library 是测试适配器，不是部署方式或分发产物。
 - 理想形态是单文件 C++；当一个文件已经妨碍阅读时，才沿真实数据流拆分。源码文件数量
   保持少，文件边界表达职责，而不是表达框架层次。
@@ -91,11 +91,11 @@ log.cpp        进程级日志实现
 1. `scripts/` 和 `tests/` 中的离线脚本、转换工具、开发客户端和自动化测试。
 2. `reference/` 和 `eval/` 中使用 PyTorch/Transformers 等官方生态进行数值对齐与评测。
 
-Python 产出测试向量、模型数据或验证结果；`qwen35` 运行时独立消费最终二进制数据。这样
+Python 产出测试向量、模型数据或验证结果；`qwen3x` 运行时独立消费最终二进制数据。这样
 开发阶段可以利用成熟生态，最终分发仍保持纯 C++、本地和自包含。
 
 reference 的 ctypes 包装只调用上述 C ABI，用于控制 Session、checkpoint 和读取完整 logits；
-HTTP、JSON、render 和产品服务接口仍由 `qwen35` 可执行文件统一提供。
+HTTP、JSON、render 和产品服务接口仍由 `qwen3x` 可执行文件统一提供。
 
 JSON 同样只是一种边界语言：`parser.cpp` 将它转换为普通 C++ 数据；render、runtime 和
 engine 只认识自身需要的明确类型。
@@ -140,7 +140,7 @@ engine 只认识自身需要的明确类型。
 目标分发形态只有两个文件：
 
 ```text
-qwen35                    平台对应的单个可执行文件
+qwen3x                    平台对应的单个可执行文件
 qwen35-0.8b-model.bin     该模型运行所需的单个数据文件
 ```
 
@@ -151,7 +151,7 @@ tokenizer 数据及其他随模型变化的数据。使用其他型号时只替�
 
 ```text
 qwen35-0.8b-model.bin
-qwen35-0.8b-render.bin
+qwen3x-render.bin
 ```
 
 `render.bin` 稳定后合并进 model bin。官方 checkpoint、转换中间文件和测试向量都是开发

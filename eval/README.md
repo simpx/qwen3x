@@ -73,7 +73,7 @@ Qwen 没有公开模型卡成绩使用的完整 harness 和逐 benchmark prompt�
 先启动 Engine：
 
 ```sh
-./build/qwen35 --listen \
+./build/qwen3x --listen \
   --session-slots 4 --session-context 40960 --log-level info
 ```
 

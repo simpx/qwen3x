@@ -73,7 +73,7 @@ make model-9b
 ```
 
 在 Apple Silicon Mac 上，`make serve-9b` 和 `make serve-eval-9b` 自动选择 Metal；Linux
-选择 CUDA。原生 CPU binary `build/qwen35` 继续作为 correctness baseline，其中 Q8_0 dot
+选择 CUDA。原生 CPU binary `build/qwen3x` 继续作为 correctness baseline，其中 Q8_0 dot
 使用 Arm NEON，较大的矩阵按行通过系统线程池并行。9B 的 65,536-token CPU eval Session
 需要约 13--15 GiB 统一内存，因此建议至少 24 GiB 内存；eval 服务使用 7,200 秒请求上限，
 以容纳长 thinking 输出。M5 Pro 48 GB 的 CPU baseline、容量和六题 smoke 记录在
@@ -118,15 +118,15 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 完整启动参数可以用 `make -n serve-9b` 查看。`serve-4b` 和 `serve-9b` 都固定监听
 `127.0.0.1:8000`，使用一个 40960-token Session；需要其他参数时直接运行
-Apple Silicon Metal 的 `build/qwen35-metal`、CPU baseline 的 `build/qwen35`，或 Linux
-CUDA 的 `build/qwen35-cuda`。
+Apple Silicon Metal 的 `build/qwen3x-metal`、CPU baseline 的 `build/qwen3x`，或 Linux
+CUDA 的 `build/qwen3x-cuda`。
 
 ### Apple M5 Pro / Metal 4（实验性）
 
 Metal backend 固定使用 Apple M5 Pro、macOS 26.3+、Xcode 26.6 和 Metal 4.0，不维护旧
 系统、旧 Xcode 或其他 GPU 的兼容路径。它直接读取现有 0.8B/4B BF16、9B Q8_0
 model.bin，无需重新 pack。
-Metal shader 编译后嵌入 `qwen35-metal`，运行时不需要外部 `.metallib`、Python 或第三方
+Metal shader 编译后嵌入 `qwen3x-metal`，运行时不需要外部 `.metallib`、Python 或第三方
 推理框架。平台接口集中在 `arch/metal/engine.mm`，数学计算在 `kernels.metal`。
 
 先在 Mac 上运行不下载模型的数值 smoke：
@@ -147,7 +147,7 @@ logits、recurrent/KV state、prefill、checkpoint restore 和 reset；没有可
 
 当前已通过 macOS ARM64 的 CPU 测试及完整 Metal 编译；托管 CI 未提供 Apple GPU，
 因此 GPU 数值测试和真实模型验收仍未完成。[Actions](https://github.com/simpx/qwen3x/actions)
-中的 `qwen35-metal-macos-arm64` 附件保留实验性可执行文件、smoke 程序和测试 dylib。
+中的 `qwen3x-metal-macos-arm64` 附件保留实验性可执行文件、smoke 程序和测试 dylib。
 在对应 commit 的仓库根目录解压其中的 tar.gz 后，可直接运行
 `MTL_DEBUG_LAYER=1 ./build/metal-test`，不需要在本机安装 Xcode；附件不包含模型。
 
@@ -155,7 +155,7 @@ logits、recurrent/KV state、prefill、checkpoint restore 和 reset；没有可
 继续选择 CUDA。连接 pi 的方式不变。也可以先用 0.8B 做短请求：
 
 ```sh
-./build/qwen35-metal -c "你好" --session-context 128 --max-tokens 16
+./build/qwen3x-metal -c "你好" --session-context 128 --max-tokens 16
 ```
 
 首版 prefill 逐 token 执行完整 forward，没有批量矩阵优化；长 prompt 的吞吐和 40K
@@ -168,7 +168,7 @@ context 的真实内存占用尚未测量。9B 的权重本身约 8.86 GiB，统
 ```sh
 make metal-library
 caffeinate -i python3 scripts/bench_session.py \
-  --library build/metal/libqwen35-metal.dylib \
+  --library build/metal/libqwen3x-metal.dylib \
   --model build/qwen35-9b-q8_0-model.bin --output build/bench-9b.json
 ```
 
@@ -206,15 +206,15 @@ library 和平台；CPU 自检通过不表示 Metal 通过。这是相同 pack �
 ```sh
 make -C scripts model render
 make -j4
-./build/qwen35 --chat "hello" --max-tokens 128
+./build/qwen3x --chat "hello" --max-tokens 128
 ```
 
 `-c/--chat` 把文本作为一条 user message 套用 Qwen chat template；`-p/--prompt` 直接
 tokenize 原始文本，主要用于续写和 logits 对齐。保存最后一个 prompt 位置的完整 logits：
 
 ```sh
-./build/qwen35-cuda -m build/qwen35-9b-q8_0-model.bin \
-  -r build/qwen35-0.8b-render.bin -p "Hello" --session-context 128 \
+./build/qwen3x-cuda -m build/qwen35-9b-q8_0-model.bin \
+  -r build/qwen3x-render.bin -p "Hello" --session-context 128 \
   --save-logits --logits-output-dir build/logits
 ```
 
@@ -259,7 +259,7 @@ tool-call SSE，包括同一轮多个 tool calls、usage 和 `finish_reason: too
 测量不含 HTTP、JSON、chat template、tokenizer 和 sampling 的 Session 性能：
 
 ```sh
-./build/qwen35-cuda \
+./build/qwen3x-cuda \
   --model build/qwen35-4b-model.bin \
   --bench 4096 32 --session-context 40960
 ```
@@ -269,8 +269,8 @@ tool-call SSE，包括同一轮多个 tool calls、usage 和 `finish_reason: too
 session slot；`--session-slots` 可以复现服务所用的内存配置，但计时仍只推进其中一个
 Session，不代表并发吞吐量。
 
-`qwen35` 默认从可执行文件所在目录加载 `qwen35-0.8b-model.bin` 和
-`qwen35-0.8b-render.bin`。其他型号通过 `--model` 选择对应 model bin；
+`qwen3x` 默认从可执行文件所在目录加载 `qwen35-0.8b-model.bin` 和
+`qwen3x-render.bin`。其他型号通过 `--model` 选择对应 model bin；
 `--render` 只在需要覆盖默认 tokenizer 数据时使用。
 
 普通 completion：
@@ -294,19 +294,19 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 服务还提供 `/healthz`、`/readyz` 和 `/v1/models`。`--listen` 默认使用 `info`
 日志，prompt 和 benchmark 默认使用 `error`；显式 `--log-level` 会覆盖模式默认值。
-指定 `--log-file build/qwen35.log` 后，滚动文件会替代 stderr 成为日志输出位置。
+指定 `--log-file build/qwen3x.log` 后，滚动文件会替代 stderr 成为日志输出位置。
 
 `make serve-4b` 和 `make serve-9b` 默认把完整 audit 分别写入独立的本地文件：
 
 ```sh
-build/qwen35-audit.log
+build/qwen3x-audit.log
 build/qwen35-9b-audit.log
 ```
 
 audit 按事件记录原始请求、render prompt、模型输出、工具解析和实际 HTTP/SSE 输出。
 `request_id` 关联完整请求，`session_id` 关联复用同一个缓存 Session 的请求；服务同时通过
 `X-Request-Id` 和 `X-Session-Id` 响应头输出这两个 ID。文件权限为 `0600`，内容包含完整
-对话和工具参数。手动启动 `qwen35` 时 audit 默认关闭，通过 `--audit-log PATH` 显式开启。
+对话和工具参数。手动启动 `qwen3x` 时 audit 默认关闭，通过 `--audit-log PATH` 显式开启。
 
 ## 目录
 

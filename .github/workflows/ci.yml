@@ -58,13 +58,13 @@ jobs:
           fi
       - name: Package experimental binaries (not GPU-validated)
         run: |
-          ./build/qwen35-metal --mock --bench 2 2 --session-context 16
-          otool -L build/qwen35-metal
-          tar -czf build/qwen35-metal-macos-arm64.tar.gz \
-            build/qwen35-metal build/metal-test build/metal/libqwen35-metal.dylib
+          ./build/qwen3x-metal --mock --bench 2 2 --session-context 16
+          otool -L build/qwen3x-metal
+          tar -czf build/qwen3x-metal-macos-arm64.tar.gz \
+            build/qwen3x-metal build/metal-test build/metal/libqwen3x-metal.dylib
       - uses: actions/upload-artifact@v4
         with:
-          name: qwen35-metal-macos-arm64
-          path: build/qwen35-metal-macos-arm64.tar.gz
+          name: qwen3x-metal-macos-arm64
+          path: build/qwen3x-metal-macos-arm64.tar.gz
           if-no-files-found: error
           retention-days: 14

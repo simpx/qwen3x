@@ -27,7 +27,7 @@ def read_json(path: Path) -> dict:
 
 def latest_runs(root: Path, size: str) -> dict[str, tuple[Path, dict]]:
     runs = {}
-    for path in root.glob(f"{size}/*/qwen35-manifest.json"):
+    for path in root.glob(f"{size}/*/qwen3x-manifest.json"):
         manifest = read_json(path)
         if manifest.get("result") != "completed":
             continue

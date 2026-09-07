@@ -39,7 +39,7 @@ enum class EntryState {
 };
 
 struct SessionEntry {
-    q35_session* session = nullptr;
+    q3x_session* session = nullptr;
     EntryState state = EntryState::FREE;
     uint64_t last_used = 0;
 };
@@ -83,12 +83,12 @@ void write_error(char* output, size_t capacity, const char* message) {
 
 int fail(char* err, size_t errlen, const char* message) {
     write_error(err, errlen, message);
-    return Q35_ERROR;
+    return Q3X_ERROR;
 }
 
 int succeed(char* err, size_t errlen) {
     write_error(err, errlen, "");
-    return Q35_OK;
+    return Q3X_OK;
 }
 
 int common_token_prefix(const std::vector<int>& saved,
@@ -125,7 +125,7 @@ int sample_host(const std::vector<float>& logits, float temperature, int top_k,
                 std::vector<float>& adjusted,
                 std::vector<uint8_t>& penalty_marks,
                 std::vector<int>& penalty_touched) {
-    const int vocab = q35_backend::vocab_size();
+    const int vocab = q3x_backend::vocab_size();
     if (!std::isfinite(temperature) || temperature < 0.0f ||
         !std::isfinite(top_p) || top_p <= 0.0f || top_p > 1.0f ||
         !std::isfinite(presence_penalty) || presence_penalty < -2.0f ||
@@ -196,20 +196,20 @@ int sample_host(const std::vector<float>& logits, float temperature, int top_k,
 
 }  // namespace
 
-struct q35_engine {
-    q35_backend::Model* model = nullptr;
+struct q3x_engine {
+    q3x_backend::Model* model = nullptr;
     bool mock = false;
     std::vector<std::vector<float>> mock_logits;
 
-    ~q35_engine() {
-        q35_backend::model_destroy(model);
+    ~q3x_engine() {
+        q3x_backend::model_destroy(model);
     }
 };
 
-struct q35_session {
+struct q3x_session {
     const std::string id = make_uuid();
-    q35_engine* engine;
-    q35_backend::State* state = nullptr;
+    q3x_engine* engine;
+    q3x_backend::State* state = nullptr;
     int capacity;
     std::vector<int> tokens;
     std::vector<float> logits;
@@ -222,21 +222,21 @@ struct q35_session {
     int checkpoint_position = 0;
     bool logits_valid = false;
 
-    q35_session(q35_engine* owner, int context_size)
+    q3x_session(q3x_engine* owner, int context_size)
         : engine(owner), capacity(context_size),
-          logits(static_cast<size_t>(q35_backend::vocab_size())) {
+          logits(static_cast<size_t>(q3x_backend::vocab_size())) {
         tokens.reserve(static_cast<size_t>(context_size));
-        sample_order.reserve(static_cast<size_t>(q35_backend::vocab_size()));
-        adjusted_logits.reserve(static_cast<size_t>(q35_backend::vocab_size()));
-        penalty_marks.assign(static_cast<size_t>(q35_backend::vocab_size()), 0);
+        sample_order.reserve(static_cast<size_t>(q3x_backend::vocab_size()));
+        adjusted_logits.reserve(static_cast<size_t>(q3x_backend::vocab_size()));
+        penalty_marks.assign(static_cast<size_t>(q3x_backend::vocab_size()), 0);
         penalty_touched.reserve(static_cast<size_t>(context_size));
         if (!engine->mock) {
-            state = q35_backend::state_create(engine->model, context_size);
+            state = q3x_backend::state_create(engine->model, context_size);
         }
     }
 
-    ~q35_session() {
-        q35_backend::state_destroy(state);
+    ~q3x_session() {
+        q3x_backend::state_destroy(state);
     }
 
     int position() const {
@@ -244,7 +244,7 @@ struct q35_session {
     }
 
     void reset() {
-        if (!engine->mock) q35_backend::state_reset(state);
+        if (!engine->mock) q3x_backend::state_reset(state);
         tokens.clear();
         checkpoint_valid = false;
         checkpoint_position = 0;
@@ -252,7 +252,7 @@ struct q35_session {
     }
 
     void append(const int* input, int count, bool compute_logits = true) {
-        Q35_ASSERT(input && count > 0,
+        Q3X_ASSERT(input && count > 0,
                    "session append input=%p count=%d",
                    static_cast<const void*>(input), count);
         if (engine->mock) {
@@ -281,7 +281,7 @@ struct q35_session {
                           token, next_position, row, MOCK_TARGET_TOKENS[row]);
             }
         } else {
-            q35_backend::state_forward(engine->model, state, input, count,
+            q3x_backend::state_forward(engine->model, state, input, count,
                                        compute_logits);
             tokens.insert(tokens.end(), input, input + count);
         }
@@ -310,7 +310,7 @@ struct q35_session {
         if (engine->mock) {
             mock_checkpoint_logits = logits;
         } else {
-            q35_backend::state_checkpoint_save(state);
+            q3x_backend::state_checkpoint_save(state);
         }
         checkpoint_position = position();
         checkpoint_valid = true;
@@ -319,16 +319,16 @@ struct q35_session {
     }
 
     void restore_checkpoint() {
-        Q35_ASSERT(checkpoint_valid,
+        Q3X_ASSERT(checkpoint_valid,
                    "restore_checkpoint valid=%d position=%d checkpoint=%d",
                    checkpoint_valid, position(), checkpoint_position);
         const int live_position = position();
         if (engine->mock) {
             logits = mock_checkpoint_logits;
         } else {
-            q35_backend::state_checkpoint_restore(state);
+            q3x_backend::state_checkpoint_restore(state);
         }
-        Q35_ASSERT(tokens.size() >= static_cast<size_t>(checkpoint_position),
+        Q3X_ASSERT(tokens.size() >= static_cast<size_t>(checkpoint_position),
                    "token history=%zu checkpoint_position=%d",
                    tokens.size(), checkpoint_position);
         tokens.resize(static_cast<size_t>(checkpoint_position));
@@ -341,27 +341,27 @@ struct q35_session {
 
     void copy_logits_to_host() {
         if (!engine->mock) {
-            q35_backend::state_copy_logits(state, logits.data());
+            q3x_backend::state_copy_logits(state, logits.data());
         }
     }
 };
 
-namespace q35_internal {
+namespace q3x_internal {
 
-int session_checkpoint_state_tokens(const q35_session* session) {
+int session_checkpoint_state_tokens(const q3x_session* session) {
     if (!session || !session->checkpoint_valid) return 0;
     return session->checkpoint_position;
 }
 
-int session_cache_hit_tokens(const q35_session* session,
+int session_cache_hit_tokens(const q3x_session* session,
                              const int* tokens, int count) {
     if (!session || !tokens || count <= 0) return 0;
     return session->match_prefix(tokens, count).reused;
 }
 
-}  // namespace q35_internal
+}  // namespace q3x_internal
 
-int q35_engine_create(const q35_engine_options* options, q35_engine** out,
+int q3x_engine_create(const q3x_engine_options* options, q3x_engine** out,
                       char* err, size_t errlen) {
     if (!options) return fail(err, errlen, "engine options are null");
     if (!options->bin_path || !options->bin_path[0]) {
@@ -370,10 +370,10 @@ int q35_engine_create(const q35_engine_options* options, q35_engine** out,
     if (!out) return fail(err, errlen, "engine output pointer is null");
     *out = nullptr;
 
-    std::unique_ptr<q35_engine> engine(new q35_engine());
+    std::unique_ptr<q3x_engine> engine(new q3x_engine());
     engine->mock = options->mock;
     if (engine->mock) {
-        const int vocab = q35_backend::vocab_size();
+        const int vocab = q3x_backend::vocab_size();
         engine->mock_logits.resize(MOCK_TARGET_TOKENS.size());
         for (size_t row = 0; row < engine->mock_logits.size(); ++row) {
             auto& logits = engine->mock_logits[row];
@@ -387,42 +387,42 @@ int q35_engine_create(const q35_engine_options* options, q35_engine** out,
     } else {
         LOG_INFO("model load started bin=%s", options->bin_path);
         const auto started = std::chrono::steady_clock::now();
-        engine->model = q35_backend::model_create(options->bin_path, err, errlen);
-        if (!engine->model) return Q35_ERROR;
+        engine->model = q3x_backend::model_create(options->bin_path, err, errlen);
+        if (!engine->model) return Q3X_ERROR;
         const double elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
         LOG_INFO("model load completed elapsed=%.3fs", elapsed);
     }
-    LOG_DEBUG("model ready vocab=%d", q35_backend::vocab_size());
+    LOG_DEBUG("model ready vocab=%d", q3x_backend::vocab_size());
     *out = engine.release();
     return succeed(err, errlen);
 }
 
-void q35_engine_destroy(q35_engine* engine) {
+void q3x_engine_destroy(q3x_engine* engine) {
     LOG_INFO("engine closing");
     delete engine;
 }
 
-uint32_t q35_engine_model_id(const q35_engine* engine) {
+uint32_t q3x_engine_model_id(const q3x_engine* engine) {
     if (!engine || engine->mock) return 800;
-    return q35_backend::model_id(engine->model);
+    return q3x_backend::model_id(engine->model);
 }
 
-int q35_session_create(q35_engine* engine, int context_size, q35_session** out,
+int q3x_session_create(q3x_engine* engine, int context_size, q3x_session** out,
                        char* err, size_t errlen) {
     if (!engine) return fail(err, errlen, "engine is null");
     if (!out) return fail(err, errlen, "session output pointer is null");
     *out = nullptr;
-    if (context_size <= 0 || context_size > q35_backend::max_context()) {
+    if (context_size <= 0 || context_size > q3x_backend::max_context()) {
         return fail(err, errlen, "context_size is outside 1..262144");
     }
-    *out = new q35_session(engine, context_size);
+    *out = new q3x_session(engine, context_size);
     LOG_DEBUG("session created session_id=%s context_size=%d",
               (*out)->id.c_str(), context_size);
     return succeed(err, errlen);
 }
 
-void q35_session_destroy(q35_session* session) {
+void q3x_session_destroy(q3x_session* session) {
     if (session) {
         LOG_DEBUG("session closing session_id=%s position=%d",
                   session->id.c_str(), session->position());
@@ -430,11 +430,11 @@ void q35_session_destroy(q35_session* session) {
     delete session;
 }
 
-const char* q35_session_id(const q35_session* session) {
+const char* q3x_session_id(const q3x_session* session) {
     return session ? session->id.c_str() : nullptr;
 }
 
-int q35_session_reset(q35_session* session, char* err, size_t errlen) {
+int q3x_session_reset(q3x_session* session, char* err, size_t errlen) {
     if (!session) return fail(err, errlen, "session is null");
     const int old_position = session->position();
     session->reset();
@@ -442,7 +442,7 @@ int q35_session_reset(q35_session* session, char* err, size_t errlen) {
     return succeed(err, errlen);
 }
 
-int q35_session_sync(q35_session* session, const int* tokens, int count,
+int q3x_session_sync(q3x_session* session, const int* tokens, int count,
                      int checkpoint_at, int* cached_tokens,
                      char* err, size_t errlen) {
     if (cached_tokens) *cached_tokens = 0;
@@ -456,7 +456,7 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
         (checkpoint_at <= 0 || checkpoint_at > count)) {
         return fail(err, errlen, "checkpoint_at must be -1 or in [1,count]");
     }
-    const int vocab = q35_backend::vocab_size();
+    const int vocab = q3x_backend::vocab_size();
     for (int index = 0; index < count; ++index) {
         if (tokens[index] < 0 || tokens[index] >= vocab) {
             return fail(err, errlen, "token is outside vocabulary");
@@ -523,7 +523,7 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
             checkpoint_saved = true;
         }
     }
-    Q35_ASSERT(checkpoint_at <= 0 || checkpoint_saved,
+    Q3X_ASSERT(checkpoint_at <= 0 || checkpoint_saved,
                "checkpoint_at=%d reused=%d prompt_tokens=%d",
                checkpoint_at, reused, count);
 
@@ -539,10 +539,10 @@ int q35_session_sync(q35_session* session, const int* tokens, int count,
     return succeed(err, errlen);
 }
 
-int q35_session_eval(q35_session* session, int token,
+int q3x_session_eval(q3x_session* session, int token,
                      char* err, size_t errlen) {
     if (!session) return fail(err, errlen, "session is null");
-    if (token < 0 || token >= q35_backend::vocab_size()) {
+    if (token < 0 || token >= q3x_backend::vocab_size()) {
         return fail(err, errlen, "token is outside vocabulary");
     }
     if (session->position() >= session->capacity) {
@@ -557,21 +557,21 @@ int q35_session_eval(q35_session* session, int token,
     return succeed(err, errlen);
 }
 
-int q35_session_position(const q35_session* session) {
+int q3x_session_position(const q3x_session* session) {
     return session ? session->position() : -1;
 }
 
-int q35_session_argmax(const q35_session* session) {
+int q3x_session_argmax(const q3x_session* session) {
     if (!session || !session->logits_valid) return -1;
     const int token = session->engine->mock
         ? argmax_host(session->logits)
-        : q35_backend::state_argmax(session->state);
+        : q3x_backend::state_argmax(session->state);
     LOG_TRACE("argmax selected token=%d position=%d",
               token, session->position());
     return token;
 }
 
-int q35_session_sample(q35_session* session, float temperature, int top_k,
+int q3x_session_sample(q3x_session* session, float temperature, int top_k,
                        float top_p, float presence_penalty,
                        const int* generated_tokens, int generated_count,
                        uint64_t* rng) {
@@ -589,17 +589,17 @@ int q35_session_sample(q35_session* session, float temperature, int top_k,
     return token;
 }
 
-bool q35_token_is_stop(int token) {
-    const bool stop = q35_backend::token_is_stop(token);
+bool q3x_token_is_stop(int token) {
+    const bool stop = q3x_backend::token_is_stop(token);
     if (stop) LOG_TRACE("stop token detected token=%d", token);
     return stop;
 }
 
-int q35_vocab_size(void) {
-    return q35_backend::vocab_size();
+int q3x_vocab_size(void) {
+    return q3x_backend::vocab_size();
 }
 
-int q35_session_copy_logits(const q35_session* session, float* output,
+int q3x_session_copy_logits(const q3x_session* session, float* output,
                             int capacity, char* err, size_t errlen) {
     if (!session) return fail(err, errlen, "session is null");
     if (!session->logits_valid) {
@@ -607,33 +607,33 @@ int q35_session_copy_logits(const q35_session* session, float* output,
                     "session has no logits; sync or eval tokens first");
     }
     if (!output) return fail(err, errlen, "logits output pointer is null");
-    if (capacity < q35_backend::vocab_size()) {
+    if (capacity < q3x_backend::vocab_size()) {
         return fail(err, errlen, "logits output is smaller than vocabulary");
     }
     if (session->engine->mock) {
         std::memcpy(output, session->logits.data(),
-                    sizeof(float) * q35_backend::vocab_size());
+                    sizeof(float) * q3x_backend::vocab_size());
     } else {
-        q35_backend::state_copy_logits(session->state, output);
+        q3x_backend::state_copy_logits(session->state, output);
     }
     LOG_TRACE("logits copied count=%d position=%d",
-              q35_backend::vocab_size(), session->position());
+              q3x_backend::vocab_size(), session->position());
     return succeed(err, errlen);
 }
 
-struct q35_session_manager {
+struct q3x_session_manager {
     std::mutex mutex;
     std::vector<SessionEntry> entries;
     uint64_t clock = 0;
 
-    ~q35_session_manager() {
-        for (SessionEntry& entry : entries) q35_session_destroy(entry.session);
+    ~q3x_session_manager() {
+        for (SessionEntry& entry : entries) q3x_session_destroy(entry.session);
     }
 };
 
 namespace {
 
-SessionEntry* find_entry(q35_session_manager& manager, const q35_session* session) {
+SessionEntry* find_entry(q3x_session_manager& manager, const q3x_session* session) {
     for (SessionEntry& entry : manager.entries) {
         if (entry.session == session) return &entry;
     }
@@ -641,7 +641,7 @@ SessionEntry* find_entry(q35_session_manager& manager, const q35_session* sessio
 }
 
 void reset(SessionEntry& entry) {
-    Q35_ASSERT(entry.session, "SessionEntry reset has null session");
+    Q3X_ASSERT(entry.session, "SessionEntry reset has null session");
     entry.session->reset();
     entry.state = EntryState::FREE;
     entry.last_used = 0;
@@ -649,8 +649,8 @@ void reset(SessionEntry& entry) {
 
 }  // namespace
 
-int q35_session_manager_create(q35_engine* engine, int session_count,
-                               int context_size, q35_session_manager** out,
+int q3x_session_manager_create(q3x_engine* engine, int session_count,
+                               int context_size, q3x_session_manager** out,
                                char* err, size_t errlen) {
     LOG_DEBUG("session manager create started sessions=%d context_size=%d",
               session_count, context_size);
@@ -661,14 +661,14 @@ int q35_session_manager_create(q35_engine* engine, int session_count,
         return fail(err, errlen, "session_count must be positive");
     }
 
-    std::unique_ptr<q35_session_manager> manager(new q35_session_manager());
+    std::unique_ptr<q3x_session_manager> manager(new q3x_session_manager());
     manager->entries.resize(static_cast<size_t>(session_count));
     for (size_t slot = 0; slot < manager->entries.size(); ++slot) {
         SessionEntry& entry = manager->entries[slot];
-        const int result = q35_session_create(
+        const int result = q3x_session_create(
             engine, context_size, &entry.session, err, errlen
         );
-        if (result != Q35_OK) return result;
+        if (result != Q3X_OK) return result;
         LOG_DEBUG("session manager slot created slot=%zu", slot);
     }
     LOG_INFO("session manager created sessions=%d context_size=%d",
@@ -677,16 +677,16 @@ int q35_session_manager_create(q35_engine* engine, int session_count,
     return succeed(err, errlen);
 }
 
-void q35_session_manager_destroy(q35_session_manager* manager) {
+void q3x_session_manager_destroy(q3x_session_manager* manager) {
     if (manager) {
         LOG_INFO("session manager closing sessions=%zu", manager->entries.size());
     }
     delete manager;
 }
 
-int q35_session_manager_acquire(q35_session_manager* manager,
+int q3x_session_manager_acquire(q3x_session_manager* manager,
                                 const int* tokens, int count,
-                                q35_session** out,
+                                q3x_session** out,
                                 char* err, size_t errlen) {
     if (!manager) return fail(err, errlen, "session manager is null");
     if (!out) return fail(err, errlen, "session output pointer is null");
@@ -706,12 +706,12 @@ int q35_session_manager_acquire(q35_session_manager* manager,
     for (size_t slot = 0; slot < manager->entries.size(); ++slot) {
         SessionEntry& entry = manager->entries[slot];
         if (entry.state != EntryState::IDLE) continue;
-        const int cache_hit_tokens = q35_internal::session_cache_hit_tokens(
+        const int cache_hit_tokens = q3x_internal::session_cache_hit_tokens(
             entry.session, tokens, count
         );
-        const int live_state_tokens = q35_session_position(entry.session);
+        const int live_state_tokens = q3x_session_position(entry.session);
         const int checkpoint_state_tokens =
-            q35_internal::session_checkpoint_state_tokens(entry.session);
+            q3x_internal::session_checkpoint_state_tokens(entry.session);
         LOG_DEBUG("session candidate slot=%zu prompt_tokens=%d "
                   "live_state_tokens=%d checkpoint_state_tokens=%d "
                   "cache_hit_tokens=%d",
@@ -748,13 +748,13 @@ int q35_session_manager_acquire(q35_session_manager* manager,
         write_error(err, errlen, "all sessions are busy");
         lock.unlock();
         LOG_WARN("session lookup failed reason=all_slots_busy");
-        return Q35_BUSY;
+        return Q3X_BUSY;
     }
 
     const int slot = static_cast<int>(selected - manager->entries.data());
-    const int live_state_tokens = q35_session_position(selected->session);
+    const int live_state_tokens = q3x_session_position(selected->session);
     const int checkpoint_state_tokens =
-        q35_internal::session_checkpoint_state_tokens(selected->session);
+        q3x_internal::session_checkpoint_state_tokens(selected->session);
     const char* cache_result = selected_cache_hit_tokens > 0 ?
                                (selected_cache_hit_tokens == live_state_tokens ?
                                 "hit_live" : "hit_checkpoint") :
@@ -771,11 +771,11 @@ int q35_session_manager_acquire(q35_session_manager* manager,
              selected->session->id.c_str(),
              slot, selection, count, live_state_tokens, checkpoint_state_tokens,
              cache_result, selected_cache_hit_tokens, to_prefill_tokens);
-    return Q35_OK;
+    return Q3X_OK;
 }
 
-void q35_session_manager_release(q35_session_manager* manager,
-                                 q35_session* session, bool keep) {
+void q3x_session_manager_release(q3x_session_manager* manager,
+                                 q3x_session* session, bool keep) {
     if (!manager || !session) return;
     std::unique_lock<std::mutex> lock(manager->mutex);
     SessionEntry* entry = find_entry(*manager, session);
@@ -787,9 +787,9 @@ void q35_session_manager_release(q35_session_manager* manager,
     } else {
         reset(*entry);
     }
-    const int live_state_tokens = q35_session_position(entry->session);
+    const int live_state_tokens = q3x_session_position(entry->session);
     const int checkpoint_state_tokens =
-        q35_internal::session_checkpoint_state_tokens(entry->session);
+        q3x_internal::session_checkpoint_state_tokens(entry->session);
     lock.unlock();
     LOG_DEBUG("session release session_id=%s slot=%d result=%s "
               "live_state_tokens=%d "

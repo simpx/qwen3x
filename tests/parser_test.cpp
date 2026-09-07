@@ -24,9 +24,9 @@ void test_basic_request() {
         "enable_thinking": true
     })";
 
-    q35_render::ChatRequest request;
-    const q35_render::Status status =
-        q35_render::parse_chat_request(text, request);
+    q3x_render::ChatRequest request;
+    const q3x_render::Status status =
+        q3x_render::parse_chat_request(text, request);
 
     if (!status.ok()) {
         check(false, "basic request should parse");
@@ -34,7 +34,7 @@ void test_basic_request() {
     }
     check(request.messages.size() == 2, "basic request message count");
     if (request.messages.size() != 2) return;
-    check(request.messages[0].role == q35_render::Role::System,
+    check(request.messages[0].role == q3x_render::Role::System,
           "basic request system role");
     check(request.messages[1].content == "hello", "basic request content");
     check(!request.options.add_generation_prompt,
@@ -43,8 +43,8 @@ void test_basic_request() {
 }
 
 void test_null_content() {
-    q35_render::ChatRequest request;
-    const q35_render::Status status = q35_render::parse_chat_request(
+    q3x_render::ChatRequest request;
+    const q3x_render::Status status = q3x_render::parse_chat_request(
         R"({"messages":[{"role":"user","content":null}]})", request
     );
 
@@ -58,8 +58,8 @@ void test_null_content() {
 }
 
 void test_content_parts() {
-    q35_render::ChatRequest request;
-    const q35_render::Status status = q35_render::parse_chat_request(
+    q3x_render::ChatRequest request;
+    const q3x_render::Status status = q3x_render::parse_chat_request(
         R"({"messages":[{"role":"user","content":[
             {"text":"compare "},
             {"type":"image"},
@@ -74,20 +74,20 @@ void test_content_parts() {
     }
     check(request.messages.size() == 1, "content parts message count");
     if (request.messages.size() != 1) return;
-    const std::vector<q35_render::ContentPart>& parts = request.messages[0].parts;
+    const std::vector<q3x_render::ContentPart>& parts = request.messages[0].parts;
     check(parts.size() == 3, "content parts count");
     if (parts.size() != 3) return;
-    check(parts[0].kind == q35_render::ContentKind::Text &&
+    check(parts[0].kind == q3x_render::ContentKind::Text &&
           parts[0].text == "compare ", "text content part");
-    check(parts[1].kind == q35_render::ContentKind::Image,
+    check(parts[1].kind == q3x_render::ContentKind::Image,
           "image content part");
-    check(parts[2].kind == q35_render::ContentKind::Video,
+    check(parts[2].kind == q3x_render::ContentKind::Video,
           "video content part");
 }
 
 void test_string_tool_calls() {
-    q35_render::ChatRequest request;
-    const q35_render::Status status = q35_render::parse_chat_request(
+    q3x_render::ChatRequest request;
+    const q3x_render::Status status = q3x_render::parse_chat_request(
         R"({"messages":[
             {"role":"user","content":"look it up"},
             {"role":"assistant","content":"","tool_calls":[
@@ -104,7 +104,7 @@ void test_string_tool_calls() {
     }
     check(request.messages.size() == 2, "tool call message count");
     if (request.messages.size() != 2) return;
-    const std::vector<q35_render::ToolCall>& calls =
+    const std::vector<q3x_render::ToolCall>& calls =
         request.messages[1].tool_calls;
     check(calls.size() == 2, "tool call count");
     if (calls.size() != 2) return;
@@ -117,8 +117,8 @@ void test_string_tool_calls() {
 }
 
 void test_scalar_tool_arguments() {
-    q35_render::ChatRequest request;
-    const q35_render::Status status = q35_render::parse_chat_request(
+    q3x_render::ChatRequest request;
+    const q3x_render::Status status = q3x_render::parse_chat_request(
         R"({"messages":[{"role":"assistant","tool_calls":[{
             "name":"lookup",
             "arguments":{
@@ -142,13 +142,13 @@ void test_scalar_tool_arguments() {
     check(request.messages[0].tool_calls.size() == 1,
           "scalar argument tool call count");
     if (request.messages[0].tool_calls.size() != 1) return;
-    const std::vector<q35_render::ToolArgument>& arguments =
+    const std::vector<q3x_render::ToolArgument>& arguments =
         request.messages[0].tool_calls[0].arguments;
     check(arguments.size() == 6, "scalar tool argument count");
     if (arguments.size() != 6) return;
-    check(arguments[0].name == "none" && arguments[0].text == "None",
+    check(arguments[0].name == "none" && arguments[0].text == "null",
           "null tool argument");
-    check(arguments[1].name == "enabled" && arguments[1].text == "True",
+    check(arguments[1].name == "enabled" && arguments[1].text == "true",
           "boolean tool argument");
     check(arguments[2].text == "2", "unsigned tool argument");
     check(arguments[3].text == "-3", "signed tool argument");
@@ -157,8 +157,8 @@ void test_scalar_tool_arguments() {
 }
 
 void test_nested_tool_arguments() {
-    q35_render::ChatRequest request;
-    const q35_render::Status status = q35_render::parse_chat_request(
+    q3x_render::ChatRequest request;
+    const q3x_render::Status status = q3x_render::parse_chat_request(
         R"({"messages":[{"role":"assistant","tool_calls":[{
             "name":"lookup",
             "arguments":{
@@ -178,7 +178,7 @@ void test_nested_tool_arguments() {
     check(request.messages[0].tool_calls.size() == 1,
           "nested argument tool call count");
     if (request.messages[0].tool_calls.size() != 1) return;
-    const std::vector<q35_render::ToolArgument>& arguments =
+    const std::vector<q3x_render::ToolArgument>& arguments =
         request.messages[0].tool_calls[0].arguments;
     check(arguments.size() == 2, "nested tool argument count");
     if (arguments.size() != 2) return;
@@ -192,8 +192,8 @@ void test_nested_tool_arguments() {
 }
 
 void test_encoded_tool_arguments() {
-    q35_render::ChatRequest request;
-    const q35_render::Status status = q35_render::parse_chat_request(
+    q3x_render::ChatRequest request;
+    const q3x_render::Status status = q3x_render::parse_chat_request(
         R"({"messages":[{"role":"assistant","tool_calls":[{
             "type":"function",
             "function":{
@@ -213,7 +213,7 @@ void test_encoded_tool_arguments() {
     check(request.messages[0].tool_calls.size() == 1,
           "encoded argument tool call count");
     if (request.messages[0].tool_calls.size() != 1) return;
-    const std::vector<q35_render::ToolArgument>& arguments =
+    const std::vector<q3x_render::ToolArgument>& arguments =
         request.messages[0].tool_calls[0].arguments;
     check(arguments.size() == 3, "encoded tool argument count");
     if (arguments.size() != 3) return;
@@ -221,13 +221,13 @@ void test_encoded_tool_arguments() {
           "encoded arguments preserve first field");
     check(arguments[1].name == "a" && arguments[1].text == "Hangzhou",
           "encoded arguments preserve second field");
-    check(arguments[2].name == "enabled" && arguments[2].text == "True",
+    check(arguments[2].name == "enabled" && arguments[2].text == "true",
           "encoded arguments normalize scalar values");
 }
 
 void test_tool_schema() {
-    q35_render::ChatRequest request;
-    const q35_render::Status status = q35_render::parse_chat_request(
+    q3x_render::ChatRequest request;
+    const q3x_render::Status status = q3x_render::parse_chat_request(
         R"({
             "messages":[{"role":"user","content":"weather?"}],
             "tools":[{
@@ -258,16 +258,16 @@ void test_tool_schema() {
 }
 
 void test_error_preserves_output() {
-    q35_render::ChatRequest request;
-    q35_render::Message existing;
+    q3x_render::ChatRequest request;
+    q3x_render::Message existing;
     existing.content = "keep me";
     request.messages.push_back(existing);
 
-    const q35_render::Status status =
-        q35_render::parse_chat_request("not json", request);
+    const q3x_render::Status status =
+        q3x_render::parse_chat_request("not json", request);
 
     check(!status.ok(), "malformed JSON should fail");
-    check(status.code() == q35_render::StatusCode::InvalidArgument,
+    check(status.code() == q3x_render::StatusCode::InvalidArgument,
           "malformed JSON status code");
     check(status.message() == "invalid chat request: malformed JSON",
           "malformed JSON message");
@@ -277,34 +277,34 @@ void test_error_preserves_output() {
 }
 
 void test_invalid_fields() {
-    q35_render::ChatRequest request;
-    q35_render::Status status = q35_render::parse_chat_request(
+    q3x_render::ChatRequest request;
+    q3x_render::Status status = q3x_render::parse_chat_request(
         R"({"messages":[{"role":"alien","content":"x"}]})", request
     );
     check(!status.ok(), "unknown role should fail");
 
-    status = q35_render::parse_chat_request(
+    status = q3x_render::parse_chat_request(
         R"({"messages":[],"enable_thinking":"yes"})", request
     );
     check(!status.ok(), "non-boolean option should fail");
 
-    status = q35_render::parse_chat_request(
+    status = q3x_render::parse_chat_request(
         R"({"messages":[{"role":"user","content":[{"type":"audio"}]}]})",
         request
     );
     check(!status.ok(), "unknown content part should fail");
 
-    status = q35_render::parse_chat_request(
+    status = q3x_render::parse_chat_request(
         R"({"messages":[{"role":"user","content":[42]}]})", request
     );
     check(!status.ok(), "non-object content part should fail");
 
-    status = q35_render::parse_chat_request(
+    status = q3x_render::parse_chat_request(
         R"({"messages":[{"role":"assistant","tool_calls":{}}]})", request
     );
     check(!status.ok(), "non-array tool calls should fail");
 
-    status = q35_render::parse_chat_request(
+    status = q3x_render::parse_chat_request(
         R"({"messages":[{"role":"assistant","tool_calls":[{
             "name":"f","arguments":"not json"
         }]}]})",
@@ -312,7 +312,7 @@ void test_invalid_fields() {
     );
     check(!status.ok(), "malformed encoded arguments should fail");
 
-    status = q35_render::parse_chat_request(
+    status = q3x_render::parse_chat_request(
         R"({"messages":[],"tools":{}})", request
     );
     check(!status.ok(), "non-array tools should fail");
@@ -339,12 +339,12 @@ void test_completion_request() {
             "preserve_thinking":false
         }
     })";
-    q35_render::CompletionRequest request;
-    const q35_render::Status status = q35_render::parse_completion_request(
+    q3x_render::CompletionRequest request;
+    const q3x_render::Status status = q3x_render::parse_completion_request(
         text, "qwen3.5-0.8b", 128, request);
     check(status.ok(), "completion request should parse");
     check(request.chat.messages.size() == 2 &&
-          request.chat.messages[0].role == q35_render::Role::System,
+          request.chat.messages[0].role == q3x_render::Role::System,
           "developer role should map to system");
     check(request.max_tokens == 42 && request.top_k == 20,
           "completion integer options");
@@ -378,8 +378,8 @@ void test_completion_tool_request() {
         }}],
         "stream":true
     })";
-    q35_render::CompletionRequest request;
-    const q35_render::Status status = q35_render::parse_completion_request(
+    q3x_render::CompletionRequest request;
+    const q3x_render::Status status = q3x_render::parse_completion_request(
         text, "qwen3.5-0.8b", 128, request);
     check(status.ok(), "completion tool request should parse");
     check(request.stream, "completion tool request should allow streaming");
@@ -409,8 +409,8 @@ printf 'hello\nworld'
 </tool_call>)";
     std::string content;
     std::string error;
-    std::vector<q35_render::ToolCall> calls;
-    check(q35_render::parse_generated_tool_calls(
+    std::vector<q3x_render::ToolCall> calls;
+    check(q3x_render::parse_generated_tool_calls(
               text, &content, &calls, &error),
           "generated tool calls should parse");
     check(content == "I will read it.", "generated tool preamble");
@@ -425,16 +425,16 @@ printf 'hello\nworld'
           calls[1].arguments[0].text == "printf 'hello\\nworld'",
           "generated multiline argument");
 
-    check(q35_render::parse_generated_tool_calls(
+    check(q3x_render::parse_generated_tool_calls(
               "plain answer", &content, &calls, &error) &&
           content == "plain answer" && calls.empty(),
           "plain generated content");
-    check(q35_render::parse_generated_tool_calls(
+    check(q3x_render::parse_generated_tool_calls(
               "<function=bash><parameter=command>pwd</parameter></function>",
               &content, &calls, &error) && calls.size() == 1 &&
           calls[0].name == "bash" && calls[0].arguments[0].text == "pwd",
           "generated function fallback");
-    check(!q35_render::parse_generated_tool_calls(
+    check(!q3x_render::parse_generated_tool_calls(
               "<tool_call><function=bash>", &content, &calls, &error),
           "incomplete generated call should fail");
     check(content.empty() && calls.empty(),
@@ -449,7 +449,7 @@ printf 'hello\nworld'
 <tool_call>
 <function=read>
 <parameter=path>README.md)";
-    check(!q35_render::parse_generated_tool_calls(
+    check(!q3x_render::parse_generated_tool_calls(
               partial, &content, &calls, &error),
           "partially generated tool calls should report failure");
     check(content == "Let me check." && calls.size() == 1 &&
@@ -466,7 +466,7 @@ printf 'hello\nworld'
 <parameter=path>README.md</parameter>
 </function>
 </tool_call>)";
-    check(!q35_render::parse_generated_tool_calls(
+    check(!q3x_render::parse_generated_tool_calls(
               missing_wrapper, &content, &calls, &error),
           "a missing function wrapper should report failure");
     check(calls.size() == 2 && calls[0].name == "bash" &&
@@ -478,20 +478,20 @@ printf 'hello\nworld'
 }
 
 void test_completion_json() {
-    q35_render::CompletionUsage usage{10, 4, 2};
-    std::vector<q35_render::ToolCall> no_calls;
-    const std::string response = q35_render::completion_json(
+    q3x_render::CompletionUsage usage{10, 4, 2};
+    std::vector<q3x_render::ToolCall> no_calls;
+    const std::string response = q3x_render::completion_json(
         "chatcmpl-1", 123, "qwen3.5-0.8b", "think", "answer", true,
         no_calls, "stop", usage);
     check(response.find("\"reasoning_content\":\"think\"") !=
           std::string::npos, "completion reasoning JSON");
     check(response.find("\"cached_tokens\":4") != std::string::npos,
           "completion cached usage JSON");
-    q35_render::ToolCall call;
+    q3x_render::ToolCall call;
     call.id = "call_1";
     call.name = "read_file";
     call.arguments.push_back({"path", "README.md"});
-    const std::string tool_response = q35_render::completion_json(
+    const std::string tool_response = q3x_render::completion_json(
         "chatcmpl-2", 123, "qwen3.5-0.8b", "", "", false,
         {call}, "tool_calls", usage);
     check(tool_response.find("\"content\":null") != std::string::npos &&
@@ -504,7 +504,7 @@ void test_completion_json() {
     const std::vector<std::string> tools = {
         R"({"type":"function","function":{"name":"read_file","parameters":{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer"}}}}})"
     };
-    const std::string typed_tool_response = q35_render::completion_json(
+    const std::string typed_tool_response = q3x_render::completion_json(
         "chatcmpl-3", 123, "qwen3.5-0.8b", "", "", false,
         {call}, "tool_calls", usage, &tools);
     check(typed_tool_response.find(
@@ -512,18 +512,18 @@ void test_completion_json() {
           typed_tool_response.find(
               "\\\"start_line\\\":201") != std::string::npos,
           "generated arguments follow tool JSON schema");
-    const std::string tool_chunk = q35_render::completion_tool_call_chunk_json(
+    const std::string tool_chunk = q3x_render::completion_tool_call_chunk_json(
         "chatcmpl-3", 123, "qwen3.5-0.8b", 0, call, &tools);
     check(tool_chunk.find("\"tool_calls\"") != std::string::npos &&
           tool_chunk.find("\"name\":\"read_file\"") != std::string::npos &&
           tool_chunk.find("\"index\":0") != std::string::npos &&
           tool_chunk.find("\\\"start_line\\\":201") != std::string::npos,
           "stream tool call chunk follows schema");
-    const std::string chunk = q35_render::completion_chunk_json(
+    const std::string chunk = q3x_render::completion_chunk_json(
         "chatcmpl-1", 123, "qwen3.5-0.8b", "content", "你");
     check(chunk.find("\"content\":\"你\"") != std::string::npos,
           "stream chunk keeps UTF-8");
-    const std::string error = q35_render::error_json(
+    const std::string error = q3x_render::error_json(
         "bad", "invalid_request_error", "model", "model_not_found");
     check(error.find("\"code\":\"model_not_found\"") != std::string::npos,
           "OpenAI error JSON");
@@ -537,8 +537,8 @@ void test_invalid_completion_requests() {
         R"({"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"x"}],"top_p":0})",
         R"({"model":"qwen3.5-0.8b","messages":[{"role":"user","content":"x"}],"n":2})",
     }) {
-        q35_render::CompletionRequest request;
-        check(!q35_render::parse_completion_request(
+        q3x_render::CompletionRequest request;
+        check(!q3x_render::parse_completion_request(
                   text, "qwen3.5-0.8b", 128, request).ok(),
               "invalid completion request should fail");
     }

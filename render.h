@@ -1,5 +1,5 @@
-#ifndef QWEN35_RENDER_H
-#define QWEN35_RENDER_H
+#ifndef QWEN3X_RENDER_H
+#define QWEN3X_RENDER_H
 
 #include <cstdint>
 #include <memory>
@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-namespace q35_render {
+namespace q3x_render {
 
 enum class StatusCode {
     Ok,
@@ -42,8 +42,7 @@ struct ContentPart {
     std::string text;
 };
 
-// parser.cpp has already converted each argument into the exact text expected
-// by the fixed chat template.  render.cpp never needs to know its JSON type.
+// Strings stay unquoted; every other value uses its JSON representation.
 struct ToolArgument {
     std::string name;
     std::string text;
@@ -155,8 +154,8 @@ std::string completion_usage_chunk_json(const std::string& id,
                                         const std::string& model,
                                         const CompletionUsage& usage);
 
-// Fixed Qwen3.5 chat template and ByteLevel-BPE tokenizer. The binary contains
-// only read-only tables; template behavior remains visible in render.cpp.
+// Fixed Qwen3.8 chat template and shared ByteLevel-BPE tokenizer tables.
+// Template behavior remains in render.cpp.
 class Renderer {
 public:
     // Factory: a null pointer means the render data could not be loaded.
@@ -180,6 +179,6 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace q35_render
+}  // namespace q3x_render
 
 #endif

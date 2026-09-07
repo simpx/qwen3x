@@ -202,8 +202,8 @@ def main() -> None:
         executable = require_file(args.llama_debug, "external llama-debug", True)
         gguf = require_file(args.gguf, "external Qwen3.5-9B Q8_0 GGUF")
         qwen = require_file(args.qwen, "qwen3x CUDA executable", True)
-        model_bin = require_file(args.bin, "qwen3x Qwen3.5-9B Q8_0 model bin")
-        render_bin = require_file(args.render, "qwen3x render bin")
+        model_bin = require_file(args.bin, "Qwen3.5-9B Q8_0 model bin")
+        render_bin = require_file(args.render, "Qwen3.5 render bin")
 
         with tempfile.TemporaryDirectory(prefix="qwen3x-llama-smoke-") as temporary:
             root = Path(temporary)

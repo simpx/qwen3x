@@ -82,7 +82,7 @@ def semantic_server_contract(backend: str, server_info: dict) -> dict:
     """Keep result-affecting server properties; omit scheduling-only knobs."""
 
     keys = {
-        "qwen35": ("compute", "context_size"),
+        "qwen3x": ("compute", "context_size"),
         "transformers": ("device", "dtype", "max_context_tokens"),
     }[backend]
     return {key: server_info[key] for key in keys if key in server_info}
@@ -354,7 +354,7 @@ def parse_args() -> argparse.Namespace:
                         help="HTTP timeout in seconds for one generated response")
     parser.add_argument("--concurrency", type=int, default=1,
                         help="number of simultaneous OpenAI requests")
-    parser.add_argument("--backend", choices=("qwen35", "transformers"), default="qwen35")
+    parser.add_argument("--backend", choices=("qwen3x", "transformers"), default="qwen3x")
     parser.add_argument("--artifact", type=Path,
                         default=PROJECT / "build/qwen35-0.8b-model.bin")
     parser.add_argument("--output", type=Path, default=HERE / "results")
@@ -433,7 +433,7 @@ def main() -> None:
         raise SystemExit(f"resume directory does not exist: {run_dir}")
     commit = git("rev-parse", "HEAD")
     dirty = bool(git("status", "--short"))
-    manifest_path = run_dir / "qwen35-manifest.json"
+    manifest_path = run_dir / "qwen3x-manifest.json"
     previous = None
     if args.resume is not None:
         if not manifest_path.exists():
@@ -485,7 +485,7 @@ def main() -> None:
             old_contract.setdefault("tokenizer", run_contract["tokenizer"])
         if old_contract != run_contract:
             raise SystemExit(
-                "resume configuration differs from qwen35-manifest.json; "
+                "resume configuration differs from qwen3x-manifest.json; "
                 "use the same server/model/sampling/template/bin settings"
             )
 

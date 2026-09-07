@@ -1,9 +1,9 @@
 CXX ?= c++
 NVCC ?= nvcc
 BUILD ?= build
-PROGRAM ?= $(BUILD)/qwen35
-CUDA_PROGRAM ?= $(BUILD)/qwen35-cuda
-METAL_PROGRAM := $(BUILD)/qwen35-metal
+PROGRAM ?= $(BUILD)/qwen3x
+CUDA_PROGRAM ?= $(BUILD)/qwen3x-cuda
+METAL_PROGRAM := $(BUILD)/qwen3x-metal
 METAL_CXX ?= clang++
 METAL_DIR := $(BUILD)/metal
 METAL_OBJ := $(BUILD)/obj/arch/metal/engine.o
@@ -58,27 +58,27 @@ metal-shaders: $(METAL_DIR)/kernels.metallib
 metal-test: $(BUILD)/metal-test
 	$(BUILD)/metal-test
 
-metal-library: $(METAL_DIR)/libqwen35-metal.dylib
+metal-library: $(METAL_DIR)/libqwen3x-metal.dylib
 
 metal-reference: metal-library
-	$(MAKE) -C reference compare-metal METAL_LIBRARY="$(abspath $(METAL_DIR)/libqwen35-metal.dylib)"
+	$(MAKE) -C reference compare-metal METAL_LIBRARY="$(abspath $(METAL_DIR)/libqwen3x-metal.dylib)"
 
 metal-smoke-vectors:
-	$(MAKE) -C reference build/libqwen35.so
-	python3 tests/backend_smoke.py dump --library reference/build/libqwen35.so \
+	$(MAKE) -C reference build/libqwen3x.so
+	python3 tests/backend_smoke.py dump --library reference/build/libqwen3x.so \
 		--model $(BUILD)/qwen35-0.8b-model.bin --vectors $(BUILD)/metal-smoke-0.8b
 
 metal-smoke-9b-vectors:
-	$(MAKE) -C reference build/libqwen35.so
-	python3 tests/backend_smoke.py dump --library reference/build/libqwen35.so \
+	$(MAKE) -C reference build/libqwen3x.so
+	python3 tests/backend_smoke.py dump --library reference/build/libqwen3x.so \
 		--model $(BUILD)/qwen35-9b-q8_0-model.bin --vectors $(BUILD)/metal-smoke-9b
 
 metal-smoke: metal-library
-	python3 tests/backend_smoke.py check --library $(METAL_DIR)/libqwen35-metal.dylib \
+	python3 tests/backend_smoke.py check --library $(METAL_DIR)/libqwen3x-metal.dylib \
 		--model $(BUILD)/qwen35-0.8b-model.bin --vectors $(BUILD)/metal-smoke-0.8b
 
 metal-smoke-9b: metal-library
-	python3 tests/backend_smoke.py check --library $(METAL_DIR)/libqwen35-metal.dylib \
+	python3 tests/backend_smoke.py check --library $(METAL_DIR)/libqwen3x-metal.dylib \
 		--model $(BUILD)/qwen35-9b-q8_0-model.bin --vectors $(BUILD)/metal-smoke-9b
 
 model-4b:
@@ -89,34 +89,34 @@ model-9b:
 
 serve-4b: $(GPU_BACKEND)
 	test -f "$(BUILD)/qwen35-4b-model.bin" || { echo "run: make model-4b"; exit 1; }
-	test -f "$(BUILD)/qwen35-0.8b-render.bin" || { echo "run: make model-4b"; exit 1; }
+	test -f "$(BUILD)/qwen3x-render.bin" || { echo "run: make model-4b"; exit 1; }
 	$(GPU_PROGRAM) --model "$(BUILD)/qwen35-4b-model.bin" \
-		--render "$(BUILD)/qwen35-0.8b-render.bin" --listen \
+		--render "$(BUILD)/qwen3x-render.bin" --listen \
 		--host 127.0.0.1 --port 8000 --session-slots 1 \
-		--session-context 40960 --audit-log "$(BUILD)/qwen35-audit.log"
+		--session-context 40960 --audit-log "$(BUILD)/qwen3x-audit.log"
 
 serve-9b: $(GPU_BACKEND)
 	test -f "$(BUILD)/qwen35-9b-q8_0-model.bin" || { echo "run: make model-9b"; exit 1; }
-	test -f "$(BUILD)/qwen35-0.8b-render.bin" || { echo "run: make model-9b"; exit 1; }
+	test -f "$(BUILD)/qwen3x-render.bin" || { echo "run: make model-9b"; exit 1; }
 	$(GPU_PROGRAM) --model "$(BUILD)/qwen35-9b-q8_0-model.bin" \
-		--render "$(BUILD)/qwen35-0.8b-render.bin" --listen \
+		--render "$(BUILD)/qwen3x-render.bin" --listen \
 		--host 127.0.0.1 --port 8000 --session-slots 1 \
 		--session-context 40960 --audit-log "$(BUILD)/qwen35-9b-audit.log"
 
 serve-eval-4b: $(GPU_BACKEND)
 	test -f "$(BUILD)/qwen35-4b-model.bin" || { echo "run: make model-4b"; exit 1; }
-	test -f "$(BUILD)/qwen35-0.8b-render.bin" || { echo "run: make model-4b"; exit 1; }
+	test -f "$(BUILD)/qwen3x-render.bin" || { echo "run: make model-4b"; exit 1; }
 	$(GPU_PROGRAM) --model "$(BUILD)/qwen35-4b-model.bin" \
-		--render "$(BUILD)/qwen35-0.8b-render.bin" --listen \
+		--render "$(BUILD)/qwen3x-render.bin" --listen \
 		--host 127.0.0.1 --port 8000 --session-slots 1 \
 		--session-context 65536 --request-timeout 7200 \
 		--audit-log "$(BUILD)/qwen35-4b-eval-audit.log"
 
 serve-eval-9b: $(GPU_BACKEND)
 	test -f "$(BUILD)/qwen35-9b-q8_0-model.bin" || { echo "run: make model-9b"; exit 1; }
-	test -f "$(BUILD)/qwen35-0.8b-render.bin" || { echo "run: make model-9b"; exit 1; }
+	test -f "$(BUILD)/qwen3x-render.bin" || { echo "run: make model-9b"; exit 1; }
 	$(GPU_PROGRAM) --model "$(BUILD)/qwen35-9b-q8_0-model.bin" \
-		--render "$(BUILD)/qwen35-0.8b-render.bin" --listen \
+		--render "$(BUILD)/qwen3x-render.bin" --listen \
 		--host 127.0.0.1 --port 8000 --session-slots 1 \
 		--session-context 65536 --request-timeout 7200 \
 		--audit-log "$(BUILD)/qwen35-9b-eval-audit.log"
@@ -130,7 +130,7 @@ $(CUDA_PROGRAM): $(CUDA_OBJ) $(COMMON_OBJ)
 	$(NVCC) $(NVCCFLAGS) $^ -L$(CUDA_LIB_DIR) -lcublas \
 		-Xlinker -rpath -Xlinker $(CUDA_LIB_DIR) -Xcompiler=-pthread -o $@
 
-$(CUDA_OBJ): arch/cuda/engine.cu internal.h model_config.h q8.h qwen35.h Makefile
+$(CUDA_OBJ): arch/cuda/engine.cu internal.h model_config.h q8.h qwen3x.h Makefile
 	mkdir -p $(dir $@)
 	$(NVCC) $(NVCCFLAGS) -I. -MMD -MP -c $< -o $@
 
@@ -141,7 +141,7 @@ $(METAL_DIR)/kernels.metallib: arch/metal/kernels.metal scripts/compile_metal.py
 $(METAL_DIR)/kernels_metallib.h: $(METAL_DIR)/kernels.metallib
 	cd $(METAL_DIR) && xxd -i kernels.metallib > kernels_metallib.h
 
-$(METAL_OBJ): arch/metal/engine.mm internal.h model_config.h q8.h qwen35.h \
+$(METAL_OBJ): arch/metal/engine.mm internal.h model_config.h q8.h qwen3x.h \
 		$(METAL_DIR)/kernels_metallib.h Makefile
 	mkdir -p $(dir $@)
 	$(METAL_CXX) $(CXXFLAGS) $(METAL_FLAGS) -I. -I$(METAL_DIR) -MMD -MP -c $< -o $@
@@ -150,7 +150,7 @@ $(METAL_PROGRAM): $(METAL_OBJ) $(COMMON_OBJ)
 	$(METAL_CXX) $(CXXFLAGS) $^ $(THREAD_FLAGS) $(METAL_FRAMEWORKS) -o $@
 
 $(BUILD)/obj/tests/metal_test.o: tests/metal_test.mm engine.cpp arch/metal/engine.mm \
-		internal.h model_config.h q8.h qwen35.h $(METAL_DIR)/kernels_metallib.h Makefile
+		internal.h model_config.h q8.h qwen3x.h $(METAL_DIR)/kernels_metallib.h Makefile
 	mkdir -p $(dir $@)
 	$(METAL_CXX) $(CXXFLAGS) $(METAL_FLAGS) -I. -I$(METAL_DIR) -MMD -MP -c $< -o $@
 
@@ -158,7 +158,7 @@ $(BUILD)/metal-test: $(BUILD)/obj/tests/metal_test.o $(BUILD)/obj/log.o \
 		$(patsubst %.cpp,$(BUILD)/obj/%.o,$(SPDLOG_SRC))
 	$(METAL_CXX) $(CXXFLAGS) $^ $(THREAD_FLAGS) $(METAL_FRAMEWORKS) -o $@
 
-$(METAL_DIR)/libqwen35-metal.dylib: $(METAL_OBJ) $(BUILD)/obj/runtime.o $(BUILD)/obj/log.o \
+$(METAL_DIR)/libqwen3x-metal.dylib: $(METAL_OBJ) $(BUILD)/obj/runtime.o $(BUILD)/obj/log.o \
 		$(patsubst %.cpp,$(BUILD)/obj/%.o,$(SPDLOG_SRC))
 	$(METAL_CXX) $(CXXFLAGS) -dynamiclib $^ $(THREAD_FLAGS) $(METAL_FRAMEWORKS) -o $@
 
@@ -183,6 +183,6 @@ clean:
 		$(CUDA_OBJ) $(CUDA_DEP) "$(METAL_PROGRAM)" $(METAL_OBJ) $(METAL_OBJ:.o=.d) \
 		$(BUILD)/metal-test $(BUILD)/obj/tests/metal_test.o $(BUILD)/obj/tests/metal_test.d \
 		$(METAL_DIR)/kernels.air $(METAL_DIR)/kernels.metallib $(METAL_DIR)/kernels_metallib.h \
-		$(METAL_DIR)/libqwen35-metal.dylib
+		$(METAL_DIR)/libqwen3x-metal.dylib
 	$(MAKE) -C scripts clean
 	$(MAKE) -C tests clean

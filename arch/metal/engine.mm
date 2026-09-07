@@ -25,13 +25,13 @@
 #error "The Metal backend targets Apple Silicon Macs"
 #endif
 
-namespace q35_backend {
+namespace q3x_backend {
 
 constexpr int BLOCK = 256, ENCODE_TOKENS = 8;
 struct Linear {
     size_t offset = 0;
     int rows = 0, cols = 0;
-    q35_model::MatrixType type = q35_model::MATRIX_BF16;
+    q3x_model::MatrixType type = q3x_model::MATRIX_BF16;
 };
 struct DeltaWeights {
     Linear qkv, z, a, b, out;
@@ -80,7 +80,7 @@ struct Kernels {
     }
 };
 struct Model {
-    const q35_model::ModelConfig* config = nullptr;
+    const q3x_model::ModelConfig* config = nullptr;
     id<MTLDevice> device;
     id<MTLBuffer> weights;
     Kernels kernels;
@@ -96,13 +96,13 @@ struct Storage {
     id<MTLBuffer> buffer;
     size_t count = 0, used = 0;
     void allocate(id<MTLDevice> device, size_t n) {
-        Q35_ASSERT(n <= device.maxBufferLength / sizeof(float), "Metal buffer too large count=%zu", n);
+        Q3X_ASSERT(n <= device.maxBufferLength / sizeof(float), "Metal buffer too large count=%zu", n);
         buffer = [device newBufferWithLength:n * sizeof(float) options:MTLResourceStorageModeShared];
-        Q35_ASSERT(buffer, "Metal allocation failed count=%zu", n);
+        Q3X_ASSERT(buffer, "Metal allocation failed count=%zu", n);
         count = n;
     }
     size_t take(size_t n) {
-        Q35_ASSERT(used <= count && n <= count - used, "Metal storage used=%zu take=%zu count=%zu", used, n, count);
+        Q3X_ASSERT(used <= count && n <= count - used, "Metal storage used=%zu take=%zu count=%zu", used, n, count);
         const size_t offset = used * sizeof(float); used += n; return offset;
     }
     float* data(size_t offset = 0) const {
@@ -114,7 +114,7 @@ struct Work {
     size_t hidden, normalized, logits, ffn_gate, ffn_up;
     size_t delta_qkv, delta_z, delta_a, delta_b, delta_q, delta_k, delta_output;
     size_t query_and_gate, query, attention_gate, key, value, attention_output;
-    Work(id<MTLDevice> device, const q35_model::ModelConfig& c) {
+    Work(id<MTLDevice> device, const q3x_model::ModelConfig& c) {
         const int DO = c.VH * c.VD, DQKV = 2 * c.KH * c.KD + DO;
         const int AS = c.AH * c.AD, KVW = c.KVH * c.AD;
         storage.allocate(device, 2ull * c.H + c.V + 2ull * c.I + DQKV + 4ull * DO +
@@ -127,12 +127,12 @@ struct Work {
         query_and_gate = storage.take(2 * AS); query = storage.take(AS);
         attention_gate = storage.take(AS); key = storage.take(KVW); value = storage.take(KVW);
         attention_output = storage.take(AS);
-        Q35_ASSERT(storage.used == storage.count, "Metal Work layout mismatch");
+        Q3X_ASSERT(storage.used == storage.count, "Metal Work layout mismatch");
     }
 };
 struct LayerState { size_t conv = 0, memory = 0, key = 0, value = 0; };
 struct State {
-    const q35_model::ModelConfig* config;
+    const q3x_model::ModelConfig* config;
     int position = 0, capacity, checkpoint_position = 0;
     id<MTLCommandQueue> queue;
     std::unique_ptr<LayerState[]> layer;
@@ -141,11 +141,11 @@ struct State {
     State(Model& model, int context) : config(model.config), capacity(context),
                                        work(model.device, *model.config) {
         const auto& c = *config;
-        Q35_ASSERT(c.AD == 256 && c.RD == 64 && c.KH == 16 && c.KD == 128 && c.VD == 128 && c.CK == 4,
+        Q3X_ASSERT(c.AD == 256 && c.RD == 64 && c.KH == 16 && c.KD == 128 && c.VD == 128 && c.CK == 4,
                    "Metal fixed dimensions model=%s", c.name);
         queue = [model.device newCommandQueue];
         layer.reset(new (std::nothrow) LayerState[c.N]);
-        Q35_ASSERT(queue && layer, "Metal State allocation failed");
+        Q3X_ASSERT(queue && layer, "Metal State allocation failed");
         const size_t conv = static_cast<size_t>(2 * c.KH * c.KD + c.VH * c.VD) * (c.CK - 1);
         const size_t memory = static_cast<size_t>(c.VH) * c.KD * c.VD;
         const size_t cache = static_cast<size_t>(context) * c.KVH * c.AD;
@@ -157,7 +157,7 @@ struct State {
                 layer[i].conv = recurrent.take(conv); layer[i].memory = recurrent.take(memory);
             } else { layer[i].key = kv.take(cache); layer[i].value = kv.take(cache); }
         }
-        Q35_ASSERT(recurrent.used == recurrent.count && kv.used == kv.count, "Metal State layout mismatch");
+        Q3X_ASSERT(recurrent.used == recurrent.count && kv.used == kv.count, "Metal State layout mismatch");
         std::memset(recurrent.data(), 0, recurrent.count * sizeof(float));
         std::memset(work.storage.data(work.logits), 0, c.V * sizeof(float));
     }
@@ -177,9 +177,9 @@ void embed(id<MTLComputeCommandEncoder> enc, const Model& model, State& state, i
     [enc setBuffer:state.work.storage.buffer offset:state.work.hidden atIndex:1];
     [enc setBytes:p length:sizeof(p) atIndex:2];
     switch (w.type) {
-    case q35_model::MATRIX_BF16: launch(enc, model.kernels.embed_bf16, (w.cols + BLOCK - 1) / BLOCK); break;
-    case q35_model::MATRIX_Q8_0: launch(enc, model.kernels.embed_q8, (w.cols + BLOCK - 1) / BLOCK); break;
-    case q35_model::MATRIX_Q4_0: launch(enc, model.kernels.embed_q4, (w.cols + BLOCK - 1) / BLOCK); break;
+    case q3x_model::MATRIX_BF16: launch(enc, model.kernels.embed_bf16, (w.cols + BLOCK - 1) / BLOCK); break;
+    case q3x_model::MATRIX_Q8_0: launch(enc, model.kernels.embed_q8, (w.cols + BLOCK - 1) / BLOCK); break;
+    case q3x_model::MATRIX_Q4_0: launch(enc, model.kernels.embed_q4, (w.cols + BLOCK - 1) / BLOCK); break;
     }
 }
 void mv(id<MTLComputeCommandEncoder> enc, const Model& model, id<MTLBuffer> weights, const Linear& w,
@@ -190,9 +190,9 @@ void mv(id<MTLComputeCommandEncoder> enc, const Model& model, id<MTLBuffer> weig
     [enc setBuffer:work.storage.buffer offset:output atIndex:2];
     [enc setBytes:p length:sizeof(p) atIndex:3];
     switch (w.type) {
-    case q35_model::MATRIX_BF16: launch(enc, model.kernels.mv_bf16, w.rows); break;
-    case q35_model::MATRIX_Q8_0: launch(enc, model.kernels.mv_q8, w.rows); break;
-    case q35_model::MATRIX_Q4_0: launch(enc, model.kernels.mv_q4, w.rows); break;
+    case q3x_model::MATRIX_BF16: launch(enc, model.kernels.mv_bf16, w.rows); break;
+    case q3x_model::MATRIX_Q8_0: launch(enc, model.kernels.mv_q8, w.rows); break;
+    case q3x_model::MATRIX_Q4_0: launch(enc, model.kernels.mv_q4, w.rows); break;
     }
 }
 void rms(id<MTLComputeCommandEncoder> enc, const Model& model, id<MTLBuffer> weights,
@@ -290,7 +290,7 @@ void forward(id<MTLComputeCommandEncoder> enc, const Model& model, State& state,
               int token, bool compute_logits) {
     const auto& c = *model.config;
     Work& work = state.work;
-    Q35_ASSERT(token >= 0 && token < c.V && state.position < state.capacity,
+    Q3X_ASSERT(token >= 0 && token < c.V && state.position < state.capacity,
                "Metal forward token=%d position=%d", token, state.position);
     embed(enc, model, state, token);
     for (int i = 0; i < c.N; ++i) {
@@ -316,7 +316,7 @@ bool Model::load(const char* path, const char** error) {
     const int fd = open(path, O_RDONLY);
     if (fd < 0) return fail("cannot open model.bin");
     struct stat info {};
-    if (fstat(fd, &info) || info.st_size < static_cast<off_t>(q35_model::HEADER_SIZE)) {
+    if (fstat(fd, &info) || info.st_size < static_cast<off_t>(q3x_model::HEADER_SIZE)) {
         close(fd); return fail("bad model.bin");
     }
     const size_t size = static_cast<size_t>(info.st_size);
@@ -324,12 +324,12 @@ bool Model::load(const char* path, const char** error) {
     close(fd);
     if (file == MAP_FAILED) return fail("mmap model.bin failed");
     auto mapped_fail = [&](const char* message) { munmap(const_cast<uint8_t*>(file), size); return fail(message); };
-    if (std::memcmp(file, "Q35MODL\0", 8)) return mapped_fail("wrong model.bin magic");
-    config = q35_model::config_for_id(q35_model::header_field(file, q35_model::MODEL_ID));
+    if (std::memcmp(file, "Q3XMODL\0", 8)) return mapped_fail("wrong model.bin magic");
+    config = q3x_model::config_for_id(q3x_model::header_field(file, q3x_model::MODEL_ID));
     if (!config) return mapped_fail("unsupported Qwen model ID");
-    if (!q35_model::header_matches(file, size, *config))
+    if (!q3x_model::header_matches(file, size, *config))
         return mapped_fail("Qwen model.bin header mismatch");
-    size_t cursor = q35_model::HEADER_SIZE, base = 0;
+    size_t cursor = q3x_model::HEADER_SIZE, base = 0;
     auto take = [&](size_t bytes) {
         if (*error) return size_t(0);
         const size_t padding = (64 - cursor % 64) % 64;
@@ -352,13 +352,13 @@ bool Model::load(const char* path, const char** error) {
     };
     const auto& c = *config;
     auto linear = [&](int rows, int cols) {
-        Q35_ASSERT(cols % 32 == 0, "Metal matrix cols=%d", cols);
+        Q3X_ASSERT(cols % 32 == 0, "Metal matrix cols=%d", cols);
         const size_t count = static_cast<size_t>(rows) * cols;
         size_t bytes = count * 2;
-        if (c.matrix_type == q35_model::MATRIX_Q8_0)
-            bytes = count / q35_q8::BLOCK_SIZE * sizeof(q35_q8::Block);
-        else if (c.matrix_type == q35_model::MATRIX_Q4_0)
-            bytes = count / q35_q4::BLOCK_SIZE * sizeof(q35_q4::Block);
+        if (c.matrix_type == q3x_model::MATRIX_Q8_0)
+            bytes = count / q3x_q8::BLOCK_SIZE * sizeof(q3x_q8::Block);
+        else if (c.matrix_type == q3x_model::MATRIX_Q4_0)
+            bytes = count / q3x_q4::BLOCK_SIZE * sizeof(q3x_q4::Block);
         return Linear {take(bytes), rows, cols, c.matrix_type};
     };
     layer.reset(new (std::nothrow) Layer[c.N]);
@@ -412,40 +412,40 @@ Model* model_create(const char* path, char* err, size_t errlen) {
 }
 void model_destroy(Model* model) { delete model; }
 State* state_create(Model* model, int context) {
-    Q35_ASSERT(model && context > 0 && context <= q35_model::MAX_CONTEXT, "Metal context=%d", context);
+    Q3X_ASSERT(model && context > 0 && context <= q3x_model::MAX_CONTEXT, "Metal context=%d", context);
     @autoreleasepool { return new State(*model, context); }
 }
 void state_destroy(State* state) { delete state; }
 void state_reset(State* state) {
-    Q35_ASSERT(state, "Metal reset null"); state->position = 0;
+    Q3X_ASSERT(state, "Metal reset null"); state->position = 0;
     std::memset(state->recurrent.data(), 0, state->recurrent.count * sizeof(float));
 }
 void state_forward(Model* model, State* state, const int* tokens, int count, bool logits) {
-    Q35_ASSERT(model && state && tokens && count > 0, "Metal forward count=%d", count);
+    Q3X_ASSERT(model && state && tokens && count > 0, "Metal forward count=%d", count);
     // Bound command-buffer memory for long prompts. Runtime already splits the
     // range at checkpoint_at; no encoded chunk crosses that boundary.
     for (int start = 0; start < count; start += ENCODE_TOKENS) {
         @autoreleasepool {
             id<MTLCommandBuffer> command = [state->queue commandBuffer];
             id<MTLComputeCommandEncoder> enc = [command computeCommandEncoder];
-            Q35_ASSERT(command && enc, "Metal command allocation failed");
+            Q3X_ASSERT(command && enc, "Metal command allocation failed");
             const int end = std::min(start + ENCODE_TOKENS, count);
             for (int i = start; i < end; ++i) forward(enc, *model, *state, tokens[i], logits && i + 1 == count);
             [enc endEncoding]; [command commit]; [command waitUntilCompleted];
-            Q35_ASSERT(command.status == MTLCommandBufferStatusCompleted, "Metal execution failed: %s",
+            Q3X_ASSERT(command.status == MTLCommandBufferStatusCompleted, "Metal execution failed: %s",
                        command.error ? command.error.localizedDescription.UTF8String : "no error detail");
         }
     }
 }
 void state_checkpoint_save(State* state) {
-    Q35_ASSERT(state, "Metal checkpoint save null");
+    Q3X_ASSERT(state, "Metal checkpoint save null");
     state->checkpoint_position = state->position;
     std::memcpy(state->checkpoint.data(), state->recurrent.data(), state->recurrent.count * sizeof(float));
     std::memcpy(state->checkpoint.data(state->recurrent.count * sizeof(float)),
                 state->work.storage.data(state->work.logits), state->config->V * sizeof(float));
 }
 void state_checkpoint_restore(State* state) {
-    Q35_ASSERT(state && state->checkpoint_position <= state->capacity, "Metal checkpoint restore invalid");
+    Q3X_ASSERT(state && state->checkpoint_position <= state->capacity, "Metal checkpoint restore invalid");
     std::memcpy(state->recurrent.data(), state->checkpoint.data(), state->recurrent.count * sizeof(float));
     std::memcpy(state->work.storage.data(state->work.logits),
                 state->checkpoint.data(state->recurrent.count * sizeof(float)), state->config->V * sizeof(float));
@@ -457,12 +457,12 @@ int state_argmax(const State* state) {
     return static_cast<int>(std::max_element(logits, logits + state->config->V) - logits);
 }
 void state_copy_logits(const State* state, float* output) {
-    Q35_ASSERT(state && output, "Metal copy logits null");
+    Q3X_ASSERT(state && output, "Metal copy logits null");
     std::memcpy(output, state->work.storage.data(state->work.logits), state->config->V * sizeof(float));
 }
-int vocab_size() { return q35_model::QWEN35_08B.V; }
-int max_context() { return q35_model::MAX_CONTEXT; }
+int vocab_size() { return q3x_model::QWEN35_08B.V; }
+int max_context() { return q3x_model::MAX_CONTEXT; }
 bool token_is_stop(int token) { return token == 248044 || token == 248046; }
 uint32_t model_id(const Model* model) { return model->config->id; }
 
-}  // namespace q35_backend
+}  // namespace q3x_backend

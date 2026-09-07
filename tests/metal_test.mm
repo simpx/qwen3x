@@ -6,13 +6,13 @@
 #include <vector>
 #include "internal.h"
 
-#define q35_backend q35_cpu_backend
+#define q3x_backend q3x_cpu_backend
 #include "../engine.cpp"
-#undef q35_backend
+#undef q3x_backend
 #include "../arch/metal/engine.mm"
 
-namespace cpu = q35_cpu_backend;
-namespace gpu = q35_backend;
+namespace cpu = q3x_cpu_backend;
+namespace gpu = q3x_backend;
 
 struct Fixture {
     std::vector<uint8_t> bytes;
@@ -21,7 +21,7 @@ struct Fixture {
     int next() { random = random * 1664525u + 1013904223u; return int(random >> 24) - 128; }
     size_t take(size_t n) {
         const size_t offset = (bytes.size() + 63) / 64 * 64;
-        Q35_ASSERT(offset + n <= bytes.capacity(), "test fixture capacity");
+        Q3X_ASSERT(offset + n <= bytes.capacity(), "test fixture capacity");
         bytes.resize(offset + n); return offset;
     }
     size_t bf16(size_t n) {
@@ -39,12 +39,12 @@ struct Fixture {
         for (size_t i = 0; i < n; ++i) out[i] = value;
         return offset;
     }
-    size_t matrix(int rows, int cols, q35_model::MatrixType type) {
-        if (type == q35_model::MATRIX_BF16) return bf16(size_t(rows) * cols);
+    size_t matrix(int rows, int cols, q3x_model::MatrixType type) {
+        if (type == q3x_model::MATRIX_BF16) return bf16(size_t(rows) * cols);
         const size_t count = size_t(rows) * cols / 32;
-        if (type == q35_model::MATRIX_Q4_0) {
-            const size_t offset = take(count * sizeof(q35_q4::Block));
-            auto* out = reinterpret_cast<q35_q4::Block*>(bytes.data() + offset);
+        if (type == q3x_model::MATRIX_Q4_0) {
+            const size_t offset = take(count * sizeof(q3x_q4::Block));
+            auto* out = reinterpret_cast<q3x_q4::Block*>(bytes.data() + offset);
             for (size_t i = 0; i < count; ++i) {
                 out[i].scale = i % 7 == 0 ? 0 : uint16_t(0x1000 + (i % 4) * 0x0400);
                 for (int j = 0; j < 16; ++j) {
@@ -55,8 +55,8 @@ struct Fixture {
             }
             return offset;
         }
-        const size_t offset = take(count * sizeof(q35_q8::Block));
-        auto* out = reinterpret_cast<q35_q8::Block*>(bytes.data() + offset);
+        const size_t offset = take(count * sizeof(q3x_q8::Block));
+        auto* out = reinterpret_cast<q3x_q8::Block*>(bytes.data() + offset);
         for (size_t i = 0; i < count; ++i) {
             // Different exact FP16 scales, signed values, and zero blocks.
             out[i].scale = i % 7 == 0 ? 0 : uint16_t(0x1000 + (i % 4) * 0x0400);
@@ -64,7 +64,7 @@ struct Fixture {
         }
         return offset;
     }
-    void linear(cpu::Linear& a, gpu::Linear& b, int rows, int cols, q35_model::MatrixType type) {
+    void linear(cpu::Linear& a, gpu::Linear& b, int rows, int cols, q3x_model::MatrixType type) {
         const size_t offset = matrix(rows, cols, type);
         a = {bytes.data() + offset, rows, cols, type}; b = {offset, rows, cols, type};
     }
@@ -74,7 +74,7 @@ struct Fixture {
     void floats(const float*& a, size_t& b, size_t n, float value) {
         b = fp32(n, value); a = reinterpret_cast<const float*>(bytes.data() + b);
     }
-    void build(cpu::Model& a, gpu::Model& b, const q35_model::ModelConfig& c) {
+    void build(cpu::Model& a, gpu::Model& b, const q3x_model::ModelConfig& c) {
         a.config = b.config = &c;
         a.layer.reset(new cpu::Layer[c.N]); b.layer.reset(new gpu::Layer[c.N]);
         const int AS = c.AH * c.AD, KVW = c.KVH * c.AD, DO = c.VH * c.VD;
@@ -110,7 +110,7 @@ struct Fixture {
             linear(x.down, y.down, c.H, c.I, c.matrix_type);
         }
         b.weights = [b.device newBufferWithBytes:bytes.data() length:bytes.size() options:MTLResourceStorageModeShared];
-        Q35_ASSERT(b.weights, "test weight allocation");
+        Q3X_ASSERT(b.weights, "test weight allocation");
         for (int i = 0; i < c.N; ++i) b.layer[i].weights = b.weights;
     }
 };
@@ -120,13 +120,13 @@ void compare(const float* a, const float* b, size_t n, const char* name) {
     for (size_t i = 0; i < n; ++i) {
         const float error = std::fabs(a[i] - b[i]);
         maximum = std::max(maximum, error);
-        Q35_ASSERT(std::isfinite(a[i]) && std::isfinite(b[i]) && error <= 2e-4f + 2e-4f * std::fabs(a[i]),
+        Q3X_ASSERT(std::isfinite(a[i]) && std::isfinite(b[i]) && error <= 2e-4f + 2e-4f * std::fabs(a[i]),
                    "%s index=%zu cpu=%g metal=%g error=%g", name, i, a[i], b[i], error);
     }
     std::printf("  %s: max_abs_error=%g\n", name, maximum);
 }
 void compare_state(const cpu::State& a, const gpu::State& b) {
-    Q35_ASSERT(a.position == b.position, "position mismatch");
+    Q3X_ASSERT(a.position == b.position, "position mismatch");
     compare(a.work.logits, b.work.storage.data(b.work.logits), a.config->V, "logits");
     compare(a.recurrent.data.get(), b.recurrent.data(), a.recurrent.count, "recurrent");
     const size_t used = size_t(a.position) * a.config->KVH * a.config->AD;
@@ -145,7 +145,7 @@ void check_delta_decay(gpu::Model& model) {
     for (int h = 0; h < heads; ++h) q[h * KD] = 1.0f;
     auto buffer = [&](const void* data, size_t bytes) {
         id<MTLBuffer> result = [model.device newBufferWithBytes:data length:bytes options:MTLResourceStorageModeShared];
-        Q35_ASSERT(result, "delta decay test allocation"); return result;
+        Q3X_ASSERT(result, "delta decay test allocation"); return result;
     };
     id<MTLBuffer> qb = buffer(q.data(), q.size() * 4), kb = buffer(k.data(), k.size() * 4);
     id<MTLBuffer> vb = buffer(v.data(), v.size() * 4), ab = buffer(a, sizeof(a)), bb = buffer(b, sizeof(b));
@@ -154,7 +154,7 @@ void check_delta_decay(gpu::Model& model) {
     id<MTLCommandQueue> queue = [model.device newCommandQueue];
     id<MTLCommandBuffer> command = [queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [command computeCommandEncoder];
-    Q35_ASSERT(queue && command && enc, "delta decay test command allocation");
+    Q3X_ASSERT(queue && command && enc, "delta decay test command allocation");
     [enc setBuffer:qb offset:0 atIndex:0]; [enc setBuffer:kb offset:0 atIndex:1];
     [enc setBuffer:vb offset:0 atIndex:2]; [enc setBuffer:ab offset:0 atIndex:3];
     [enc setBuffer:bb offset:0 atIndex:4]; [enc setBuffer:alb offset:0 atIndex:5];
@@ -162,7 +162,7 @@ void check_delta_decay(gpu::Model& model) {
     [enc setBuffer:out offset:0 atIndex:8];
     gpu::launch(enc, model.kernels.delta_rule, heads);
     [enc endEncoding]; [command commit]; [command waitUntilCompleted];
-    Q35_ASSERT(command.status == MTLCommandBufferStatusCompleted, "delta decay test execution failed");
+    Q3X_ASSERT(command.status == MTLCommandBufferStatusCompleted, "delta decay test execution failed");
     for (int h = 0; h < heads; ++h)
         cpu::delta_rule(q.data() + h * KD, k.data() + h * KD, v.data() + h * VD,
                         -std::exp(alog[h]) * cpu::softplus(a[h]), 0.5f,
@@ -170,21 +170,21 @@ void check_delta_decay(gpu::Model& model) {
     compare(expected.data(), static_cast<const float*>(out.contents), expected.size(), "softplus/Delta decay tails");
     compare(memory.data(), static_cast<const float*>(state.contents), memory.size(), "Delta decay state");
 }
-void run(id<MTLDevice> device, q35_model::MatrixType type) {
-    const q35_model::ModelConfig config = {
+void run(id<MTLDevice> device, q3x_model::MatrixType type) {
+    const q3x_model::ModelConfig config = {
         800, "synthetic-metal-smoke", 64, 96, 160, 4, 4, 8, 2, 256, 64,
-        16, type == q35_model::MATRIX_BF16 ? 16 : 32, 128, 128, 4,
-        type, type == q35_model::MATRIX_BF16,
+        16, type == q3x_model::MATRIX_BF16 ? 16 : 32, 128, 128, 4,
+        type, type == q3x_model::MATRIX_BF16,
     };
     Fixture fixture;
     cpu::Model a; gpu::Model b; b.device = device;
     const char* error = nullptr;
-    Q35_ASSERT(b.kernels.load(device, &error), "Metal pipelines: %s", error);
-    if (type == q35_model::MATRIX_BF16) check_delta_decay(b);
+    Q3X_ASSERT(b.kernels.load(device, &error), "Metal pipelines: %s", error);
+    if (type == q3x_model::MATRIX_BF16) check_delta_decay(b);
     fixture.build(a, b, config);
     cpu::State ac(config, 17); gpu::State bc(b, 17);
-    const char* type_name = type == q35_model::MATRIX_BF16 ? "BF16"
-                          : type == q35_model::MATRIX_Q8_0 ? "Q8_0" : "Q4_0";
+    const char* type_name = type == q3x_model::MATRIX_BF16 ? "BF16"
+                          : type == q3x_model::MATRIX_Q8_0 ? "Q8_0" : "Q4_0";
     std::printf("Metal %s complete forward/state\n", type_name);
     const int tokens[] = {1, 7, 3, 16, 2, 5, 9, 11, 23, 4};
     for (int i = 0; i < 3; ++i) {
@@ -206,7 +206,7 @@ void run(id<MTLDevice> device, q35_model::MatrixType type) {
     cpu::state_forward(&a, &ac, tokens, 10, true);
     gpu::state_forward(&b, &bc, tokens, 10, true);
     compare_state(ac, bc);
-    Q35_ASSERT(cpu::state_argmax(&ac) == gpu::state_argmax(&bc), "argmax mismatch");
+    Q3X_ASSERT(cpu::state_argmax(&ac) == gpu::state_argmax(&bc), "argmax mismatch");
 }
 
 int main() {
@@ -217,9 +217,9 @@ int main() {
             return 77;
         }
         std::printf("Metal device: %s\n", device.name.UTF8String);
-        run(device, q35_model::MATRIX_BF16);
-        run(device, q35_model::MATRIX_Q8_0);
-        run(device, q35_model::MATRIX_Q4_0);
+        run(device, q3x_model::MATRIX_BF16);
+        run(device, q3x_model::MATRIX_Q8_0);
+        run(device, q3x_model::MATRIX_Q4_0);
         std::puts("metal-test: ok");
     }
 }

@@ -54,7 +54,7 @@ def main():
             capture_output=True, text=True, check=False,
         )
         assert from_path.returncode == 0, from_path.stderr
-        log_file = os.path.join(directory, "qwen35.log")
+        log_file = os.path.join(directory, "qwen3x.log")
         logged = subprocess.run(
             [args.program, "--chat", "hello", "--max-tokens", "1",
              "--session-context", "256", "--mock", "--log-level", "info",
@@ -120,7 +120,12 @@ def main():
         status, _, data = request(port, "GET", "/v1/models")
         assert status == 200
         served_model = json.loads(data)["data"][0]["id"]
-        assert served_model in ("qwen3.5-0.8b", "qwen3.5-4b", "qwen3.5-9b")
+        assert served_model in (
+            "qwen3.5-0.8b",
+            "qwen3.5-4b",
+            "qwen3.5-9b",
+            "qwen3.8-27b",
+        )
 
         body = {
             "model": served_model,

@@ -6,13 +6,13 @@
 - 系统：macOS 26.3.2，Apple Clang 21.0。
 - 官方权重：`Qwen/Qwen3.5-9B` revision
   `c202236235762e1c871ad0ccb60c8ee5ba337b9a`。
-- qwen3x model bin：`build/qwen35-9b-q8_0-model.bin`，9,514,418,816 bytes
+- Qwen3.5-9B model bin：`build/qwen35-9b-q8_0-model.bin`，9,514,418,816 bytes
   （8.861 GiB），SHA-256
   `bdcc3beb2e94d161142cb96c1b0ec1bc3b87ca3ec3b944f6f3fc3983ae9893b7`。
 
-本次验收显式使用原生 CPU binary `build/qwen35`。CPU Q8_0 dot 使用 Arm NEON，大矩阵
+本次验收显式使用原生 CPU binary `build/qwen3x`。CPU Q8_0 dot 使用 Arm NEON，大矩阵
 按行通过系统线程池并行。后续加入 Metal backend 后，Darwin 上的 `make serve-9b` 和
-`make serve-eval-9b` 已改为自动使用 `build/qwen35-metal`；本文只记录 Metal 之前的 CPU
+`make serve-eval-9b` 已改为自动使用 `build/qwen3x-metal`；本文只记录 Metal 之前的 CPU
 容量、正确性和性能基线。
 
 ## 容量与性能
@@ -33,7 +33,7 @@ swap                     0
 机器有充足余量，24 GB 是保守的最低建议。warm Session benchmark：
 
 ```text
-./build/qwen35 --model build/qwen35-9b-q8_0-model.bin \
+./build/qwen3x --model build/qwen35-9b-q8_0-model.bin \
   --bench 64 16 --session-context 65536
 prefill 64: 5.865 s, 10.912 tok/s
 decode 16:  1.604 s,  9.973 tok/s

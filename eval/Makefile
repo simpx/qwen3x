@@ -17,7 +17,7 @@ BIN ?= build/qwen35-4b-model.bin
 
 EVAL_DATASET ?= mmlu_pro
 EVAL_MODEL ?= qwen3.5-4b
-EVAL_BACKEND ?= qwen35
+EVAL_BACKEND ?= qwen3x
 EVAL_ARTIFACT ?= $(BIN)
 EVAL_LIMIT ?=
 EVAL_THINKING ?= 0

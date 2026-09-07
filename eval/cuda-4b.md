@@ -7,7 +7,7 @@
 - model bin：BF16，7.83 GiB
 - GPU：RTX 4080 SUPER 16 GiB
 - CUDA：12.8，compute capability 8.9
-- binary：`build/qwen35-cuda --model build/qwen35-4b-model.bin`
+- binary：`build/qwen3x-cuda --model build/qwen35-4b-model.bin`
 - Session：1 slot，40960 context
 
 4B shape 记录在 model.bin v2 header，并由运行时 model ID 和固定 shape 校验。prefill
@@ -24,7 +24,7 @@ special-token prefill；checkpoint restore 自一致误差不超过 5e-5。契�
 `reference/README.md`。
 
 优化后的 qwen3x 固定 agent eval 原始结果位于本机忽略目录：
-`eval/results/agent/stage4-20260831/qwen3x-4b-cublas-run1/`。inspect、review、bugfix
+`eval/results/agent/stage4-20260831/qwen35-4b-cublas-run1/`。inspect、review、bugfix
 均通过，且没有工具协议错误。
 
 ## 4K benchmark
@@ -32,7 +32,7 @@ special-token prefill；checkpoint restore 自一致误差不超过 5e-5。契�
 命令：
 
 ```sh
-./build/qwen35-cuda --model build/qwen35-4b-model.bin \
+./build/qwen3x-cuda --model build/qwen35-4b-model.bin \
   --bench 4096 32 --session-context 40960
 ```
 

@@ -56,7 +56,7 @@ make serve-27b
 - `arch/metal/engine.mm` 负责 Metal device、buffer、pipeline、command queue 和调度。
 - `arch/metal/kernels.metal` 负责模型数学和 GPU kernel。
 - shader 编译后嵌入最终 executable；部署不依赖外部 `.metallib`。
-- 保持一个 `qwen35` C++ 程序完成 CLI、HTTP、render、runtime、sampling 和推理。
+- 保持一个 `qwen3x` C++ 程序完成 CLI、HTTP、render、runtime、sampling 和推理。
 - Linux/CUDA 和通用 CPU 路径保留，不因 macOS 适配删除或分叉公共数据流。
 
 本轮不链接或嵌入 MLX。MLX 不作为 build dependency、runtime dependency、模型格式或
@@ -153,7 +153,7 @@ Metal compiler 门禁失败时停止 GPU 主线并报告。不能把已有 CI �
 
 ### 1. 0.8B CPU baseline
 
-- 准备 0.8B model/render，构建 `build/qwen35`。
+- 准备 0.8B model/render，构建 `build/qwen3x`。
 - 运行完整基础测试、render test 和 HTTP test。
 - 用 CPU 跑 CLI prompt、prefill/decode、checkpoint restore、cache hit 和 reset。
 - 保存 `--bench 128 32`、`--bench 512 64` 基线。
@@ -161,7 +161,7 @@ Metal compiler 门禁失败时停止 GPU 主线并报告。不能把已有 CI �
 
 ### 2. Metal primitive 和 0.8B correctness
 
-- 编译并嵌入 `kernels.metallib`，生成 `build/qwen35-metal`。
+- 编译并嵌入 `kernels.metallib`，生成 `build/qwen3x-metal`。
 - `MTL_DEBUG_LAYER=1 make metal-test` 必须在真实 Apple GPU 上通过。
 - 运行 `make metal-reference` 和 `make metal-smoke`。
 - 对齐完整 logits、top-k、argmax、recurrent state、KV、multi-token prefill、checkpoint restore、
@@ -364,8 +364,8 @@ experimental 标记。
 
 ## 最终产物
 
-- `build/qwen35`：macOS CPU baseline。
-- `build/qwen35-metal`：嵌入 shader 的 Apple Silicon executable。
+- `build/qwen3x`：macOS CPU baseline。
+- `build/qwen3x-metal`：嵌入 shader 的 Apple Silicon executable。
 - `build/qwen35-4b-model.bin`：4B BF16。
 - `build/qwen35-9b-q8_0-model.bin`：9B Q8_0。
 - 可选 `build/qwen38-27b-q8_0-model.bin`：27B Q8_0 stretch。

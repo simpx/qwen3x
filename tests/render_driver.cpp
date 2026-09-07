@@ -7,9 +7,9 @@
 
 #include "render.h"
 
-using q35_render::ChatRequest;
-using q35_render::Renderer;
-using q35_render::parse_chat_request;
+using q3x_render::ChatRequest;
+using q3x_render::Renderer;
+using q3x_render::parse_chat_request;
 
 namespace {
 
@@ -101,9 +101,9 @@ int main(int argc, char** argv) {
         std::string line;
         while (std::getline(std::cin, line)) {
             ChatRequest request;
-            const q35_render::Status status = parse_chat_request(line, request);
+            const q3x_render::Status status = parse_chat_request(line, request);
             if (!status.ok()) return report(status.message());
-            q35_render::RenderedPrompt rendered;
+            q3x_render::RenderedPrompt rendered;
             if (!renderer->render(request, &rendered, &error)) {
                 return report(error);
             }
@@ -115,9 +115,9 @@ int main(int argc, char** argv) {
             std::istreambuf_iterator<char>()
         };
         ChatRequest request;
-        const q35_render::Status status = parse_chat_request(input, request);
+        const q3x_render::Status status = parse_chat_request(input, request);
         if (!status.ok()) return report(status.message());
-        q35_render::RenderedPrompt rendered;
+        q3x_render::RenderedPrompt rendered;
         if (!renderer->render(request, &rendered, &error)) return report(error);
         if (mode == "chat") std::cout << rendered.text;
         else print_tokens(rendered.tokens);

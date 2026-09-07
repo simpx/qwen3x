@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <cstring>
 
-namespace q35_model {
+namespace q3x_model {
 
 constexpr size_t HEADER_PREFIX_SIZE = 8;
 constexpr size_t CONFIG_FIELD_COUNT = 16;
@@ -124,6 +124,6 @@ inline bool header_matches(const uint8_t* data, size_t size,
     return true;
 }
 
-}  // namespace q35_model
+}  // namespace q3x_model
 
 #endif

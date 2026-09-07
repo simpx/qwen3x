@@ -4,7 +4,7 @@
 `scripts/agent.py` 工具和消息循环比较模型或后端。runner 每次把 fixture 复制到临时 Git
 仓库，因此 review 和 bugfix 不会修改 qwen3x 工作区。
 
-启动 qwen35 后运行：
+启动 qwen3x 后运行：
 
 ```sh
 python3 scripts/agent_eval.py all
@@ -25,7 +25,7 @@ trace 包含 prompt、fixture 代码和工具输出，只能用于本地开发�
 
 ## pi 本地模型配置
 
-pi 从 `~/.pi/agent/models.json` 读取 OpenAI-compatible 自定义模型。qwen35 的最小配置是：
+pi 从 `~/.pi/agent/models.json` 读取 OpenAI-compatible 自定义模型。qwen3x 的最小配置是：
 
 ```json
 {
@@ -60,6 +60,6 @@ pi 从 `~/.pi/agent/models.json` 读取 OpenAI-compatible 自定义模型。qwen
 }
 ```
 
-`apiKey` 是让 pi 启用本地 provider 的占位值。如果 qwen35 通过 `QWEN_API_KEY` 启动，二者
+`apiKey` 是让 pi 启用本地 provider 的占位值。如果 qwen3x 通过 `QWEN_API_KEY` 启动，二者
 应使用相同的真实值。固定 agent eval 仍显式关闭 thinking，避免能力比较混入不同推理预算；
 pi 日常使用则按模型默认行为打开 thinking。

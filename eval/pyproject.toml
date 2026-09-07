@@ -1,7 +1,7 @@
 [project]
-name = "qwen35-eval"
+name = "qwen3x-eval"
 version = "0.1.0"
-description = "Reproducible EvalScope benchmarks for qwen35-0.8b"
+description = "Reproducible EvalScope benchmarks for Qwen3.5-0.8B"
 requires-python = ">=3.10"
 dependencies = [
     "evalscope[ifeval]==1.10.0",

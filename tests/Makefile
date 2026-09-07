@@ -12,9 +12,9 @@ endif
 SYSTEM_PYTHON ?= python3
 PI ?= pi
 
-PROGRAM ?= $(BUILD)/qwen35
+PROGRAM ?= $(BUILD)/qwen3x
 CHECKPOINT ?= $(BUILD)/models/Qwen3.5-0.8B
-RENDER_BIN ?= $(BUILD)/qwen35-0.8b-render.bin
+RENDER_BIN ?= $(BUILD)/qwen3x-render.bin
 PARSER_TEST ?= $(BUILD)/parser-test
 RUNTIME_TEST ?= $(BUILD)/runtime-test
 Q8_CPU_TEST ?= $(BUILD)/q8-cpu-test
@@ -28,7 +28,8 @@ THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 SPDLOG_SRC := $(wildcard $(PROJECT)/third_party/spdlog/src/*.cpp)
 
 .PHONY: test parser-test runtime-test q8-cpu-test cli-test chat-test agent-test \
-	pack-test metal-tools-test bench-test render-test http-test pi-retry-test clean
+	pack-test metal-tools-test bench-test render-test render-test-27b http-test \
+	pi-retry-test clean
 
 test: parser-test runtime-test q8-cpu-test cli-test chat-test agent-test \
 	pack-test metal-tools-test bench-test
@@ -47,7 +48,7 @@ parser-test: $(PARSER_TEST)
 	$(PARSER_TEST)
 
 $(RUNTIME_TEST): runtime_test.cpp $(PROJECT)/engine.cpp $(PROJECT)/runtime.cpp \
-		$(PROJECT)/log.cpp $(PROJECT)/qwen35.h $(PROJECT)/internal.h \
+		$(PROJECT)/log.cpp $(PROJECT)/qwen3x.h $(PROJECT)/internal.h \
 		$(PROJECT)/model_config.h $(SPDLOG_SRC)
 	mkdir -p "$(BUILD)"
 	$(CXX) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) -I$(PROJECT) \
@@ -101,7 +102,15 @@ $(RENDER_BIN):
 
 render-test: $(RENDER_BIN) $(RENDER_DRIVER)
 	cd "$(PROJECT)" && \
-		TOKENIZER="$(CHECKPOINT)" RENDER_BIN="$(RENDER_BIN)" \
+		TOKENIZER="$(CHECKPOINT)" \
+		RENDER_BIN="$(RENDER_BIN)" \
+		RENDER_TEST="$(RENDER_DRIVER)" \
+		$(PYTHON) -m unittest -v tests.test_render
+
+render-test-27b: $(RENDER_BIN) $(RENDER_DRIVER)
+	cd "$(PROJECT)" && \
+		TOKENIZER="$(BUILD)/models/Qwen3.8-27B" \
+		RENDER_BIN="$(RENDER_BIN)" \
 		RENDER_TEST="$(RENDER_DRIVER)" \
 		$(PYTHON) -m unittest -v tests.test_render
 
