@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pack a supported official Qwen3.5 text backbone.
+"""Pack a supported official Qwen3.5/Qwen3.8 text backbone.
 
 The output is a deliberately small sequential format: a fixed metadata header
 followed by tensors in the exact order consumed by engine.cpp. The 4B
@@ -10,6 +10,7 @@ open and streams tensors without loading the model into RAM.
 import argparse
 from contextlib import ExitStack
 import json
+import math
 import struct
 from pathlib import Path
 
@@ -17,15 +18,20 @@ import numpy as np
 
 ALIGNMENT = 64
 MAGIC = b"Q35MODL\0"
-FORMAT_VERSION = 2
-HEADER = struct.Struct("<8sII16I")
+HEADER = struct.Struct("<8s16I")
 MAX_CONTEXT = 262144
 Q8_BLOCK_SIZE = 32
+Q4_BLOCK_SIZE = 32
 Q8_DTYPE = np.dtype([
     ("scale", "<f2"),
     ("values", "i1", (Q8_BLOCK_SIZE,)),
 ], align=False)
 assert Q8_DTYPE.itemsize == 34
+Q4_DTYPE = np.dtype([
+    ("scale", "<f2"),
+    ("values", "u1", (Q4_BLOCK_SIZE // 2,)),
+], align=False)
+assert Q4_DTYPE.itemsize == 18
 
 SUPPORTED_MODELS = (
     {
@@ -61,6 +67,18 @@ SUPPORTED_MODELS = (
         "linear_conv_kernel_dim": 4,
         "matrix_type": "Q8_0", "tie_word_embeddings": False,
     },
+    {
+        "name": "Qwen3.8-27B", "model_id": 38027,
+        "vocab_size": 248320, "hidden_size": 5120,
+        "intermediate_size": 17408, "num_hidden_layers": 64,
+        "full_attention_interval": 4, "num_attention_heads": 24,
+        "num_key_value_heads": 4, "head_dim": 256, "rotary_dim": 64,
+        "linear_num_key_heads": 16, "linear_num_value_heads": 48,
+        "linear_key_head_dim": 128, "linear_value_head_dim": 128,
+        "linear_conv_kernel_dim": 4,
+        "matrix_type": "Q4_0", "tie_word_embeddings": False,
+        "output_gate_type": "swish", "delta_parameter_dtype": "BF16",
+    },
 )
 
 
@@ -86,19 +104,65 @@ def select_model(text_config, tie_word_embeddings=None):
             "max_position_embeddings": MAX_CONTEXT,
             "tie_word_embeddings": model["tie_word_embeddings"],
             "dtype": "bfloat16",
+            "attn_output_gate": True,
         }
         actual_tie = text_config.get("tie_word_embeddings", tie_word_embeddings)
         matches = all(
             (actual_tie if key == "tie_word_embeddings" else text_config.get(key)) == value
             for key, value in contract.items()
         )
+        matches = matches and (
+            text_config.get("output_gate_type", "silu") ==
+            model.get("output_gate_type", "silu")
+        )
         if matches:
             partial = rope.get("partial_rotary_factor")
             if partial == model["rotary_dim"] / model["head_dim"]:
                 return model
     raise ValueError(
-        "only official Qwen3.5-0.8B, Qwen3.5-4B and Qwen3.5-9B "
+        "only official Qwen3.5-0.8B/4B/9B and Qwen3.8-27B "
         "text configurations are supported"
+    )
+
+
+def storage_layout(model, tensors=None):
+    """Return exact parameter/storage totals for the fixed sequential schema."""
+    cursor = HEADER.size
+    parameters = 0
+    layer_start = None
+    layer_sizes = []
+    current_layer = None
+    schema = tensors if tensors is not None else expected_tensors(model)
+    for name, dtype, shape, matrix in schema:
+        layer_text = name.split("model.language_model.layers.", 1)
+        layer = int(layer_text[1].split(".", 1)[0]) if len(layer_text) == 2 else None
+        if layer != current_layer:
+            if current_layer is not None:
+                layer_sizes.append(cursor - layer_start)
+            current_layer = layer
+            layer_start = cursor if layer is not None else None
+        cursor += (-cursor) % ALIGNMENT
+        count = math.prod(shape)
+        parameters += count
+        if matrix and model["matrix_type"] == "Q8_0":
+            cursor += count // Q8_BLOCK_SIZE * Q8_DTYPE.itemsize
+        elif matrix and model["matrix_type"] == "Q4_0":
+            cursor += count // Q4_BLOCK_SIZE * Q4_DTYPE.itemsize
+        else:
+            cursor += count * (2 if dtype == "BF16" else 4)
+    if current_layer is not None:
+        layer_sizes.append(cursor - layer_start)
+    return {"parameters": parameters, "model_bytes": cursor,
+            "layer_bytes": tuple(layer_sizes)}
+
+
+def print_storage_layout(model, tensors=None):
+    layout = storage_layout(model, tensors)
+    layers = layout["layer_bytes"]
+    print(
+        f"layout {model['name']}: text_parameters={layout['parameters']} "
+        f"model_bytes={layout['model_bytes']} ({layout['model_bytes'] / 2**30:.2f} GiB) "
+        f"layers={len(layers)} max_layer_bytes={max(layers, default=0)}"
     )
 
 
@@ -165,6 +229,13 @@ def expected_tensors(model):
         yield layer_prefix + "mlp.down_proj.weight", "BF16", (hidden, intermediate), True
 
 
+def checkpoint_dtype(model, name, packed_dtype):
+    """Return the official checkpoint dtype for one packed tensor."""
+    if packed_dtype == "F32" and ".linear_attn." in name:
+        return model.get("delta_parameter_dtype", "F32")
+    return packed_dtype
+
+
 def quantize_q8_0(data):
     """Convert little-endian BF16 rows, already split on 32-value blocks."""
     if len(data) % (Q8_BLOCK_SIZE * 2):
@@ -184,6 +255,31 @@ def quantize_q8_0(data):
     blocks = np.empty(scale.size, dtype=Q8_DTYPE)
     blocks["scale"] = scale.astype("<f2")
     blocks["values"] = quants
+    return blocks.tobytes()
+
+
+def quantize_q4_0(data):
+    """Convert little-endian BF16 rows to ggml-compatible Q4_0 blocks."""
+    if len(data) % (Q4_BLOCK_SIZE * 2):
+        raise ValueError("Q4_0 input does not contain complete 32-value blocks")
+    bits = np.frombuffer(data, dtype="<u2").astype("<u4")
+    bits <<= 16
+    values = bits.view("<f4").reshape(-1, Q4_BLOCK_SIZE)
+    if not np.isfinite(values).all():
+        raise ValueError("Q4_0 input contains non-finite weight")
+
+    largest = np.argmax(np.abs(values), axis=1)
+    maximum = values[np.arange(values.shape[0]), largest]
+    scale = maximum / np.float32(-8.0)
+    inverse = np.zeros_like(scale)
+    np.divide(np.float32(1.0), scale, out=inverse, where=scale != 0)
+    normalized = values * inverse[:, None]
+    quants = np.minimum(15, np.trunc(normalized + np.float32(8.5)))
+    quants = quants.astype(np.uint8)
+    packed = quants[:, :16] | (quants[:, 16:] << 4)
+    blocks = np.empty(scale.size, dtype=Q4_DTYPE)
+    blocks["scale"] = scale.astype("<f2")
+    blocks["values"] = packed
     return blocks.tobytes()
 
 
@@ -215,16 +311,19 @@ class SafetensorsShard:
     def __exit__(self, *_):
         self.file.close()
 
-    def copy_tensor(self, name, dtype, shape, quantized, output):
+    def copy_tensor(self, name, dtype, shape, quantized, output,
+                    source_dtype=None):
         info = self.header.get(name)
         if info is None:
             raise ValueError(f"{name}: absent from {self.path.name}")
-        if info["dtype"] != dtype or tuple(info["shape"]) != shape:
+        source_dtype = source_dtype or dtype
+        if info["dtype"] != source_dtype or tuple(info["shape"]) != shape:
             raise ValueError(
-                f"{name}: expected {dtype} {shape}, got {info['dtype']} {tuple(info['shape'])}"
+                f"{name}: expected {source_dtype} {shape}, "
+                f"got {info['dtype']} {tuple(info['shape'])}"
             )
         start, end = info["data_offsets"]
-        item_size = 2 if dtype == "BF16" else 4
+        item_size = 2 if source_dtype == "BF16" else 4
         expected_bytes = item_size
         for dimension in shape:
             expected_bytes *= dimension
@@ -233,8 +332,10 @@ class SafetensorsShard:
 
         self.file.seek(self.data_start + start)
         if quantized:
-            if dtype != "BF16" or len(shape) != 2 or shape[1] % Q8_BLOCK_SIZE:
-                raise ValueError(f"{name}: invalid Q8_0 matrix shape {shape}")
+            if (quantized not in ("Q8_0", "Q4_0") or
+                    source_dtype != "BF16" or dtype != "BF16" or
+                    len(shape) != 2 or shape[1] % Q8_BLOCK_SIZE):
+                raise ValueError(f"{name}: invalid {quantized} matrix shape {shape}")
             row_bytes = shape[1] * 2
             rows_per_chunk = max(1, (8 * 1024 * 1024) // row_bytes)
             for row in range(0, shape[0], rows_per_chunk):
@@ -242,7 +343,22 @@ class SafetensorsShard:
                 block = self.file.read(count * row_bytes)
                 if len(block) != count * row_bytes:
                     raise ValueError(f"{name}: truncated {self.path.name}")
-                output.write(quantize_q8_0(block))
+                output.write(
+                    quantize_q4_0(block) if quantized == "Q4_0"
+                    else quantize_q8_0(block)
+                )
+            return
+        if source_dtype != dtype:
+            if source_dtype != "BF16" or dtype != "F32":
+                raise ValueError(
+                    f"{name}: unsupported {source_dtype} -> {dtype} conversion"
+                )
+            data = self.file.read(end - start)
+            if len(data) != end - start:
+                raise ValueError(f"{name}: truncated {self.path.name}")
+            bits = np.frombuffer(data, dtype="<u2").astype("<u4")
+            bits <<= 16
+            output.write(bits.view("<f4").tobytes())
             return
         remaining = end - start
         while remaining:
@@ -265,6 +381,7 @@ def pack(checkpoint_dir, output_path):
     missing = {name for name, _, _, _ in expected} - weight_map.keys()
     if missing:
         raise ValueError("checkpoint misses text tensors: " + ", ".join(sorted(missing)[:3]))
+    print_storage_layout(model, expected)
 
     shard_names = sorted({weight_map[name] for name, _, _, _ in expected})
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -275,12 +392,15 @@ def pack(checkpoint_dir, output_path):
                 name: stack.enter_context(SafetensorsShard(checkpoint_dir / name))
                 for name in shard_names
             }
-            output.write(HEADER.pack(MAGIC, FORMAT_VERSION, 0, *header_values(model)))
+            output.write(HEADER.pack(MAGIC, *header_values(model)))
             for number, (name, dtype, shape, matrix) in enumerate(expected, 1):
                 pad_to_alignment(output)
-                quantized = matrix and model["matrix_type"] == "Q8_0"
+                quantized = (model["matrix_type"]
+                             if matrix and model["matrix_type"] != "BF16"
+                             else None)
                 shards[weight_map[name]].copy_tensor(
-                    name, dtype, shape, quantized, output)
+                    name, dtype, shape, quantized, output,
+                    checkpoint_dtype(model, name, dtype))
                 print(f"\r[{number:3}/{len(expected)}] {name}", end="", flush=True)
         print()
         temporary.replace(output_path)

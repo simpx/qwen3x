@@ -42,6 +42,19 @@ struct Fixture {
     size_t matrix(int rows, int cols, q35_model::MatrixType type) {
         if (type == q35_model::MATRIX_BF16) return bf16(size_t(rows) * cols);
         const size_t count = size_t(rows) * cols / 32;
+        if (type == q35_model::MATRIX_Q4_0) {
+            const size_t offset = take(count * sizeof(q35_q4::Block));
+            auto* out = reinterpret_cast<q35_q4::Block*>(bytes.data() + offset);
+            for (size_t i = 0; i < count; ++i) {
+                out[i].scale = i % 7 == 0 ? 0 : uint16_t(0x1000 + (i % 4) * 0x0400);
+                for (int j = 0; j < 16; ++j) {
+                    const uint8_t low = static_cast<uint8_t>(next()) & 15;
+                    const uint8_t high = static_cast<uint8_t>(next()) & 15;
+                    out[i].values[j] = low | (high << 4);
+                }
+            }
+            return offset;
+        }
         const size_t offset = take(count * sizeof(q35_q8::Block));
         auto* out = reinterpret_cast<q35_q8::Block*>(bytes.data() + offset);
         for (size_t i = 0; i < count; ++i) {
@@ -170,7 +183,9 @@ void run(id<MTLDevice> device, q35_model::MatrixType type) {
     if (type == q35_model::MATRIX_BF16) check_delta_decay(b);
     fixture.build(a, b, config);
     cpu::State ac(config, 17); gpu::State bc(b, 17);
-    std::printf("Metal %s complete forward/state\n", type == q35_model::MATRIX_BF16 ? "BF16" : "Q8_0");
+    const char* type_name = type == q35_model::MATRIX_BF16 ? "BF16"
+                          : type == q35_model::MATRIX_Q8_0 ? "Q8_0" : "Q4_0";
+    std::printf("Metal %s complete forward/state\n", type_name);
     const int tokens[] = {1, 7, 3, 16, 2, 5, 9, 11, 23, 4};
     for (int i = 0; i < 3; ++i) {
         cpu::state_forward(&a, &ac, tokens + i, 1, true);
@@ -204,6 +219,7 @@ int main() {
         std::printf("Metal device: %s\n", device.name.UTF8String);
         run(device, q35_model::MATRIX_BF16);
         run(device, q35_model::MATRIX_Q8_0);
+        run(device, q35_model::MATRIX_Q4_0);
         std::puts("metal-test: ok");
     }
 }

@@ -7,8 +7,7 @@
 
 namespace q35_model {
 
-constexpr uint32_t FORMAT_VERSION = 2;
-constexpr size_t HEADER_PREFIX_SIZE = 16;
+constexpr size_t HEADER_PREFIX_SIZE = 8;
 constexpr size_t CONFIG_FIELD_COUNT = 16;
 constexpr size_t HEADER_SIZE = HEADER_PREFIX_SIZE + CONFIG_FIELD_COUNT * 4;
 constexpr int MAX_CONTEXT = 262144;
@@ -16,6 +15,7 @@ constexpr int MAX_CONTEXT = 262144;
 enum MatrixType : uint32_t {
     MATRIX_BF16,
     MATRIX_Q8_0,
+    MATRIX_Q4_0,
 };
 
 enum ConfigField : size_t {
@@ -78,11 +78,20 @@ constexpr ModelConfig QWEN35_9B = {
     MATRIX_Q8_0, false,
 };
 
+constexpr ModelConfig QWEN38_27B = {
+    38027, "Qwen3.8-27B",
+    248320, 5120, 17408, 64,
+    4, 24, 4, 256, 64,
+    16, 48, 128, 128, 4,
+    MATRIX_Q4_0, false,
+};
+
 inline const ModelConfig* config_for_id(uint32_t id) {
     switch (id) {
     case QWEN35_08B.id: return &QWEN35_08B;
     case QWEN35_4B.id: return &QWEN35_4B;
     case QWEN35_9B.id: return &QWEN35_9B;
+    case QWEN38_27B.id: return &QWEN38_27B;
     default: return nullptr;
     }
 }

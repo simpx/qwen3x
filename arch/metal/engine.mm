@@ -1,4 +1,4 @@
-// Qwen3.5 Metal engine. This platform boundary uses Objective-C++ and system
+// Qwen Metal engine. This platform boundary uses Objective-C++ and system
 // frameworks only. Model owns packed weights; State owns shared GPU buffers.
 // Prefill initially repeats the same readable FP32-activation token forward.
 #import <Foundation/Foundation.h>
@@ -17,6 +17,7 @@
 
 #include "internal.h"
 #include "model_config.h"
+#include "q4.h"
 #include "q8.h"
 #include "kernels_metallib.h"
 
@@ -45,7 +46,8 @@ struct Layer {
     AttentionWeights attention;
 };
 struct Kernels {
-    id<MTLComputePipelineState> embed_bf16, embed_q8, mv_bf16, mv_q8, rms, swiglu;
+    id<MTLComputePipelineState> embed_bf16, embed_q8, embed_q4;
+    id<MTLComputePipelineState> mv_bf16, mv_q8, mv_q4, rms, swiglu;
     id<MTLComputePipelineState> conv, prepare_delta_qk, delta_rule, gated_rms;
     id<MTLComputePipelineState> prepare_query, prepare_key, store_kv, attention;
     bool load(id<MTLDevice> device, const char** error) {
@@ -68,7 +70,8 @@ struct Kernels {
             return pipeline;
         };
         embed_bf16 = make("embed_bf16"); embed_q8 = make("embed_q8");
-        mv_bf16 = make("mv_bf16"); mv_q8 = make("mv_q8");
+        embed_q4 = make("embed_q4");
+        mv_bf16 = make("mv_bf16"); mv_q8 = make("mv_q8"); mv_q4 = make("mv_q4");
         rms = make("rms"); swiglu = make("swiglu"); conv = make("conv");
         prepare_delta_qk = make("prepare_delta_qk"); delta_rule = make("delta_rule");
         gated_rms = make("gated_rms"); prepare_query = make("prepare_query");
@@ -176,6 +179,7 @@ void embed(id<MTLComputeCommandEncoder> enc, const Model& model, State& state, i
     switch (w.type) {
     case q35_model::MATRIX_BF16: launch(enc, model.kernels.embed_bf16, (w.cols + BLOCK - 1) / BLOCK); break;
     case q35_model::MATRIX_Q8_0: launch(enc, model.kernels.embed_q8, (w.cols + BLOCK - 1) / BLOCK); break;
+    case q35_model::MATRIX_Q4_0: launch(enc, model.kernels.embed_q4, (w.cols + BLOCK - 1) / BLOCK); break;
     }
 }
 void mv(id<MTLComputeCommandEncoder> enc, const Model& model, id<MTLBuffer> weights, const Linear& w,
@@ -188,6 +192,7 @@ void mv(id<MTLComputeCommandEncoder> enc, const Model& model, id<MTLBuffer> weig
     switch (w.type) {
     case q35_model::MATRIX_BF16: launch(enc, model.kernels.mv_bf16, w.rows); break;
     case q35_model::MATRIX_Q8_0: launch(enc, model.kernels.mv_q8, w.rows); break;
+    case q35_model::MATRIX_Q4_0: launch(enc, model.kernels.mv_q4, w.rows); break;
     }
 }
 void rms(id<MTLComputeCommandEncoder> enc, const Model& model, id<MTLBuffer> weights,
@@ -320,12 +325,10 @@ bool Model::load(const char* path, const char** error) {
     if (file == MAP_FAILED) return fail("mmap model.bin failed");
     auto mapped_fail = [&](const char* message) { munmap(const_cast<uint8_t*>(file), size); return fail(message); };
     if (std::memcmp(file, "Q35MODL\0", 8)) return mapped_fail("wrong model.bin magic");
-    uint32_t version = 0, reserved = 0;
-    std::memcpy(&version, file + 8, 4); std::memcpy(&reserved, file + 12, 4);
-    if (reserved || version != q35_model::FORMAT_VERSION) return mapped_fail("unsupported model.bin version");
     config = q35_model::config_for_id(q35_model::header_field(file, q35_model::MODEL_ID));
-    if (!config) return mapped_fail("unsupported Qwen3.5 model ID");
-    if (!q35_model::header_matches(file, size, *config)) return mapped_fail("Qwen3.5 model.bin header mismatch");
+    if (!config) return mapped_fail("unsupported Qwen model ID");
+    if (!q35_model::header_matches(file, size, *config))
+        return mapped_fail("Qwen model.bin header mismatch");
     size_t cursor = q35_model::HEADER_SIZE, base = 0;
     auto take = [&](size_t bytes) {
         if (*error) return size_t(0);
@@ -349,10 +352,13 @@ bool Model::load(const char* path, const char** error) {
     };
     const auto& c = *config;
     auto linear = [&](int rows, int cols) {
-        Q35_ASSERT(cols % q35_q8::BLOCK_SIZE == 0, "Metal matrix cols=%d", cols);
+        Q35_ASSERT(cols % 32 == 0, "Metal matrix cols=%d", cols);
         const size_t count = static_cast<size_t>(rows) * cols;
-        const size_t bytes = c.matrix_type == q35_model::MATRIX_BF16 ? count * 2
-                            : count / q35_q8::BLOCK_SIZE * sizeof(q35_q8::Block);
+        size_t bytes = count * 2;
+        if (c.matrix_type == q35_model::MATRIX_Q8_0)
+            bytes = count / q35_q8::BLOCK_SIZE * sizeof(q35_q8::Block);
+        else if (c.matrix_type == q35_model::MATRIX_Q4_0)
+            bytes = count / q35_q4::BLOCK_SIZE * sizeof(q35_q4::Block);
         return Linear {take(bytes), rows, cols, c.matrix_type};
     };
     layer.reset(new (std::nothrow) Layer[c.N]);

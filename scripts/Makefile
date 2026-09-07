@@ -17,8 +17,14 @@ CHECKPOINT_9B_REVISION ?= c202236235762e1c871ad0ccb60c8ee5ba337b9a
 CHECKPOINT_9B ?= $(BUILD)/models/Qwen3.5-9B
 CHECKPOINT_9B_STAMP ?= $(BUILD)/.qwen3.5-9b-checkpoint
 MODEL_9B_BIN ?= $(BUILD)/qwen35-9b-q8_0-model.bin
+CHECKPOINT_27B_REPO ?= Qwen/Qwen3.8-27B
+CHECKPOINT_27B_REVISION ?= 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+CHECKPOINT_27B ?= $(BUILD)/models/Qwen3.8-27B
+CHECKPOINT_27B_STAMP ?= $(BUILD)/.qwen3.8-27b-checkpoint
+MODEL_27B_BIN ?= $(BUILD)/qwen38-27b-q4_0-model.bin
 RENDER_BIN ?= $(BUILD)/qwen35-0.8b-render.bin
-.PHONY: all sync checkpoint checkpoint-4b checkpoint-9b model model-4b model-9b render clean
+.PHONY: all sync checkpoint checkpoint-4b checkpoint-9b checkpoint-27b \
+	model model-4b model-9b model-27b render clean
 
 all: model render
 
@@ -67,6 +73,21 @@ model-9b: $(MODEL_9B_BIN)
 $(MODEL_9B_BIN): pack_weights.py $(CHECKPOINT_9B_STAMP)
 	mkdir -p "$(BUILD)"
 	cd "$(PROJECT)" && $(PYTHON) -m scripts.pack_weights "$(CHECKPOINT_9B)" "$@"
+
+checkpoint-27b: $(CHECKPOINT_27B_STAMP)
+
+$(CHECKPOINT_27B_STAMP):
+	mkdir -p "$(CHECKPOINT_27B)"
+	$(HF) download "$(CHECKPOINT_27B_REPO)" --revision "$(CHECKPOINT_27B_REVISION)" \
+		--local-dir "$(CHECKPOINT_27B)"
+	rm -rf "$(CHECKPOINT_27B)/.cache"
+	touch "$@"
+
+model-27b: $(MODEL_27B_BIN)
+
+$(MODEL_27B_BIN): pack_weights.py $(CHECKPOINT_27B_STAMP)
+	mkdir -p "$(BUILD)"
+	cd "$(PROJECT)" && $(PYTHON) -m scripts.pack_weights "$(CHECKPOINT_27B)" "$@"
 
 render: $(RENDER_BIN)
 

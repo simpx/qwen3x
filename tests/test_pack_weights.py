@@ -19,6 +19,7 @@ def config_for(model):
         "max_position_embeddings": pack_weights.MAX_CONTEXT,
         "tie_word_embeddings": model["tie_word_embeddings"],
         "dtype": "bfloat16",
+        "attn_output_gate": True,
         "rope_parameters": {
             "partial_rotary_factor": model["rotary_dim"] / model["head_dim"]
         },
@@ -30,6 +31,8 @@ def config_for(model):
         "linear_key_head_dim", "linear_value_head_dim", "linear_conv_kernel_dim",
     ):
         config[key] = model[key]
+    if "output_gate_type" in model:
+        config["output_gate_type"] = model["output_gate_type"]
     return config
 
 
@@ -46,6 +49,23 @@ def q8_reference(data):
             normalized = float(np.float32(value * inverse))
             rounded = math.copysign(math.floor(abs(normalized) + 0.5), normalized)
             output.extend(struct.pack("b", max(-127, min(127, int(rounded)))))
+    return bytes(output)
+
+
+def q4_reference(data):
+    values = np.frombuffer(data, dtype="<u2").astype(np.uint32)
+    values = (values << 16).view(np.float32)
+    output = bytearray()
+    for block in values.reshape(-1, pack_weights.Q4_BLOCK_SIZE):
+        maximum = max((float(value) for value in block), key=abs)
+        scale = np.float32(maximum / -8.0)
+        inverse = np.float32(1.0 / scale) if scale else np.float32(0.0)
+        quants = []
+        for value in block:
+            normalized = np.float32(value * inverse)
+            quants.append(min(15, int(np.trunc(normalized + np.float32(8.5)))))
+        output.extend(struct.pack("<e", float(scale)))
+        output.extend(bytes(quants[i] | quants[i + 16] << 4 for i in range(16)))
     return bytes(output)
 
 
@@ -68,17 +88,22 @@ class PackWeightsTest(unittest.TestCase):
         wrong["linear_num_value_heads"] = 16
         with self.assertRaisesRegex(ValueError, "only official"):
             pack_weights.select_model(wrong)
+        qwen38 = config_for(pack_weights.SUPPORTED_MODELS[3])
+        self.assertEqual(qwen38["output_gate_type"], "swish")
+        wrong_gate = copy.deepcopy(qwen38)
+        wrong_gate["output_gate_type"] = "sigmoid"
+        with self.assertRaisesRegex(ValueError, "only official"):
+            pack_weights.select_model(wrong_gate)
 
-    def test_v2_header_matches_cpp_field_order(self):
+    def test_fixed_header_matches_cpp_field_order(self):
         model = pack_weights.SUPPORTED_MODELS[1]
         packed = pack_weights.HEADER.pack(
-            pack_weights.MAGIC, pack_weights.FORMAT_VERSION, 0,
-            *pack_weights.header_values(model)
+            pack_weights.MAGIC, *pack_weights.header_values(model)
         )
-        self.assertEqual(len(packed), 80)
-        self.assertEqual(struct.unpack_from("<I", packed, 16)[0], 4000)
-        self.assertEqual(struct.unpack_from("<I", packed, 24)[0], 2560)
-        self.assertEqual(struct.unpack_from("<I", packed, 60)[0], 32)
+        self.assertEqual(len(packed), 72)
+        self.assertEqual(struct.unpack_from("<I", packed, 8)[0], 4000)
+        self.assertEqual(struct.unpack_from("<I", packed, 16)[0], 2560)
+        self.assertEqual(struct.unpack_from("<I", packed, 52)[0], 32)
 
     def test_4b_schema_has_expected_layer_and_tensor_counts(self):
         model = pack_weights.SUPPORTED_MODELS[1]
@@ -101,6 +126,29 @@ class PackWeightsTest(unittest.TestCase):
             math.prod(shape) for _, _, shape, matrix in tensors if matrix
         )
         self.assertEqual(matrix_parameters, 8_952_741_888)
+
+    def test_27b_schema_and_q4_storage_layout_are_fixed(self):
+        model = pack_weights.SUPPORTED_MODELS[3]
+        tensors = list(pack_weights.expected_tensors(model))
+        self.assertEqual(len(tensors), 851)
+        self.assertEqual(tensors[0][0], "model.language_model.embed_tokens.weight")
+        self.assertEqual(tensors[1][0], "lm_head.weight")
+        self.assertEqual(
+            tensors[-1],
+            ("model.language_model.layers.63.mlp.down_proj.weight",
+             "BF16", (5120, 17408), True),
+        )
+        layout = pack_weights.storage_layout(model)
+        self.assertEqual(len(layout["layer_bytes"]), 64)
+        self.assertEqual(layout["parameters"], 26_895_998_464)
+        self.assertEqual(layout["model_bytes"], 15_132_820_608)
+        self.assertEqual(max(layout["layer_bytes"]), 215_665_472)
+        self.assertEqual(
+            pack_weights.checkpoint_dtype(
+                model, "model.language_model.layers.0.linear_attn.A_log", "F32"
+            ),
+            "BF16",
+        )
 
     def test_q8_zero_and_rounding_boundaries_match_scalar_reference(self):
         values = np.zeros(64, dtype=np.float32)
@@ -125,6 +173,25 @@ class PackWeightsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-finite"):
             pack_weights.quantize_q8_0(bf16_bytes(values))
 
+    def test_q4_matches_ggml_block_layout_and_scalar_reference(self):
+        random = np.random.default_rng(20260906)
+        values = random.normal(size=32 * 17).astype(np.float32)
+        values[:32] = 0
+        values[32:40] = [8.0, -8.0, 7.5, -7.5, 0.5, -0.5, 1.5, -1.5]
+        source = bf16_bytes(values)
+        packed = pack_weights.quantize_q4_0(source)
+        self.assertEqual(packed, q4_reference(source))
+        self.assertEqual(packed[:2], b"\0\x80")
+        self.assertEqual(packed[2:18], bytes([0x88] * 16))
+
+    def test_q4_rejects_partial_block_and_non_finite_input(self):
+        with self.assertRaisesRegex(ValueError, "complete 32-value blocks"):
+            pack_weights.quantize_q4_0(bytes(62))
+        values = np.zeros(32, dtype=np.float32)
+        values[4] = np.inf
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            pack_weights.quantize_q4_0(bf16_bytes(values))
+
     def test_shard_rejects_wrong_schema_and_truncated_data(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory, "part.safetensors")
@@ -141,7 +208,28 @@ class PackWeightsTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "expected BF16"):
                     shard.copy_tensor("tensor", "BF16", (2, 16), False, io.BytesIO())
                 with self.assertRaisesRegex(ValueError, "truncated"):
-                    shard.copy_tensor("tensor", "BF16", (1, 32), True, io.BytesIO())
+                    shard.copy_tensor("tensor", "BF16", (1, 32), "Q8_0", io.BytesIO())
+
+    def test_shard_expands_qwen38_bf16_delta_parameter_to_f32(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "part.safetensors")
+            source = bf16_bytes([1.5, -2.25, 0.0])
+            header = json.dumps({
+                "tensor": {
+                    "dtype": "BF16", "shape": [3],
+                    "data_offsets": [0, len(source)],
+                }
+            }).encode()
+            path.write_bytes(struct.pack("<Q", len(header)) + header + source)
+            output = io.BytesIO()
+            with pack_weights.SafetensorsShard(path) as shard:
+                shard.copy_tensor(
+                    "tensor", "F32", (3,), False, output, source_dtype="BF16"
+                )
+            self.assertEqual(
+                np.frombuffer(output.getvalue(), dtype="<f4").tolist(),
+                [1.5, -2.25, 0.0],
+            )
 
     def test_pack_rejects_missing_tensor(self):
         with tempfile.TemporaryDirectory() as directory:

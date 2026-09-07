@@ -19,7 +19,7 @@ enum {
     Q35_BUSY = -2,
 };
 
-/* Engine: one loaded, read-only supported Qwen3.5 model. */
+/* Engine: one loaded, read-only supported Qwen text model. */
 
 typedef enum {
     Q35_LOG_TRACE = -1,

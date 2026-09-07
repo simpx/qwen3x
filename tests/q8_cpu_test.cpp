@@ -62,8 +62,6 @@ size_t q8_9b_file_size() {
 std::array<uint8_t, q35_model::HEADER_SIZE> q8_9b_header() {
     std::array<uint8_t, q35_model::HEADER_SIZE> header {};
     std::memcpy(header.data(), "Q35MODL\0", 8);
-    const uint32_t version = q35_model::FORMAT_VERSION;
-    std::memcpy(header.data() + 8, &version, sizeof(version));
     const q35_model::ModelConfig& c = q35_model::QWEN35_9B;
     const uint32_t fields[q35_model::CONFIG_FIELD_COUNT] = {
         c.id, static_cast<uint32_t>(c.V), static_cast<uint32_t>(c.H),
@@ -123,16 +121,11 @@ void loader_test() {
     check_loader(path, false, "wrong model.bin magic");
 
     restore();
-    const uint32_t nonzero = 1;
-    write_exact(fd, &nonzero, sizeof(nonzero), 12);
-    check_loader(path, false, "unsupported model.bin version");
-
-    restore();
     const uint32_t unknown_id = 9001;
     write_exact(fd, &unknown_id, sizeof(unknown_id),
                 q35_model::HEADER_PREFIX_SIZE +
                 q35_model::MODEL_ID * sizeof(uint32_t));
-    check_loader(path, false, "unsupported Qwen3.5 model ID");
+    check_loader(path, false, "unsupported Qwen model ID");
 
     restore();
     const uint32_t wrong_hidden = 4095;
@@ -205,6 +198,34 @@ int main() {
     q35_backend::mv(parallel_matrix, input, parallel_output.data());
     for (float value : parallel_output)
         assert(std::abs(value - expected[0]) < 1e-6f);
+
+    q35_q4::Block q4_blocks[2]{};
+    for (int block = 0; block < 2; ++block) {
+        q4_blocks[block].scale = scales[block];
+        for (int index = 0; index < 16; ++index) {
+            const uint8_t low = static_cast<uint8_t>((index + block) % 16);
+            const uint8_t high = static_cast<uint8_t>((index + block + 3) % 16);
+            q4_blocks[block].values[index] = low | (high << 4);
+        }
+    }
+    float q4_expected = 0.0f;
+    for (int block = 0; block < 2; ++block)
+        for (int index = 0; index < q35_q4::BLOCK_SIZE; ++index)
+            q4_expected += decoded_scales[block] *
+                           q35_q4::value(q4_blocks[block], index) *
+                           input[block * q35_q4::BLOCK_SIZE + index];
+    q35_backend::Linear q4_matrix {
+        q4_blocks, 1, 64, q35_model::MATRIX_Q4_0,
+    };
+    float q4_output = 0.0f;
+    q35_backend::mv(q4_matrix, input, &q4_output);
+    assert(std::abs(q4_output - q4_expected) < 1e-6f);
+
+    float q4_embedding[64]{};
+    q35_backend::embed(q4_matrix, 0, q4_embedding);
+    for (int index = 0; index < 64; ++index)
+        assert(q4_embedding[index] == decoded_scales[index / 32] *
+                                      q35_q4::value(q4_blocks[index / 32], index % 32));
 
     loader_test();
     std::puts("q8-cpu-test: ok");

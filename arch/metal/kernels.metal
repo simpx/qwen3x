@@ -1,5 +1,5 @@
 // Qwen3.5 Metal correctness kernels. Activations/state stay FP32; weights stay
-// BF16 or Q8_0. Every dispatch uses 256 threads per threadgroup.
+// BF16, Q8_0 or Q4_0. Every dispatch uses 256 threads per threadgroup.
 #include <metal_stdlib>
 using namespace metal;
 
@@ -7,6 +7,14 @@ constant uint BLOCK = 256, AD = 256, RD = 64, KH = 16, KD = 128, VD = 128, CK = 
 constant float EPS = 1e-6f, THETA = 10000000.0f;
 struct Q8Block { ushort scale; char values[32]; };
 static_assert(sizeof(Q8Block) == 34, "Q8_0 block layout");
+struct Q4Block { ushort scale; uchar values[16]; };
+static_assert(sizeof(Q4Block) == 18, "Q4_0 block layout");
+
+float q4(device const Q4Block& block, uint index) {
+    const uchar packed = block.values[index % 16];
+    const uint quant = index < 16 ? packed & 15 : packed >> 4;
+    return float(int(quant) - 8);
+}
 
 float bf16(ushort x) { return as_type<float>(uint(x) << 16); }
 float sigmoid(float x) {
@@ -45,6 +53,14 @@ kernel void embed_q8(device const Q8Block* w [[buffer(0)]],
         out[i] = float(as_type<half>(b.scale)) * float(b.values[i % 32]);
     }
 }
+kernel void embed_q4(device const Q4Block* w [[buffer(0)]],
+                     device float* out [[buffer(1)]],
+                     constant uint2& p [[buffer(2)]], uint i [[thread_position_in_grid]]) {
+    if (i < p.x) {
+        device const Q4Block& b = w[ulong(p.y) * (p.x / 32) + i / 32];
+        out[i] = float(as_type<half>(b.scale)) * q4(b, i % 32);
+    }
+}
 // p = {columns, add_to_output}. One group reduces one matrix row.
 kernel void mv_bf16(device const ushort* w [[buffer(0)]],
                     device const float* x [[buffer(1)]], device float* out [[buffer(2)]],
@@ -64,6 +80,19 @@ kernel void mv_q8(device const Q8Block* w [[buffer(0)]],
     for (uint i = tid; i < p.x; i += BLOCK) {
         device const Q8Block& b = w[ulong(row) * (p.x / 32) + i / 32];
         sum += float(as_type<half>(b.scale)) * float(b.values[i % 32]) * x[i];
+    }
+    threadgroup float shared[BLOCK];
+    const float total = sum_group(sum, shared, tid);
+    if (tid == 0) out[row] = total + (p.y ? out[row] : 0.0f);
+}
+kernel void mv_q4(device const Q4Block* w [[buffer(0)]],
+                  device const float* x [[buffer(1)]], device float* out [[buffer(2)]],
+                  constant uint2& p [[buffer(3)]], uint row [[threadgroup_position_in_grid]],
+                  uint tid [[thread_index_in_threadgroup]]) {
+    float sum = 0.0f;
+    for (uint i = tid; i < p.x; i += BLOCK) {
+        device const Q4Block& b = w[ulong(row) * (p.x / 32) + i / 32];
+        sum += float(as_type<half>(b.scale)) * q4(b, i % 32) * x[i];
     }
     threadgroup float shared[BLOCK];
     const float total = sum_group(sum, shared, tid);

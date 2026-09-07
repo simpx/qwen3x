@@ -1,4 +1,4 @@
-// engine.cpp -- plain C++ Qwen3.5 CPU correctness engine.
+// engine.cpp -- plain C++ Qwen CPU correctness engine.
 // Model owns mapped weights, State owns history/cache, Work owns scratch memory.
 
 #include <algorithm>
@@ -24,6 +24,7 @@
 
 #include "internal.h"
 #include "model_config.h"
+#include "q4.h"
 #include "q8.h"
 #include "qwen35.h"
 
@@ -221,10 +222,24 @@ void embed_q8(const Linear& table, int token, FP32* out) {
             out[block * q35_q8::BLOCK_SIZE + i] = scale * row[block].values[i];
     }
 }
+void embed_q4(const Linear& table, int token, FP32* out) {
+    const int blocks = table.cols / q35_q4::BLOCK_SIZE;
+    const q35_q4::Block* row = static_cast<const q35_q4::Block*>(table.w) +
+                               static_cast<size_t>(token) * blocks;
+    for (int block = 0; block < blocks; ++block) {
+        const FP32 scale = f16(row[block].scale);
+        for (int i = 0; i < q35_q4::BLOCK_SIZE; ++i)
+            out[block * q35_q4::BLOCK_SIZE + i] =
+                scale * q35_q4::value(row[block], i);
+    }
+}
 void embed(const Linear& table, int token, FP32* out) {
     Q35_ASSERT(token >= 0 && token < table.rows, "embedding token=%d rows=%d", token, table.rows);
-    if (table.type == q35_model::MATRIX_BF16) embed_bf16(table, token, out);
-    else embed_q8(table, token, out);
+    switch (table.type) {
+    case q35_model::MATRIX_BF16: embed_bf16(table, token, out); break;
+    case q35_model::MATRIX_Q8_0: embed_q8(table, token, out); break;
+    case q35_model::MATRIX_Q4_0: embed_q4(table, token, out); break;
+    }
 }
 FP32 dot_q8(const q35_q8::Block* blocks, const FP32* x, int n) {
 #if defined(__ARM_NEON)
@@ -266,6 +281,17 @@ FP32 dot_q8(const q35_q8::Block* blocks, const FP32* x, int n) {
     }
     return sum;
 #endif
+}
+FP32 dot_q4(const q35_q4::Block* blocks, const FP32* x, int n) {
+    FP32 sum = 0.0f;
+    for (int block = 0; block < n / q35_q4::BLOCK_SIZE; ++block) {
+        FP32 inner = 0.0f;
+        for (int i = 0; i < q35_q4::BLOCK_SIZE; ++i)
+            inner += q35_q4::value(blocks[block], i) *
+                     x[block * q35_q4::BLOCK_SIZE + i];
+        sum += f16(blocks[block].scale) * inner;
+    }
+    return sum;
 }
 FP32 dot(const BF16* a, const FP32* b, int n) {
     FP32 sum = 0.0f;
@@ -341,9 +367,18 @@ void mv_q8(const Linear& w, const FP32* x, FP32* y) {
     for (int row = 0; row < w.rows; ++row)
         y[row] = dot_q8(weights + static_cast<size_t>(row) * blocks, x, w.cols);
 }
+void mv_q4(const Linear& w, const FP32* x, FP32* y) {
+    const int blocks = w.cols / q35_q4::BLOCK_SIZE;
+    const q35_q4::Block* weights = static_cast<const q35_q4::Block*>(w.w);
+    for (int row = 0; row < w.rows; ++row)
+        y[row] = dot_q4(weights + static_cast<size_t>(row) * blocks, x, w.cols);
+}
 void mv(const Linear& w, const FP32* x, FP32* y) {
-    if (w.type == q35_model::MATRIX_BF16) mv_bf16(w, x, y);
-    else mv_q8(w, x, y);
+    switch (w.type) {
+    case q35_model::MATRIX_BF16: mv_bf16(w, x, y); break;
+    case q35_model::MATRIX_Q8_0: mv_q8(w, x, y); break;
+    case q35_model::MATRIX_Q4_0: mv_q4(w, x, y); break;
+    }
 }
 FP32 dot(const FP32* a, const FP32* b, int n) {
     FP32 sum = 0.0f;
@@ -554,30 +589,29 @@ bool Model::load(const char* path, const char** error) {
     file = static_cast<const uint8_t*>(mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0));
     if (file == MAP_FAILED) { file = nullptr; return fail("mmap model.bin failed"); }
     if (std::memcmp(file, "Q35MODL\0", 8) != 0) return fail("wrong model.bin magic");
-    uint32_t version = 0, reserved = 0;
-    std::memcpy(&version, file + 8, 4); std::memcpy(&reserved, file + 12, 4);
-    if (reserved || version != q35_model::FORMAT_VERSION)
-        return fail("unsupported model.bin version");
     const uint32_t id = q35_model::header_field(file, q35_model::MODEL_ID);
     config = q35_model::config_for_id(id);
-    if (!config) return fail("unsupported Qwen3.5 model ID");
+    if (!config) return fail("unsupported Qwen model ID");
     if (!q35_model::header_matches(file, file_size, *config))
-        return fail("Qwen3.5 model.bin header mismatch");
+        return fail("Qwen model.bin header mismatch");
     size_t cursor = q35_model::HEADER_SIZE;
     const auto& c = *config;
     const int AS = c.AH * c.AD, KVW = c.KVH * c.AD;
     const int DO = c.VH * c.VD, DQKV = 2 * c.KH * c.KD + DO;
     auto linear = [&](int rows, int cols) {
-        Q35_ASSERT(cols % q35_q8::BLOCK_SIZE == 0,
-                   "matrix cols=%d is not divisible by Q8 block=%d",
-                   cols, q35_q8::BLOCK_SIZE);
+        Q35_ASSERT(cols % 32 == 0, "matrix cols=%d is not divisible by 32", cols);
         if (c.matrix_type == q35_model::MATRIX_BF16)
             return Linear {take<BF16>(file, file_size, cursor,
                                       static_cast<size_t>(rows) * cols, error),
                            rows, cols, c.matrix_type};
-        return Linear {take<q35_q8::Block>(file, file_size, cursor,
+        if (c.matrix_type == q35_model::MATRIX_Q8_0)
+            return Linear {take<q35_q8::Block>(file, file_size, cursor,
+                                               static_cast<size_t>(rows) * cols /
+                                               q35_q8::BLOCK_SIZE, error),
+                           rows, cols, c.matrix_type};
+        return Linear {take<q35_q4::Block>(file, file_size, cursor,
                                            static_cast<size_t>(rows) * cols /
-                                           q35_q8::BLOCK_SIZE, error),
+                                           q35_q4::BLOCK_SIZE, error),
                        rows, cols, c.matrix_type};
     };
     layer.reset(new (std::nothrow) Layer[c.N]);
