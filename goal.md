@@ -1,7 +1,7 @@
 # Goal：今晚跑通并优化 Qwen3.6-35B-A3B 的 MLX C++ 后端
 
-> 状态：按 2026-09-08 的讨论更新。本次只编写计划，不启动下载、实现或测试。
-> 用户后续明确要求执行本 goal 时，再开始下述工作。此前下载已停止，部分文件保留。
+> 状态：用户已于 2026-09-08 通过 active goal「完成goal.md」授权执行。正在实现和验证，
+> 实时进度与原始证据在 build/qwen36-night/；下列验收未全部完成前不宣称交付。
 
 ## 今晚的唯一主线
 
@@ -299,8 +299,8 @@ CPU 已支持 MoE，原生 Metal 尚未支持，MLX 后端尚未实现。
 - [x] Python MLX GPU 小算子 probe。
 - [x] C++ MLX GPU probe：wheel 动态链接与源码静态链接。
 - [x] 固定社区 repo/revision，确认无 gated 登录要求；保留部分下载。
-- [ ] 社区 snapshot 完整校验与真实短推理。
-- [ ] 同权重参考 logits 与本机性能基线。
+- [x] 社区 snapshot 完整校验与真实短推理。
+- [x] 同权重短序列参考 logits 与 512/2K/8K 本机性能基线；长档位另行验收。
 - [ ] C++ MLX 完整 forward、Session 与 HTTP。
 - [ ] 原生量化路径正确性、调优和服务验收。
 - [ ] 64K 真实长输入、性能、缓存/恢复与默认服务稳定性验收。
@@ -312,8 +312,11 @@ build/qwen36-night/mlx-requirements.lock.txt；不升级滚动 main，不修改�
 
 源码 build/mlx-src/：tag v0.32.2，commit
 1f8e74e3f12f31365464a6867c6579f0e9b29d85；静态安装 build/mlx-install/。
-已用 Release、deployment target 26.3、MLX_METAL_JIT=ON、BUILD_SHARED_LIBS=OFF，
+当前使用 Release、deployment target 26.3、MLX_METAL_JIT=OFF、BUILD_SHARED_LIBS=OFF，
 关闭 tests/examples/benchmarks/Python bindings/GGUF，构建显式使用 TOOLCHAINS=Metal。
+原准备阶段的 JIT=ON 小算子 probe 不足以发现完整模型的差异：其 BF16 sigmoid 与
+wheel 预编译 kernel 有细小舍入差异。已通过最小实验定位，静态库改用预编译 kernel 后
+与 wheel 一致；不要恢复 JIT=ON 而跳过数值回归。
 
 MLX 0.32.2 静态 CMake export 未自动导入 jaccl::jaccl：在 find_package(MLX) 前
 include 安装前缀的 lib/cmake/jaccl/jacclTargets.cmake。已验证例子在
