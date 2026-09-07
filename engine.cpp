@@ -14,13 +14,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#if defined(__APPLE__)
-#include <dispatch/dispatch.h>
-#endif
-
-#if defined(__ARM_NEON)
-#include <arm_neon.h>
-#endif
+#include "arch/cpu.h"
 
 #include "internal.h"
 #include "model_config.h"
@@ -173,11 +167,6 @@ FP32 f32(BF16 value) {
     return result;
 }
 FP32 f16(uint16_t value) {
-#if defined(__ARM_FP16_FORMAT_IEEE)
-    __fp16 half;
-    std::memcpy(&half, &value, sizeof(half));
-    return static_cast<FP32>(half);
-#else
     const uint32_t sign = static_cast<uint32_t>(value & 0x8000u) << 16;
     uint32_t exponent = (value >> 10) & 0x1fu;
     uint32_t mantissa = value & 0x03ffu;
@@ -198,7 +187,6 @@ FP32 f16(uint16_t value) {
     FP32 result;
     std::memcpy(&result, &bits, sizeof(result));
     return result;
-#endif
 }
 FP32 sigmoid(FP32 x) {
     if (x >= 0.0f) return 1.0f / (1.0f + std::exp(-x));
@@ -242,36 +230,6 @@ void embed(const Linear& table, int token, FP32* out) {
     }
 }
 FP32 dot_q8(const q3x_q8::Block* blocks, const FP32* x, int n) {
-#if defined(__ARM_NEON)
-    float32x4_t sum = vdupq_n_f32(0.0f);
-    for (int block = 0; block < n / q3x_q8::BLOCK_SIZE; ++block) {
-        const int8x16_t q0 = vld1q_s8(blocks[block].values);
-        const int8x16_t q1 = vld1q_s8(blocks[block].values + 16);
-        const int16x8_t q00 = vmovl_s8(vget_low_s8(q0));
-        const int16x8_t q01 = vmovl_s8(vget_high_s8(q0));
-        const int16x8_t q10 = vmovl_s8(vget_low_s8(q1));
-        const int16x8_t q11 = vmovl_s8(vget_high_s8(q1));
-        const FP32* input = x + block * q3x_q8::BLOCK_SIZE;
-        float32x4_t inner = vmulq_f32(
-            vcvtq_f32_s32(vmovl_s16(vget_low_s16(q00))), vld1q_f32(input));
-        inner = vfmaq_f32(inner,
-            vcvtq_f32_s32(vmovl_s16(vget_high_s16(q00))), vld1q_f32(input + 4));
-        inner = vfmaq_f32(inner,
-            vcvtq_f32_s32(vmovl_s16(vget_low_s16(q01))), vld1q_f32(input + 8));
-        inner = vfmaq_f32(inner,
-            vcvtq_f32_s32(vmovl_s16(vget_high_s16(q01))), vld1q_f32(input + 12));
-        inner = vfmaq_f32(inner,
-            vcvtq_f32_s32(vmovl_s16(vget_low_s16(q10))), vld1q_f32(input + 16));
-        inner = vfmaq_f32(inner,
-            vcvtq_f32_s32(vmovl_s16(vget_high_s16(q10))), vld1q_f32(input + 20));
-        inner = vfmaq_f32(inner,
-            vcvtq_f32_s32(vmovl_s16(vget_low_s16(q11))), vld1q_f32(input + 24));
-        inner = vfmaq_f32(inner,
-            vcvtq_f32_s32(vmovl_s16(vget_high_s16(q11))), vld1q_f32(input + 28));
-        sum = vfmaq_n_f32(sum, inner, f16(blocks[block].scale));
-    }
-    return vaddvq_f32(sum);
-#else
     FP32 sum = 0.0f;
     for (int block = 0; block < n / q3x_q8::BLOCK_SIZE; ++block) {
         FP32 inner = 0.0f;
@@ -280,7 +238,6 @@ FP32 dot_q8(const q3x_q8::Block* blocks, const FP32* x, int n) {
         sum += f16(blocks[block].scale) * inner;
     }
     return sum;
-#endif
 }
 FP32 dot_q4(const q3x_q4::Block* blocks, const FP32* x, int n) {
     FP32 sum = 0.0f;
@@ -298,72 +255,14 @@ FP32 dot(const BF16* a, const FP32* b, int n) {
     for (int i = 0; i < n; ++i) sum += f32(a[i]) * b[i];
     return sum;
 }
-#if defined(__APPLE__)
-size_t cpu_worker_count() {
-    static const size_t count = [] {
-        const long online = sysconf(_SC_NPROCESSORS_ONLN);
-        return static_cast<size_t>(online > 0 ? online : 1);
-    }();
-    return count;
-}
-#endif
 void mv_bf16(const Linear& w, const FP32* x, FP32* y) {
     const BF16* weights = static_cast<const BF16*>(w.w);
-#if defined(__APPLE__)
-    struct Context {
-        const Linear* w;
-        const BF16* weights;
-        const FP32* x;
-        FP32* y;
-        size_t tasks;
-    };
-    const size_t tasks = std::min(static_cast<size_t>(w.rows), cpu_worker_count());
-    Context context {&w, weights, x, y, tasks};
-    if (w.rows >= 1024) {
-        dispatch_apply_f(tasks,
-            dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &context,
-            [](void* opaque, size_t task) {
-                Context& c = *static_cast<Context*>(opaque);
-                const int begin = static_cast<int>(task * c.w->rows / c.tasks);
-                const int end = static_cast<int>((task + 1) * c.w->rows / c.tasks);
-                for (int row = begin; row < end; ++row)
-                    c.y[row] = dot(c.weights + static_cast<size_t>(row) * c.w->cols,
-                                   c.x, c.w->cols);
-            });
-        return;
-    }
-#endif
     for (int row = 0; row < w.rows; ++row)
         y[row] = dot(weights + static_cast<size_t>(row) * w.cols, x, w.cols);
 }
 void mv_q8(const Linear& w, const FP32* x, FP32* y) {
     const int blocks = w.cols / q3x_q8::BLOCK_SIZE;
     const q3x_q8::Block* weights = static_cast<const q3x_q8::Block*>(w.w);
-#if defined(__APPLE__)
-    struct Context {
-        const Linear* w;
-        const q3x_q8::Block* weights;
-        const FP32* x;
-        FP32* y;
-        int blocks;
-        size_t tasks;
-    };
-    const size_t tasks = std::min(static_cast<size_t>(w.rows), cpu_worker_count());
-    Context context {&w, weights, x, y, blocks, tasks};
-    if (w.rows >= 1024) {
-        dispatch_apply_f(tasks,
-            dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), &context,
-            [](void* opaque, size_t task) {
-                Context& c = *static_cast<Context*>(opaque);
-                const int begin = static_cast<int>(task * c.w->rows / c.tasks);
-                const int end = static_cast<int>((task + 1) * c.w->rows / c.tasks);
-                for (int row = begin; row < end; ++row)
-                    c.y[row] = dot_q8(c.weights + static_cast<size_t>(row) * c.blocks,
-                                      c.x, c.w->cols);
-            });
-        return;
-    }
-#endif
     for (int row = 0; row < w.rows; ++row)
         y[row] = dot_q8(weights + static_cast<size_t>(row) * blocks, x, w.cols);
 }
@@ -374,6 +273,7 @@ void mv_q4(const Linear& w, const FP32* x, FP32* y) {
         y[row] = dot_q4(weights + static_cast<size_t>(row) * blocks, x, w.cols);
 }
 void mv(const Linear& w, const FP32* x, FP32* y) {
+    if (q3x_cpu::try_mv(w.w, w.type, w.rows, w.cols, x, y)) return;
     switch (w.type) {
     case q3x_model::MATRIX_BF16: mv_bf16(w, x, y); break;
     case q3x_model::MATRIX_Q8_0: mv_q8(w, x, y); break;
@@ -382,6 +282,7 @@ void mv(const Linear& w, const FP32* x, FP32* y) {
 }
 FP32 dot(const FP32* a, const FP32* b, int n) {
     FP32 sum = 0.0f;
+    if (q3x_cpu::try_dot(a, b, n, &sum)) return sum;
     for (int i = 0; i < n; ++i) sum += a[i] * b[i];
     return sum;
 }

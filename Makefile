@@ -1,6 +1,7 @@
 CXX ?= c++
 NVCC ?= nvcc
-BUILD ?= build
+CPU_OPT ?= 1
+BUILD ?= build$(if $(filter 0,$(CPU_OPT)),/scalar)
 PROGRAM ?= $(BUILD)/qwen3x
 CUDA_PROGRAM ?= $(BUILD)/qwen3x-cuda
 METAL_PROGRAM := $(BUILD)/qwen3x-metal
@@ -24,7 +25,8 @@ SPDLOG_SRC := $(wildcard third_party/spdlog/src/*.cpp)
 COMMON_SRC := main.cpp runtime.cpp log.cpp parser.cpp render.cpp \
 	$(SPDLOG_SRC)
 COMMON_OBJ := $(patsubst %.cpp,$(BUILD)/obj/%.o,$(COMMON_SRC))
-PROGRAM_OBJ := $(BUILD)/obj/engine.o $(COMMON_OBJ)
+CPU_OBJ := $(BUILD)/obj/arch/cpu.o
+PROGRAM_OBJ := $(BUILD)/obj/engine.o $(CPU_OBJ) $(COMMON_OBJ)
 PROGRAM_DEP := $(PROGRAM_OBJ:.o=.d)
 CUDA_OBJ := $(BUILD)/obj/arch/cuda/engine.o
 CUDA_DEP := $(CUDA_OBJ:.o=.d)
@@ -165,13 +167,18 @@ $(BUILD)/obj/tests/metal_test.o: tests/metal_test.mm engine.cpp arch/metal/engin
 	mkdir -p $(dir $@)
 	$(METAL_CXX) $(CXXFLAGS) $(METAL_FLAGS) -I. -I$(METAL_DIR) -MMD -MP -c $< -o $@
 
-$(BUILD)/metal-test: $(BUILD)/obj/tests/metal_test.o $(BUILD)/obj/log.o \
+$(BUILD)/metal-test: $(BUILD)/obj/tests/metal_test.o $(CPU_OBJ) $(BUILD)/obj/log.o \
 		$(patsubst %.cpp,$(BUILD)/obj/%.o,$(SPDLOG_SRC))
 	$(METAL_CXX) $(CXXFLAGS) $^ $(THREAD_FLAGS) $(METAL_FRAMEWORKS) -o $@
 
 $(METAL_DIR)/libqwen3x-metal.dylib: $(METAL_OBJ) $(BUILD)/obj/runtime.o $(BUILD)/obj/log.o \
 		$(patsubst %.cpp,$(BUILD)/obj/%.o,$(SPDLOG_SRC))
 	$(METAL_CXX) $(CXXFLAGS) -dynamiclib $^ $(THREAD_FLAGS) $(METAL_FRAMEWORKS) -o $@
+
+$(CPU_OBJ): arch/cpu.cpp Makefile
+	mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -DQ3X_CPU_OPT=$(CPU_OPT) -I. $(THREAD_FLAGS) \
+		-MMD -MP -c $< -o $@
 
 $(BUILD)/obj/%.o: %.cpp Makefile
 	mkdir -p $(dir $@)
@@ -181,7 +188,7 @@ $(BUILD)/obj/%.o: %.cpp Makefile
 -include $(PROGRAM_DEP) $(CUDA_DEP) $(METAL_OBJ:.o=.d) $(BUILD)/obj/tests/metal_test.d
 
 test: all
-	$(MAKE) -C tests test
+	$(MAKE) -C tests test BUILD="$(abspath $(BUILD))" CPU_OPT=$(CPU_OPT)
 
 cuda-test: cuda
 	$(MAKE) -C reference compare-cuda PYTHON=python3 VECTORS=build/cpu

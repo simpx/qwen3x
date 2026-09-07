@@ -12,6 +12,89 @@
 
 namespace {
 
+// Different rows, non-binary-exact Q8 scales, SIMD tails and the GCD threshold.
+// Double accumulation is an independent numerical oracle for both build modes.
+void cpu_kernel_test() {
+    uint32_t random = 42;
+    auto sample = [&]() {
+        random = random * 1664525u + 1013904223u;
+        return (static_cast<int>(random >> 16) - 32768) / 32768.0f;
+    };
+    auto check = [](float actual, double expected, double magnitude) {
+        assert(std::isfinite(actual));
+        assert(std::abs(actual - expected) <= 2e-6 * (1.0 + magnitude));
+    };
+    for (int cols : {1, 15, 16, 17, 31, 32, 63, 96, 257}) {
+        std::vector<float> x(cols), a(cols);
+        double expected_dot = 0.0, magnitude_dot = 0.0;
+        for (int i = 0; i < cols; ++i) {
+            x[i] = sample(); a[i] = sample();
+            const double product = static_cast<double>(x[i]) * a[i];
+            expected_dot += product; magnitude_dot += std::abs(product);
+        }
+        check(q3x_backend::dot(a.data(), x.data(), cols), expected_dot, magnitude_dot);
+        float fast_dot = 123.0f;
+        if (q3x_cpu::try_dot(a.data(), x.data(), cols, &fast_dot))
+            check(fast_dot, expected_dot, magnitude_dot);
+        else
+            assert(fast_dot == 123.0f);
+
+        for (int rows : {3, 1023, 1024, 1031}) {
+            std::vector<uint16_t> weights(rows * cols);
+            for (auto& w : weights) {
+                const float value = sample();
+                uint32_t bits; std::memcpy(&bits, &value, sizeof(bits));
+                w = static_cast<uint16_t>(bits >> 16);
+            }
+            std::vector<float> output(rows), fast(rows, 123.0f);
+            q3x_backend::Linear matrix {weights.data(), rows, cols, q3x_model::MATRIX_BF16};
+            q3x_backend::mv(matrix, x.data(), output.data());
+            const bool accelerated = q3x_cpu::try_mv(weights.data(), matrix.type, rows, cols,
+                                                     x.data(), fast.data());
+            for (int row = 0; row < rows; ++row) {
+                double expected = 0.0, magnitude = 0.0;
+                for (int i = 0; i < cols; ++i) {
+                    const double product = static_cast<double>(q3x_backend::f32(weights[row * cols + i])) * x[i];
+                    expected += product; magnitude += std::abs(product);
+                }
+                check(output[row], expected, magnitude);
+                if (accelerated) check(fast[row], expected, magnitude);
+                else assert(fast[row] == 123.0f);
+            }
+        }
+    }
+    for (int rows : {3, 1023, 1024, 1031}) {
+        constexpr int cols = 96, blocks = cols / q3x_q8::BLOCK_SIZE;
+        const uint16_t scales[] = {0x3555, 0x2e66, 0x0400, 0x0001};
+        const double decoded[] = {0.333251953125, 0.0999755859375,
+                                  0.00006103515625, 0.000000059604644775390625};
+        std::vector<q3x_q8::Block> weights(rows * blocks);
+        float x[cols];
+        for (float& v : x) v = sample();
+        for (int block = 0; block < rows * blocks; ++block) {
+            weights[block].scale = scales[block % 4];
+            for (auto& v : weights[block].values) v = static_cast<int8_t>(sample() * 127);
+        }
+        std::vector<float> output(rows);
+        q3x_backend::Linear matrix {weights.data(), rows, cols, q3x_model::MATRIX_Q8_0};
+        q3x_backend::mv(matrix, x, output.data());
+        for (int row = 0; row < rows; ++row) {
+            double expected = 0.0, magnitude = 0.0;
+            for (int block = 0; block < blocks; ++block)
+                for (int i = 0; i < q3x_q8::BLOCK_SIZE; ++i) {
+                    const int index = row * blocks + block;
+                    const double product = decoded[index % 4] * weights[index].values[i] *
+                                           x[block * q3x_q8::BLOCK_SIZE + i];
+                    expected += product; magnitude += std::abs(product);
+                }
+            check(output[row], expected, magnitude);
+        }
+    }
+    float untouched = 123.0f;
+    assert(!q3x_cpu::try_mv(nullptr, q3x_model::MATRIX_Q4_0, 1, 32, nullptr, &untouched));
+    assert(untouched == 123.0f);
+}
+
 size_t q8_9b_file_size() {
     const q3x_model::ModelConfig& c = q3x_model::QWEN35_9B;
     size_t cursor = q3x_model::HEADER_SIZE;
@@ -141,6 +224,7 @@ void loader_test() {
 }  // namespace
 
 int main() {
+    cpu_kernel_test();
     q3x_q8::Block blocks[4]{};
     const uint16_t scales[4] = {0x3c00, 0x3800, 0x4000, 0x3400};
     for (int block = 0; block < 4; ++block) {

@@ -18,7 +18,8 @@ PORT ?= 8002
 SERVED_MODEL ?= qwen3.5-0.8b-reference
 
 ENGINE_DIR ?= ..
-LIBRARY ?= build/libqwen3x.so
+CPU_OPT ?= 1
+LIBRARY ?= build$(if $(filter 0,$(CPU_OPT)),/scalar)/libqwen3x.so
 CUDA_LIBRARY ?= build/libqwen3x-cuda.so
 METAL_LIBRARY := $(ENGINE_DIR)/build/metal/libqwen3x-metal.dylib
 BIN ?= $(ENGINE_DIR)/build/qwen35-0.8b-model.bin
@@ -38,6 +39,8 @@ ENGINE_CXXFLAGS := -O3 -std=c++17 -fno-exceptions -fno-rtti \
 	$(if $(filter Darwin,$(shell uname -s)),-mmacosx-version-min=13.3,)
 THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(ENGINE_DIR)/third_party/spdlog/include
+CPU_SRC := $(ENGINE_DIR)/arch/cpu.cpp
+CPU_HEADERS := $(wildcard $(ENGINE_DIR)/arch/*.h $(ENGINE_DIR)/arch/arm/*.h $(ENGINE_DIR)/arch/x86/*.h $(ENGINE_DIR)/arch/apple/*.h)
 SPDLOG_SRC := $(wildcard $(ENGINE_DIR)/third_party/spdlog/src/*.cpp)
 
 .PHONY: all sync dump test tool-test llama-smoke-test cpu cuda compare compare-cuda compare-metal \
@@ -116,12 +119,13 @@ llama-smoke-run:
 		--llama-debug "$(LLAMA_DEBUG)" --gguf "$(LLAMA_GGUF)" \
 		--qwen "$(QWEN)" --bin "$(QWEN_BIN)" --render "$(QWEN_RENDER)"
 
-$(LIBRARY): $(ENGINE_DIR)/engine.cpp $(ENGINE_DIR)/runtime.cpp \
+$(LIBRARY): $(CPU_SRC) $(CPU_HEADERS) Makefile $(ENGINE_DIR)/engine.cpp $(ENGINE_DIR)/runtime.cpp \
 		$(ENGINE_DIR)/log.cpp $(ENGINE_DIR)/qwen3x.h \
 		$(ENGINE_DIR)/internal.h $(ENGINE_DIR)/model_config.h \
 		$(ENGINE_DIR)/q8.h $(SPDLOG_SRC)
 	mkdir -p "$(dir $(LIBRARY))"
 	$(CXX) $(ENGINE_CXXFLAGS) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) \
+		-DQ3X_CPU_OPT=$(CPU_OPT) $(CPU_SRC) \
 		-fPIC -shared -I$(ENGINE_DIR) $(ENGINE_DIR)/engine.cpp \
 		$(ENGINE_DIR)/runtime.cpp $(ENGINE_DIR)/log.cpp $(SPDLOG_SRC) \
 		-pthread -o "$(LIBRARY)"

@@ -73,8 +73,9 @@ make model-9b
 ```
 
 在 Apple Silicon Mac 上，`make serve-9b` 和 `make serve-eval-9b` 自动选择 Metal；Linux
-选择 CUDA。原生 CPU binary `build/qwen3x` 继续作为 correctness baseline，其中 Q8_0 dot
-使用 Arm NEON，较大的矩阵按行通过系统线程池并行。9B 的 65,536-token CPU eval Session
+选择 CUDA。原生 CPU binary `build/qwen3x` 共用一份 CPU forward：ARM 上 Q8_0 dot
+使用 NEON，支持 AVX-512 的 x86 构建使用 FP32/BF16 dot 优化；Apple 上较大的 BF16/Q8
+矩阵按行通过 GCD 并行。所有手写优化位于 `arch/`。9B 的 65,536-token CPU eval Session
 需要约 13--15 GiB 统一内存，因此建议至少 24 GiB 内存。服务和 q3x 不设置整请求 deadline，
 慢速本地生成由完成条件或用户取消结束。M5 Pro 48 GB 的 CPU baseline、容量和六题 smoke 记录在
 [`eval/q8-9b-macos.md`](eval/q8-9b-macos.md)。
@@ -333,7 +334,11 @@ audit 按事件记录原始请求、render prompt、模型输出、工具解析�
 ## 目录
 
 ```text
-engine.cpp          CPU correctness engine 与完整单 token forward
+engine.cpp          CPU 朴素算子、Model/State 与完整单 token forward
+arch/cpu.cpp        CPU 加速入口与平台选择；不拥有模型或状态
+arch/arm/           ARM NEON 算子
+arch/x86/           x86 AVX-512 算子
+arch/apple/         Apple GCD 行并行调度
 arch/cuda/engine.cu CUDA Model/State、chunk prefill 和单 token forward
 arch/metal/         Metal Model/State、完整 forward 与 MSL kernel
 runtime.cpp         Session、sampling 和 cache 生命周期
@@ -350,6 +355,24 @@ build/              下载的 checkpoint、生成的模型和编译产物
 
 model 和 render 数据保持分开：各官方型号只管理自己的权重文件，固定的
 `qwen3x-render.bin` 保存所有支持型号共享的 tokenizer 数据。
+
+`engine.cpp` 保留完整的标量公式。`mv` 和 FP32 `dot` 先尝试 `arch/cpu.h` 的同步
+加速入口；返回 `false` 时输出未被修改，继续执行当前文件的朴素循环。SIMD 与系统
+线程调度在 `arch/` 内组合，CPU 优化不复制 forward，也不修改 Model/State 布局。
+CUDA 和 Metal 继续保留适合各自内存与执行方式的完整 forward。
+
+默认 `make` 使用本机指令集选择手写优化；没有对应实现时自动回退。教学和数值对照可用：
+
+```sh
+make CPU_OPT=0                  # build/scalar/qwen3x
+make test CPU_OPT=0             # 同一套回归，关闭手写 SIMD 和 GCD 并行
+make -C reference CPU_OPT=0 build/scalar/libqwen3x.so
+```
+
+两种模式默认使用独立构建目录；自定义 `BUILD` 或 reference `LIBRARY` 时也应保持分开。
+`CPU_OPT=0` 保留普通编译器优化，不保证禁用自动向量化。AVX-512 按编译目标启用，
+没有运行时指令集探测；native binary 应在对应 CPU 上运行。SIMD 改变浮点累加顺序，
+数值验收使用误差阈值，而非要求与标量结果逐位相等。
 
 ## 历史
 

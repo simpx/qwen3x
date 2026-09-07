@@ -88,7 +88,9 @@ def main():
               "decode_definition": "eval calls after one excluded first eval",
               "system_before": system_snapshot(), "cases": [], "status": "running"}
     report["source_sha256"] = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
-                               for name in ("runtime.cpp", "engine.cpp", "arch/metal/engine.mm",
+                               for name in ("runtime.cpp", "engine.cpp", "arch/cpu.cpp", "arch/cpu.h",
+                                            "arch/arm/kernels.h", "arch/x86/kernels.h",
+                                            "arch/apple/parallel.h", "arch/metal/engine.mm",
                                             "arch/metal/kernels.metal", "scripts/bench_session.py")}
     pressure = {report["system_before"].get("pressure_level")}
     stopped = threading.Event()

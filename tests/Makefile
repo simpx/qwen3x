@@ -1,5 +1,6 @@
 PROJECT := $(abspath ..)
-BUILD ?= $(PROJECT)/build
+CPU_OPT ?= 1
+BUILD ?= $(PROJECT)/build$(if $(filter 0,$(CPU_OPT)),/scalar)
 CXX ?= c++
 UV ?= uv
 ifneq ($(strip $(PYTHON)),)
@@ -25,6 +26,9 @@ CXXFLAGS ?= -O3 -std=c++17 -fno-exceptions -fno-rtti \
 	$(if $(filter Darwin,$(shell uname -s)),-mmacosx-version-min=13.3,)
 THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(PROJECT)/third_party/spdlog/include
+CPU_SRC := $(PROJECT)/arch/cpu.cpp
+CPU_HEADERS := $(wildcard $(PROJECT)/arch/*.h $(PROJECT)/arch/arm/*.h $(PROJECT)/arch/x86/*.h $(PROJECT)/arch/apple/*.h)
+CPU_FLAGS := -DQ3X_CPU_OPT=$(CPU_OPT)
 SPDLOG_SRC := $(wildcard $(PROJECT)/third_party/spdlog/src/*.cpp)
 
 .PHONY: test parser-test runtime-test q8-cpu-test cli-test chat-test agent-test \
@@ -47,22 +51,22 @@ $(PARSER_TEST): parser_test.cpp $(PROJECT)/parser.cpp $(PROJECT)/render.cpp \
 parser-test: $(PARSER_TEST)
 	$(PARSER_TEST)
 
-$(RUNTIME_TEST): runtime_test.cpp $(PROJECT)/engine.cpp $(PROJECT)/runtime.cpp \
+$(RUNTIME_TEST): $(CPU_SRC) $(CPU_HEADERS) Makefile runtime_test.cpp $(PROJECT)/engine.cpp $(PROJECT)/runtime.cpp \
 		$(PROJECT)/log.cpp $(PROJECT)/qwen3x.h $(PROJECT)/internal.h \
 		$(PROJECT)/model_config.h $(SPDLOG_SRC)
 	mkdir -p "$(BUILD)"
 	$(CXX) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) -I$(PROJECT) \
-		$(PROJECT)/engine.cpp $(PROJECT)/runtime.cpp $(PROJECT)/log.cpp \
+		$(CPU_FLAGS) $(CPU_SRC) $(PROJECT)/engine.cpp $(PROJECT)/runtime.cpp $(PROJECT)/log.cpp \
 		runtime_test.cpp $(SPDLOG_SRC) -pthread -o "$@"
 
 runtime-test: $(RUNTIME_TEST)
 	$(RUNTIME_TEST)
 
-$(Q8_CPU_TEST): q8_cpu_test.cpp $(PROJECT)/engine.cpp $(PROJECT)/log.cpp \
+$(Q8_CPU_TEST): $(CPU_SRC) $(CPU_HEADERS) Makefile q8_cpu_test.cpp $(PROJECT)/engine.cpp $(PROJECT)/log.cpp \
 		$(PROJECT)/q8.h $(PROJECT)/model_config.h $(PROJECT)/internal.h $(SPDLOG_SRC)
 	mkdir -p "$(BUILD)"
 	$(CXX) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) -I$(PROJECT) \
-		q8_cpu_test.cpp $(PROJECT)/log.cpp $(SPDLOG_SRC) -pthread -o "$@"
+		$(CPU_FLAGS) $(CPU_SRC) q8_cpu_test.cpp $(PROJECT)/log.cpp $(SPDLOG_SRC) -pthread -o "$@"
 
 q8-cpu-test: $(Q8_CPU_TEST)
 	$(Q8_CPU_TEST)
