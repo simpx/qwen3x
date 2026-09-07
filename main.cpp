@@ -1166,6 +1166,9 @@ bool initialize(Runtime* runtime, std::string* error) {
         case 9000:
             runtime->options.served_model = "qwen3.5-9b";
             break;
+        case 36035:
+            runtime->options.served_model = "qwen3.6-35b-a3b";
+            break;
         case 38027:
             runtime->options.served_model = "qwen3.8-27b";
             break;

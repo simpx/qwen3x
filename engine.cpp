@@ -52,9 +52,20 @@ struct AttentionWeights {
     Linear q, k, v, out;
     const BF16 *qnorm = nullptr, *knorm = nullptr;
 };
+struct ExpertLinear {
+    const void* w = nullptr;
+    int experts = 0, rows = 0, cols = 0;
+    q3x_model::MatrixType type = q3x_model::MATRIX_Q4_0;
+};
+struct MoeWeights {
+    Linear router;
+    ExpertLinear gate_up, down;
+    Linear shared_gate, shared_up, shared_down, shared_scale;
+};
 struct Layer {
     const BF16 *input_norm = nullptr, *post_norm = nullptr;
     Linear gate, up, down;
+    MoeWeights moe;
     DeltaWeights delta;
     AttentionWeights attention;
 };
@@ -79,20 +90,26 @@ struct Storage {
 
 struct Work {
     Storage storage;
-    FP32 *hidden, *normalized, *branch, *logits, *ffn_gate, *ffn_up;
+    FP32 *hidden, *normalized, *branch, *logits, *ffn_gate_up, *ffn_gate, *ffn_up;
     FP32 *delta_qkv, *delta_z, *delta_a, *delta_b, *delta_q, *delta_k, *delta_output;
     FP32 *query_and_gate, *query, *attention_gate, *key, *value, *attention_output;
+    FP32 *router_logits, *router_probs;
+    int expert_ids[q3x_model::MAX_TOP_K] {};
     explicit Work(const q3x_model::ModelConfig& c) {
         const int DQKV = 2 * c.KH * c.KD + c.VH * c.VD;
         const int DO = c.VH * c.VD, AS = c.AH * c.AD, KVW = c.KVH * c.AD;
         storage.allocate(3ull * c.H + c.V + 2ull * c.I + DQKV + 4ull * DO +
-                         2ull * c.VH + 5ull * AS + 2ull * KVW);
+                         2ull * c.VH + 5ull * AS + 2ull * KVW +
+                         2ull * c.experts);
+        Q3X_ASSERT(c.top_k >= 0 && c.top_k <= q3x_model::MAX_TOP_K,
+                   "top_k=%d limit=%d", c.top_k, q3x_model::MAX_TOP_K);
         hidden = storage.take(c.H);
         normalized = storage.take(c.H);
         branch = storage.take(c.H);
         logits = storage.take(c.V);
-        ffn_gate = storage.take(c.I);
-        ffn_up = storage.take(c.I);
+        ffn_gate_up = storage.take(2ull * c.I);
+        ffn_gate = ffn_gate_up;
+        ffn_up = ffn_gate_up + c.I;
         delta_qkv = storage.take(DQKV);
         delta_z = storage.take(DO);
         delta_a = storage.take(c.VH);
@@ -106,6 +123,8 @@ struct Work {
         key = storage.take(KVW);
         value = storage.take(KVW);
         attention_output = storage.take(AS);
+        router_logits = storage.take(c.experts);
+        router_probs = storage.take(c.experts);
         Q3X_ASSERT(storage.used == storage.count, "Work storage layout mismatch");
     }
 };
@@ -380,6 +399,18 @@ void mv(const Linear& w, const FP32* x, FP32* y) {
     case q3x_model::MATRIX_Q4_0: mv_q4(w, x, y); break;
     }
 }
+void expert_mv_q4(const ExpertLinear& w, int expert, const FP32* x, FP32* y) {
+    Q3X_ASSERT(w.type == q3x_model::MATRIX_Q4_0 &&
+               expert >= 0 && expert < w.experts,
+               "expert matrix type=%u expert=%d count=%d", w.type, expert, w.experts);
+    const size_t blocks_per_expert = static_cast<size_t>(w.rows) * w.cols /
+                                     q3x_q4::BLOCK_SIZE;
+    Linear selected {
+        static_cast<const q3x_q4::Block*>(w.w) + expert * blocks_per_expert,
+        w.rows, w.cols, w.type,
+    };
+    mv_q4(selected, x, y);
+}
 FP32 dot(const FP32* a, const FP32* b, int n) {
     FP32 sum = 0.0f;
     for (int i = 0; i < n; ++i) sum += a[i] * b[i];
@@ -531,6 +562,60 @@ void ffn(const Layer& layer, const FP32* input, Work& work, FP32* out, int I) {
     for (int i = 0; i < I; ++i) work.ffn_gate[i] = silu(work.ffn_gate[i]) * work.ffn_up[i];
     mv(layer.down, work.ffn_gate, out);
 }
+void router_top_k(const FP32* logits, int experts, int top_k,
+                  int* ids, FP32* probabilities) {
+    Q3X_ASSERT(experts > 0 && top_k > 0 && top_k <= experts,
+               "router experts=%d top_k=%d", experts, top_k);
+    FP32 maximum = -std::numeric_limits<FP32>::infinity();
+    for (int expert = 0; expert < experts; ++expert)
+        maximum = std::max(maximum, logits[expert]);
+    FP32 total = 0.0f;
+    for (int expert = 0; expert < experts; ++expert)
+        total += probabilities[expert] = std::exp(logits[expert] - maximum);
+    for (int expert = 0; expert < experts; ++expert) probabilities[expert] /= total;
+
+    FP32 selected_total = 0.0f;
+    for (int slot = 0; slot < top_k; ++slot) {
+        int selected = -1;
+        for (int expert = 0; expert < experts; ++expert) {
+            bool used = false;
+            for (int previous = 0; previous < slot; ++previous)
+                used = used || ids[previous] == expert;
+            if (!used && (selected < 0 || probabilities[expert] > probabilities[selected]))
+                selected = expert;
+        }
+        Q3X_ASSERT(selected >= 0, "router failed to select slot=%d", slot);
+        ids[slot] = selected;
+        selected_total += probabilities[selected];
+    }
+    for (int slot = 0; slot < top_k; ++slot)
+        probabilities[ids[slot]] /= selected_total;
+}
+void moe(const MoeWeights& weights, const FP32* input, Work& work,
+         FP32* out, const q3x_model::ModelConfig& c) {
+    mv(weights.router, input, work.router_logits);
+    router_top_k(work.router_logits, c.experts, c.top_k,
+                 work.expert_ids, work.router_probs);
+    std::fill(out, out + c.H, 0.0f);
+    for (int slot = 0; slot < c.top_k; ++slot) {
+        const int expert = work.expert_ids[slot];
+        expert_mv_q4(weights.gate_up, expert, input, work.ffn_gate_up);
+        for (int i = 0; i < c.I; ++i)
+            work.ffn_gate[i] = silu(work.ffn_gate[i]) * work.ffn_up[i];
+        expert_mv_q4(weights.down, expert, work.ffn_gate, work.delta_output);
+        const FP32 weight = work.router_probs[expert];
+        for (int i = 0; i < c.H; ++i) out[i] += weight * work.delta_output[i];
+    }
+
+    mv(weights.shared_gate, input, work.ffn_gate);
+    mv(weights.shared_up, input, work.ffn_up);
+    for (int i = 0; i < c.shared_I; ++i)
+        work.ffn_gate[i] = silu(work.ffn_gate[i]) * work.ffn_up[i];
+    mv(weights.shared_down, work.ffn_gate, work.delta_output);
+    mv(weights.shared_scale, input, work.router_logits);
+    const FP32 shared_scale = sigmoid(work.router_logits[0]);
+    for (int i = 0; i < c.H; ++i) out[i] += shared_scale * work.delta_output[i];
+}
 void forward(const Model& model, State& state, int token, bool compute_logits) {
     const q3x_model::ModelConfig& c = *model.config;
     Work& work = state.work;
@@ -548,7 +633,10 @@ void forward(const Model& model, State& state, int token, bool compute_logits) {
                       work.normalized, work, work.branch, c);
         residual_add(work.hidden, work.branch, c.H);
         rms(work.hidden, layer.post_norm, c.H, work.normalized);
-        ffn(layer, work.normalized, work, work.branch, c.I);
+        if (c.experts)
+            moe(layer.moe, work.normalized, work, work.branch, c);
+        else
+            ffn(layer, work.normalized, work, work.branch, c.I);
         residual_add(work.hidden, work.branch, c.H);
     }
     if (compute_logits) {
@@ -598,48 +686,71 @@ bool Model::load(const char* path, const char** error) {
     const auto& c = *config;
     const int AS = c.AH * c.AD, KVW = c.KVH * c.AD;
     const int DO = c.VH * c.VD, DQKV = 2 * c.KH * c.KD + DO;
-    auto linear = [&](int rows, int cols) {
+    auto linear = [&](int rows, int cols, q3x_model::MatrixType type) {
         Q3X_ASSERT(cols % 32 == 0, "matrix cols=%d is not divisible by 32", cols);
-        if (c.matrix_type == q3x_model::MATRIX_BF16)
+        if (type == q3x_model::MATRIX_BF16)
             return Linear {take<BF16>(file, file_size, cursor,
                                       static_cast<size_t>(rows) * cols, error),
-                           rows, cols, c.matrix_type};
-        if (c.matrix_type == q3x_model::MATRIX_Q8_0)
+                           rows, cols, type};
+        if (type == q3x_model::MATRIX_Q8_0)
             return Linear {take<q3x_q8::Block>(file, file_size, cursor,
                                                static_cast<size_t>(rows) * cols /
                                                q3x_q8::BLOCK_SIZE, error),
-                           rows, cols, c.matrix_type};
+                           rows, cols, type};
         return Linear {take<q3x_q4::Block>(file, file_size, cursor,
                                            static_cast<size_t>(rows) * cols /
                                            q3x_q4::BLOCK_SIZE, error),
-                       rows, cols, c.matrix_type};
+                       rows, cols, type};
+    };
+    auto model_linear = [&](int rows, int cols) {
+        return linear(rows, cols, c.matrix_type);
+    };
+    auto expert = [&](int rows, int cols) {
+        Q3X_ASSERT(c.matrix_type == q3x_model::MATRIX_Q4_0,
+                   "expert matrix model type=%u", c.matrix_type);
+        const size_t blocks = static_cast<size_t>(c.experts) * rows * cols /
+                              q3x_q4::BLOCK_SIZE;
+        return ExpertLinear {
+            take<q3x_q4::Block>(file, file_size, cursor, blocks, error),
+            c.experts, rows, cols, c.matrix_type,
+        };
     };
     layer.reset(new (std::nothrow) Layer[c.N]);
     if (!layer) return fail("cannot allocate model layer table");
-    embedding = linear(c.V, c.H);
-    lm_head = c.tied_embeddings ? embedding : linear(c.V, c.H);
+    embedding = model_linear(c.V, c.H);
+    lm_head = c.tied_embeddings ? embedding : model_linear(c.V, c.H);
     final_norm = take<BF16>(file, file_size, cursor, c.H, error);
     for (int i = 0; i < c.N; ++i) {
         Layer& l = layer[i]; l.input_norm = take<BF16>(file, file_size, cursor, c.H, error);
         if (i % c.AI != c.AI - 1) {
-            l.delta.qkv = linear(DQKV, c.H); l.delta.z = linear(DO, c.H);
-            l.delta.a = linear(c.VH, c.H); l.delta.b = linear(c.VH, c.H);
+            l.delta.qkv = model_linear(DQKV, c.H); l.delta.z = model_linear(DO, c.H);
+            l.delta.a = model_linear(c.VH, c.H); l.delta.b = model_linear(c.VH, c.H);
             l.delta.conv = take<BF16>(file, file_size, cursor,
                                       static_cast<size_t>(DQKV) * c.CK, error);
             l.delta.alog = take<FP32>(file, file_size, cursor, c.VH, error);
             l.delta.dt = take<BF16>(file, file_size, cursor, c.VH, error);
             l.delta.norm = take<FP32>(file, file_size, cursor, c.VD, error);
-            l.delta.out = linear(c.H, DO);
+            l.delta.out = model_linear(c.H, DO);
         } else {
-            l.attention.q = linear(2 * AS, c.H); l.attention.k = linear(KVW, c.H);
-            l.attention.v = linear(KVW, c.H);
+            l.attention.q = model_linear(2 * AS, c.H); l.attention.k = model_linear(KVW, c.H);
+            l.attention.v = model_linear(KVW, c.H);
             l.attention.qnorm = take<BF16>(file, file_size, cursor, c.AD, error);
             l.attention.knorm = take<BF16>(file, file_size, cursor, c.AD, error);
-            l.attention.out = linear(c.H, AS);
+            l.attention.out = model_linear(c.H, AS);
         }
         l.post_norm = take<BF16>(file, file_size, cursor, c.H, error);
-        l.gate = linear(c.I, c.H);
-        l.up = linear(c.I, c.H); l.down = linear(c.H, c.I);
+        if (c.experts) {
+            l.moe.router = linear(c.experts, c.H, q3x_model::MATRIX_BF16);
+            l.moe.gate_up = expert(2 * c.I, c.H);
+            l.moe.down = expert(c.H, c.I);
+            l.moe.shared_gate = model_linear(c.shared_I, c.H);
+            l.moe.shared_up = model_linear(c.shared_I, c.H);
+            l.moe.shared_down = model_linear(c.H, c.shared_I);
+            l.moe.shared_scale = linear(1, c.H, q3x_model::MATRIX_BF16);
+        } else {
+            l.gate = model_linear(c.I, c.H);
+            l.up = model_linear(c.I, c.H); l.down = model_linear(c.H, c.I);
+        }
     }
     if (*error) return false;
     if (cursor != file_size) return fail("model.bin size does not match schema");

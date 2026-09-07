@@ -217,6 +217,7 @@ void run(id<MTLDevice> device, q3x_model::MatrixType type) {
     const q3x_model::ModelConfig config = {
         800, "synthetic-metal-smoke", 64, 96, 160, 4, 4, 8, 2, 256, 64,
         16, type == q3x_model::MATRIX_BF16 ? 16 : 32, 128, 128, 4,
+        0, 0, 0,
         type, type == q3x_model::MATRIX_BF16,
     };
     Fixture fixture;

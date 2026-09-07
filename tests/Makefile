@@ -1,6 +1,7 @@
 PROJECT := $(abspath ..)
 BUILD ?= $(PROJECT)/build
 CXX ?= c++
+NVCC ?= nvcc
 UV ?= uv
 ifneq ($(strip $(PYTHON)),)
 PYTHON := $(PYTHON)
@@ -18,6 +19,8 @@ RENDER_BIN ?= $(BUILD)/qwen3x-render.bin
 PARSER_TEST ?= $(BUILD)/parser-test
 RUNTIME_TEST ?= $(BUILD)/runtime-test
 Q8_CPU_TEST ?= $(BUILD)/q8-cpu-test
+Q4_CPU_TEST ?= $(BUILD)/q4-cpu-test
+Q4_CUDA_TEST ?= $(BUILD)/q4-cuda-test
 RENDER_DRIVER ?= $(BUILD)/render-test
 
 CXXFLAGS ?= -O3 -std=c++17 -fno-exceptions -fno-rtti \
@@ -27,15 +30,17 @@ THIRD_PARTY_FLAGS := -DSPDLOG_COMPILED_LIB -DSPDLOG_NO_EXCEPTIONS \
 	-I$(PROJECT)/third_party/spdlog/include
 SPDLOG_SRC := $(wildcard $(PROJECT)/third_party/spdlog/src/*.cpp)
 
-.PHONY: test parser-test runtime-test q8-cpu-test cli-test chat-test agent-test \
+.PHONY: test parser-test runtime-test q8-cpu-test q4-cpu-test q4-cuda-test \
+	cli-test chat-test agent-test \
 	pack-test metal-tools-test bench-test render-test render-test-27b http-test \
 	pi-retry-test clean
 
-test: parser-test runtime-test q8-cpu-test cli-test chat-test agent-test \
+test: parser-test runtime-test q8-cpu-test q4-cpu-test cli-test chat-test agent-test \
 	pack-test metal-tools-test bench-test
 
 bench-test:
-	cd "$(PROJECT)" && $(SYSTEM_PYTHON) -m unittest -v tests.test_bench_session
+	cd "$(PROJECT)" && $(SYSTEM_PYTHON) -m unittest discover \
+		-s tests -p test_bench_session.py -v
 
 $(PARSER_TEST): parser_test.cpp $(PROJECT)/parser.cpp $(PROJECT)/render.cpp \
 		$(PROJECT)/render.h \
@@ -49,7 +54,7 @@ parser-test: $(PARSER_TEST)
 
 $(RUNTIME_TEST): runtime_test.cpp $(PROJECT)/engine.cpp $(PROJECT)/runtime.cpp \
 		$(PROJECT)/log.cpp $(PROJECT)/qwen3x.h $(PROJECT)/internal.h \
-		$(PROJECT)/model_config.h $(SPDLOG_SRC)
+		$(PROJECT)/model_config.h $(PROJECT)/q4.h $(PROJECT)/q8.h $(SPDLOG_SRC)
 	mkdir -p "$(BUILD)"
 	$(CXX) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) -I$(PROJECT) \
 		$(PROJECT)/engine.cpp $(PROJECT)/runtime.cpp $(PROJECT)/log.cpp \
@@ -59,13 +64,36 @@ runtime-test: $(RUNTIME_TEST)
 	$(RUNTIME_TEST)
 
 $(Q8_CPU_TEST): q8_cpu_test.cpp $(PROJECT)/engine.cpp $(PROJECT)/log.cpp \
-		$(PROJECT)/q8.h $(PROJECT)/model_config.h $(PROJECT)/internal.h $(SPDLOG_SRC)
+		$(PROJECT)/q4.h $(PROJECT)/q8.h $(PROJECT)/model_config.h \
+		$(PROJECT)/internal.h $(SPDLOG_SRC)
 	mkdir -p "$(BUILD)"
 	$(CXX) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) -I$(PROJECT) \
 		q8_cpu_test.cpp $(PROJECT)/log.cpp $(SPDLOG_SRC) -pthread -o "$@"
 
 q8-cpu-test: $(Q8_CPU_TEST)
 	$(Q8_CPU_TEST)
+
+$(Q4_CPU_TEST): q4_cpu_test.cpp $(PROJECT)/engine.cpp $(PROJECT)/log.cpp \
+		$(PROJECT)/q4.h $(PROJECT)/q8.h $(PROJECT)/model_config.h \
+		$(PROJECT)/internal.h $(SPDLOG_SRC)
+	mkdir -p "$(BUILD)"
+	$(CXX) $(CXXFLAGS) $(THIRD_PARTY_FLAGS) -I$(PROJECT) \
+		q4_cpu_test.cpp $(PROJECT)/log.cpp $(SPDLOG_SRC) -pthread -o "$@"
+
+q4-cpu-test: $(Q4_CPU_TEST)
+	$(Q4_CPU_TEST)
+
+$(Q4_CUDA_TEST): q4_cuda_test.cu $(PROJECT)/arch/cuda/engine.cu \
+		$(PROJECT)/q4.h $(PROJECT)/q8.h $(PROJECT)/model_config.h \
+		$(PROJECT)/internal.h $(PROJECT)/log.cpp $(SPDLOG_SRC)
+	mkdir -p "$(BUILD)"
+	$(NVCC) -O3 -std=c++17 -arch=native \
+		-Xcompiler=-fno-exceptions,-fno-rtti,-Wall,-Wextra \
+		$(THIRD_PARTY_FLAGS) -I$(PROJECT) q4_cuda_test.cu \
+		$(PROJECT)/log.cpp $(SPDLOG_SRC) -Xcompiler=-pthread -lcublas -o "$@"
+
+q4-cuda-test: $(Q4_CUDA_TEST)
+	$(Q4_CUDA_TEST)
 
 cli-test: $(PROGRAM)
 	@output=`$(PROGRAM) --mock --bench 8 4` && \
@@ -125,4 +153,5 @@ pi-retry-test:
 	cd "$(PROJECT)" && $(SYSTEM_PYTHON) tests/test_pi_retry.py --pi "$(PI)"
 
 clean:
-	rm -f "$(PARSER_TEST)" "$(RUNTIME_TEST)" "$(Q8_CPU_TEST)" "$(RENDER_DRIVER)"
+	rm -f "$(PARSER_TEST)" "$(RUNTIME_TEST)" "$(Q8_CPU_TEST)" "$(Q4_CPU_TEST)" \
+		"$(Q4_CUDA_TEST)" "$(RENDER_DRIVER)"

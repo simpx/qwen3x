@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import io
 import json
 import math
@@ -14,8 +15,9 @@ from scripts import pack_weights
 
 
 def config_for(model):
+    moe = model.get("num_experts", 0) > 0
     config = {
-        "model_type": "qwen3_5_text",
+        "model_type": "qwen3_5_moe_text" if moe else "qwen3_5_text",
         "max_position_embeddings": pack_weights.MAX_CONTEXT,
         "tie_word_embeddings": model["tie_word_embeddings"],
         "dtype": "bfloat16",
@@ -25,12 +27,33 @@ def config_for(model):
         },
     }
     for key in (
-        "vocab_size", "hidden_size", "intermediate_size", "num_hidden_layers",
+        "vocab_size", "hidden_size", "num_hidden_layers",
         "full_attention_interval", "num_attention_heads", "num_key_value_heads",
         "head_dim", "linear_num_key_heads", "linear_num_value_heads",
         "linear_key_head_dim", "linear_value_head_dim", "linear_conv_kernel_dim",
     ):
         config[key] = model[key]
+    if moe:
+        config.update({
+            "moe_intermediate_size": model["intermediate_size"],
+            "num_experts": model["num_experts"],
+            "num_experts_per_tok": model["num_experts_per_tok"],
+            "shared_expert_intermediate_size": model["shared_expert_intermediate_size"],
+            "hidden_act": "silu",
+            "mamba_ssm_dtype": "float32",
+            "rms_norm_eps": 1e-6,
+            "layer_types": [
+                "full_attention" if layer % model["full_attention_interval"] ==
+                model["full_attention_interval"] - 1 else "linear_attention"
+                for layer in range(model["num_hidden_layers"])
+            ],
+        })
+        config["rope_parameters"].update({
+            "rope_theta": 10000000,
+            "rope_type": "default",
+        })
+    else:
+        config["intermediate_size"] = model["intermediate_size"]
     if "output_gate_type" in model:
         config["output_gate_type"] = model["output_gate_type"]
     return config
@@ -88,7 +111,7 @@ class PackWeightsTest(unittest.TestCase):
         wrong["linear_num_value_heads"] = 16
         with self.assertRaisesRegex(ValueError, "only official"):
             pack_weights.select_model(wrong)
-        qwen38 = config_for(pack_weights.SUPPORTED_MODELS[3])
+        qwen38 = config_for(pack_weights.SUPPORTED_MODELS[4])
         self.assertEqual(qwen38["output_gate_type"], "swish")
         wrong_gate = copy.deepcopy(qwen38)
         wrong_gate["output_gate_type"] = "sigmoid"
@@ -128,7 +151,7 @@ class PackWeightsTest(unittest.TestCase):
         self.assertEqual(matrix_parameters, 8_952_741_888)
 
     def test_27b_schema_and_q4_storage_layout_are_fixed(self):
-        model = pack_weights.SUPPORTED_MODELS[3]
+        model = pack_weights.SUPPORTED_MODELS[4]
         tensors = list(pack_weights.expected_tensors(model))
         self.assertEqual(len(tensors), 851)
         self.assertEqual(tensors[0][0], "model.language_model.embed_tokens.weight")
@@ -149,6 +172,34 @@ class PackWeightsTest(unittest.TestCase):
             ),
             "BF16",
         )
+
+    def test_35b_moe_schema_matches_official_text_backbone(self):
+        model = pack_weights.SUPPORTED_MODELS[3]
+        tensors = list(pack_weights.expected_tensors(model))
+        self.assertEqual(len(tensors), 693)
+        self.assertEqual(tensors[1][0], "lm_head.weight")
+        names = {name for name, _, _, _ in tensors}
+        self.assertIn("model.language_model.layers.0.mlp.experts.gate_up_proj", names)
+        self.assertIn("model.language_model.layers.39.mlp.shared_expert_gate.weight", names)
+        layout = pack_weights.storage_layout(model, tensors)
+        self.assertEqual(layout["parameters"], 34_660_610_688)
+        self.assertEqual(layout["model_bytes"], 19_528_534_784)
+        self.assertEqual(
+            pack_weights.checkpoint_dtype(
+                model, "model.language_model.layers.0.linear_attn.A_log", "F32"
+            ),
+            "BF16",
+        )
+
+    def test_35b_rejects_each_wrong_moe_contract_field(self):
+        model = pack_weights.SUPPORTED_MODELS[3]
+        for key in ("model_type", "moe_intermediate_size", "num_experts",
+                    "num_experts_per_tok", "shared_expert_intermediate_size",
+                    "dtype", "max_position_embeddings", "tie_word_embeddings"):
+            wrong = copy.deepcopy(config_for(model))
+            wrong[key] = "wrong" if key in ("model_type", "dtype") else -1
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "only official"):
+                pack_weights.select_model(wrong)
 
     def test_q8_zero_and_rounding_boundaries_match_scalar_reference(self):
         values = np.zeros(64, dtype=np.float32)
@@ -231,6 +282,23 @@ class PackWeightsTest(unittest.TestCase):
                 [1.5, -2.25, 0.0],
             )
 
+    def test_shard_quantizes_rank3_q4_without_crossing_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "part.safetensors")
+            values = np.arange(4 * 32, dtype=np.float32).reshape(2, 2, 32) - 63
+            data = bf16_bytes(values)
+            header = json.dumps({
+                "tensor": {
+                    "dtype": "BF16", "shape": [2, 2, 32],
+                    "data_offsets": [0, len(data)],
+                }
+            }).encode()
+            path.write_bytes(struct.pack("<Q", len(header)) + header + data)
+            output = io.BytesIO()
+            with pack_weights.SafetensorsShard(path) as shard:
+                shard.copy_tensor("tensor", "BF16", (2, 2, 32), "Q4_0", output)
+            self.assertEqual(output.getvalue(), q4_reference(data))
+
     def test_pack_rejects_missing_tensor(self):
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory)
@@ -245,6 +313,58 @@ class PackWeightsTest(unittest.TestCase):
                                    return_value=iter(schema)):
                 with self.assertRaisesRegex(ValueError, "misses text tensors"):
                     pack_weights.pack(checkpoint, Path(directory, "out.bin"))
+
+    def test_pack_rejects_unexpected_text_tensor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory)
+            Path(checkpoint, "config.json").write_text(
+                '{"text_config": {}}', encoding="utf-8")
+            Path(checkpoint, "model.safetensors.index.json").write_text(json.dumps({
+                "weight_map": {
+                    "model.language_model.unexpected.weight": "part.safetensors"
+                }
+            }), encoding="utf-8")
+            with mock.patch.object(pack_weights, "select_model",
+                                   return_value=pack_weights.SUPPORTED_MODELS[2]), \
+                 mock.patch.object(pack_weights, "expected_tensors",
+                                   return_value=iter(())):
+                with self.assertRaisesRegex(ValueError, "unexpected text tensors"):
+                    pack_weights.pack(checkpoint, Path(directory, "out.bin"))
+
+    def test_35b_pack_rejects_outer_type_and_tokenizer_mismatch(self):
+        model = pack_weights.SUPPORTED_MODELS[3]
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory)
+            config = {"model_type": "wrong", "tie_word_embeddings": False,
+                      "text_config": config_for(model)}
+            (checkpoint / "config.json").write_text(json.dumps(config))
+            (checkpoint / "model.safetensors.index.json").write_text('{"weight_map": {}}')
+            with self.assertRaisesRegex(ValueError, "outer model_type"):
+                pack_weights.pack(checkpoint, checkpoint / "out.bin")
+            config["model_type"] = "qwen3_5_moe"
+            (checkpoint / "config.json").write_text(json.dumps(config))
+            with self.assertRaisesRegex(ValueError, "tokenizer mismatch"):
+                pack_weights.pack(checkpoint, checkpoint / "out.bin")
+
+    def test_35b_pack_ignores_non_text_weight_map_entries(self):
+        model = pack_weights.SUPPORTED_MODELS[3]
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory)
+            config = {"model_type": "qwen3_5_moe", "tie_word_embeddings": False,
+                      "text_config": config_for(model)}
+            (checkpoint / "config.json").write_text(json.dumps(config))
+            (checkpoint / "model.safetensors.index.json").write_text(json.dumps({
+                "weight_map": {"model.visual.unused.weight": "vision.safetensors"}
+            }))
+            hashes = {}
+            for filename in pack_weights.QWEN36_TOKENIZER_SHA256:
+                (checkpoint / filename).write_bytes(b"same tokenizer")
+                hashes[filename] = hashlib.sha256(b"same tokenizer").hexdigest()
+            with mock.patch.object(pack_weights, "expected_tensors", return_value=iter(())), \
+                 mock.patch.object(pack_weights, "QWEN36_TOKENIZER_SHA256", hashes):
+                pack_weights.pack(checkpoint, checkpoint / "out.bin")
+            self.assertEqual((checkpoint / "out.bin").stat().st_size,
+                             pack_weights.HEADER.size)
 
 
 if __name__ == "__main__":

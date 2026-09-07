@@ -37,7 +37,8 @@ NVCCFLAGS ?= -O3 -std=c++17 -arch=$(CUDA_ARCH) \
 
 .PHONY: all cuda metal metal-shaders metal-test metal-library metal-reference \
 	metal-smoke-vectors metal-smoke-9b-vectors metal-smoke metal-smoke-9b \
-	model-4b model-9b model-27b serve-4b serve-9b serve-27b \
+	model-4b model-9b model-27b model-35b cpu-35b-smoke cuda-35b-smoke \
+	serve-4b serve-9b serve-27b \
 	serve-eval-4b serve-eval-9b test cuda-test llama-smoke clean
 
 all: $(PROGRAM)
@@ -90,6 +91,35 @@ model-9b:
 model-27b:
 	$(MAKE) -C scripts model-27b render
 
+model-35b:
+	$(MAKE) -C scripts model-35b render
+
+cpu-35b-smoke: all model-35b
+	$(MAKE) -C reference build/libqwen3x.so
+	mkdir -p "$(BUILD)/qwen36-35b-cpu-smoke"
+	/usr/bin/time -v -o "$(BUILD)/qwen36-35b-cpu-smoke/time.txt" \
+		python3 tests/qwen36_smoke.py dump \
+		--library reference/build/libqwen3x.so \
+		--model "$(BUILD)/qwen36-35b-a3b-q4_0-model.bin" \
+		--vectors "$(BUILD)/qwen36-35b-cpu-smoke" \
+		--handoff "$(BUILD)/qwen36-35b-metal-smoke"
+	$(PROGRAM) --model "$(BUILD)/qwen36-35b-a3b-q4_0-model.bin" \
+		--render "$(BUILD)/qwen3x-render.bin" --prompt "Hello" \
+		--session-context 128 --max-tokens 4
+
+cuda-35b-smoke: cuda model-35b
+	$(MAKE) -C reference build/libqwen3x-cuda.so
+	mkdir -p "$(BUILD)/qwen36-35b-cuda-smoke"
+	/usr/bin/time -v -o "$(BUILD)/qwen36-35b-cuda-smoke/time.txt" \
+		python3 tests/qwen36_smoke.py check \
+		--library reference/build/libqwen3x-cuda.so \
+		--model "$(BUILD)/qwen36-35b-a3b-q4_0-model.bin" \
+		--vectors "$(BUILD)/qwen36-35b-cpu-smoke" \
+		--output "$(BUILD)/qwen36-35b-cuda-smoke" --context 8192
+	$(CUDA_PROGRAM) --model "$(BUILD)/qwen36-35b-a3b-q4_0-model.bin" \
+		--render "$(BUILD)/qwen3x-render.bin" --prompt "Hello" \
+		--session-context 8192 --max-tokens 4 --log-level info
+
 serve-4b: $(GPU_BACKEND)
 	test -f "$(BUILD)/qwen35-4b-model.bin" || { echo "run: make model-4b"; exit 1; }
 	test -f "$(BUILD)/qwen3x-render.bin" || { echo "run: make model-4b"; exit 1; }
@@ -141,7 +171,7 @@ $(CUDA_PROGRAM): $(CUDA_OBJ) $(COMMON_OBJ)
 	$(NVCC) $(NVCCFLAGS) $^ -L$(CUDA_LIB_DIR) -lcublas \
 		-Xlinker -rpath -Xlinker $(CUDA_LIB_DIR) -Xcompiler=-pthread -o $@
 
-$(CUDA_OBJ): arch/cuda/engine.cu internal.h model_config.h q8.h qwen3x.h Makefile
+$(CUDA_OBJ): arch/cuda/engine.cu internal.h model_config.h q4.h q8.h qwen3x.h Makefile
 	mkdir -p $(dir $@)
 	$(NVCC) $(NVCCFLAGS) -I. -MMD -MP -c $< -o $@
 
@@ -152,7 +182,7 @@ $(METAL_DIR)/kernels.metallib: arch/metal/kernels.metal scripts/compile_metal.py
 $(METAL_DIR)/kernels_metallib.h: $(METAL_DIR)/kernels.metallib
 	cd $(METAL_DIR) && xxd -i kernels.metallib > kernels_metallib.h
 
-$(METAL_OBJ): arch/metal/engine.mm internal.h model_config.h q8.h qwen3x.h \
+$(METAL_OBJ): arch/metal/engine.mm internal.h model_config.h q4.h q8.h qwen3x.h \
 		$(METAL_DIR)/kernels_metallib.h Makefile
 	mkdir -p $(dir $@)
 	$(METAL_CXX) $(CXXFLAGS) $(METAL_FLAGS) -I. -I$(METAL_DIR) -MMD -MP -c $< -o $@
@@ -161,7 +191,7 @@ $(METAL_PROGRAM): $(METAL_OBJ) $(COMMON_OBJ)
 	$(METAL_CXX) $(CXXFLAGS) $^ $(THREAD_FLAGS) $(METAL_FRAMEWORKS) -o $@
 
 $(BUILD)/obj/tests/metal_test.o: tests/metal_test.mm engine.cpp arch/metal/engine.mm \
-		internal.h model_config.h q8.h qwen3x.h $(METAL_DIR)/kernels_metallib.h Makefile
+		internal.h model_config.h q4.h q8.h qwen3x.h $(METAL_DIR)/kernels_metallib.h Makefile
 	mkdir -p $(dir $@)
 	$(METAL_CXX) $(CXXFLAGS) $(METAL_FLAGS) -I. -I$(METAL_DIR) -MMD -MP -c $< -o $@
 

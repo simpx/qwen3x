@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pack a supported official Qwen3.5/Qwen3.8 text backbone.
+"""Pack a supported official Qwen3.5/Qwen3.6/Qwen3.8 text backbone.
 
 The output is a deliberately small sequential format: a fixed metadata header
 followed by tensors in the exact order consumed by engine.cpp. The 4B
@@ -9,6 +9,7 @@ open and streams tensors without loading the model into RAM.
 
 import argparse
 from contextlib import ExitStack
+import hashlib
 import json
 import math
 import struct
@@ -32,6 +33,12 @@ Q4_DTYPE = np.dtype([
     ("values", "u1", (Q4_BLOCK_SIZE // 2,)),
 ], align=False)
 assert Q4_DTYPE.itemsize == 18
+
+QWEN36_TOKENIZER_SHA256 = {
+    "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "vocab.json": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
+    "merges.txt": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
+}
 
 SUPPORTED_MODELS = (
     {
@@ -68,6 +75,20 @@ SUPPORTED_MODELS = (
         "matrix_type": "Q8_0", "tie_word_embeddings": False,
     },
     {
+        "name": "Qwen3.6-35B-A3B", "model_id": 36035,
+        "vocab_size": 248320, "hidden_size": 2048,
+        "intermediate_size": 512, "num_hidden_layers": 40,
+        "full_attention_interval": 4, "num_attention_heads": 16,
+        "num_key_value_heads": 2, "head_dim": 256, "rotary_dim": 64,
+        "linear_num_key_heads": 16, "linear_num_value_heads": 32,
+        "linear_key_head_dim": 128, "linear_value_head_dim": 128,
+        "linear_conv_kernel_dim": 4,
+        "num_experts": 256, "num_experts_per_tok": 8,
+        "shared_expert_intermediate_size": 512,
+        "matrix_type": "Q4_0", "tie_word_embeddings": False,
+        "delta_parameter_dtype": "BF16",
+    },
+    {
         "name": "Qwen3.8-27B", "model_id": 38027,
         "vocab_size": 248320, "hidden_size": 5120,
         "intermediate_size": 17408, "num_hidden_layers": 64,
@@ -86,11 +107,11 @@ def select_model(text_config, tie_word_embeddings=None):
     """Return the one supported shape that exactly matches structural fields."""
     rope = text_config.get("rope_parameters", {})
     for model in SUPPORTED_MODELS:
+        moe = model.get("num_experts", 0) > 0
         contract = {
-            "model_type": "qwen3_5_text",
+            "model_type": "qwen3_5_moe_text" if moe else "qwen3_5_text",
             "vocab_size": model["vocab_size"],
             "hidden_size": model["hidden_size"],
-            "intermediate_size": model["intermediate_size"],
             "num_hidden_layers": model["num_hidden_layers"],
             "full_attention_interval": model["full_attention_interval"],
             "num_attention_heads": model["num_attention_heads"],
@@ -106,6 +127,24 @@ def select_model(text_config, tie_word_embeddings=None):
             "dtype": "bfloat16",
             "attn_output_gate": True,
         }
+        if moe:
+            contract.update({
+                "moe_intermediate_size": model["intermediate_size"],
+                "num_experts": model["num_experts"],
+                "num_experts_per_tok": model["num_experts_per_tok"],
+                "shared_expert_intermediate_size":
+                    model["shared_expert_intermediate_size"],
+                "hidden_act": "silu",
+                "mamba_ssm_dtype": "float32",
+                "rms_norm_eps": 1e-6,
+                "layer_types": [
+                    "full_attention" if layer % model["full_attention_interval"] ==
+                    model["full_attention_interval"] - 1 else "linear_attention"
+                    for layer in range(model["num_hidden_layers"])
+                ],
+            })
+        else:
+            contract["intermediate_size"] = model["intermediate_size"]
         actual_tie = text_config.get("tie_word_embeddings", tie_word_embeddings)
         matches = all(
             (actual_tie if key == "tie_word_embeddings" else text_config.get(key)) == value
@@ -117,10 +156,14 @@ def select_model(text_config, tie_word_embeddings=None):
         )
         if matches:
             partial = rope.get("partial_rotary_factor")
-            if partial == model["rotary_dim"] / model["head_dim"]:
+            rope_matches = partial == model["rotary_dim"] / model["head_dim"]
+            if moe:
+                rope_matches = (rope_matches and rope.get("rope_theta") == 10000000
+                                and rope.get("rope_type") == "default")
+            if rope_matches:
                 return model
     raise ValueError(
-        "only official Qwen3.5-0.8B/4B/9B and Qwen3.8-27B "
+        "only official Qwen3.5-0.8B/4B/9B, Qwen3.6-35B-A3B and Qwen3.8-27B "
         "text configurations are supported"
     )
 
@@ -224,9 +267,26 @@ def expected_tensors(model):
             yield prefix + "o_proj.weight", "BF16", (hidden, attention_heads * attention_dim), True
 
         yield layer_prefix + "post_attention_layernorm.weight", "BF16", (hidden,), False
-        yield layer_prefix + "mlp.gate_proj.weight", "BF16", (intermediate, hidden), True
-        yield layer_prefix + "mlp.up_proj.weight", "BF16", (intermediate, hidden), True
-        yield layer_prefix + "mlp.down_proj.weight", "BF16", (hidden, intermediate), True
+        if model.get("num_experts", 0):
+            experts = model["num_experts"]
+            shared = model["shared_expert_intermediate_size"]
+            yield layer_prefix + "mlp.gate.weight", "BF16", (experts, hidden), False
+            yield layer_prefix + "mlp.experts.gate_up_proj", "BF16", \
+                (experts, 2 * intermediate, hidden), True
+            yield layer_prefix + "mlp.experts.down_proj", "BF16", \
+                (experts, hidden, intermediate), True
+            yield layer_prefix + "mlp.shared_expert.gate_proj.weight", "BF16", \
+                (shared, hidden), True
+            yield layer_prefix + "mlp.shared_expert.up_proj.weight", "BF16", \
+                (shared, hidden), True
+            yield layer_prefix + "mlp.shared_expert.down_proj.weight", "BF16", \
+                (hidden, shared), True
+            yield layer_prefix + "mlp.shared_expert_gate.weight", "BF16", \
+                (1, hidden), False
+        else:
+            yield layer_prefix + "mlp.gate_proj.weight", "BF16", (intermediate, hidden), True
+            yield layer_prefix + "mlp.up_proj.weight", "BF16", (intermediate, hidden), True
+            yield layer_prefix + "mlp.down_proj.weight", "BF16", (hidden, intermediate), True
 
 
 def checkpoint_dtype(model, name, packed_dtype):
@@ -334,12 +394,13 @@ class SafetensorsShard:
         if quantized:
             if (quantized not in ("Q8_0", "Q4_0") or
                     source_dtype != "BF16" or dtype != "BF16" or
-                    len(shape) != 2 or shape[1] % Q8_BLOCK_SIZE):
+                    len(shape) not in (2, 3) or shape[-1] % Q8_BLOCK_SIZE):
                 raise ValueError(f"{name}: invalid {quantized} matrix shape {shape}")
-            row_bytes = shape[1] * 2
+            rows = math.prod(shape[:-1])
+            row_bytes = shape[-1] * 2
             rows_per_chunk = max(1, (8 * 1024 * 1024) // row_bytes)
-            for row in range(0, shape[0], rows_per_chunk):
-                count = min(rows_per_chunk, shape[0] - row)
+            for row in range(0, rows, rows_per_chunk):
+                count = min(rows_per_chunk, rows - row)
                 block = self.file.read(count * row_bytes)
                 if len(block) != count * row_bytes:
                     raise ValueError(f"{name}: truncated {self.path.name}")
@@ -377,10 +438,26 @@ def pack(checkpoint_dir, output_path):
     config = json.loads((checkpoint_dir / "config.json").read_text())
     text_config = config["text_config"]
     model = select_model(text_config, config.get("tie_word_embeddings"))
+    if model["model_id"] == 36035:
+        if config.get("model_type") != "qwen3_5_moe":
+            raise ValueError("Qwen3.6 checkpoint must use outer model_type=qwen3_5_moe")
+        for filename, expected_hash in QWEN36_TOKENIZER_SHA256.items():
+            path = checkpoint_dir / filename
+            if not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash:
+                raise ValueError(f"Qwen3.6 tokenizer mismatch: {filename}")
     expected = list(expected_tensors(model))
-    missing = {name for name, _, _, _ in expected} - weight_map.keys()
+    expected_names = {name for name, _, _, _ in expected}
+    missing = expected_names - weight_map.keys()
     if missing:
         raise ValueError("checkpoint misses text tensors: " + ", ".join(sorted(missing)[:3]))
+    actual_text_names = {
+        name for name in weight_map
+        if name == "lm_head.weight" or name.startswith("model.language_model.")
+    }
+    unexpected = actual_text_names - expected_names
+    if unexpected:
+        raise ValueError("checkpoint has unexpected text tensors: " +
+                         ", ".join(sorted(unexpected)[:3]))
     print_storage_layout(model, expected)
 
     shard_names = sorted({weight_map[name] for name, _, _, _ in expected})
@@ -402,15 +479,23 @@ def pack(checkpoint_dir, output_path):
                     name, dtype, shape, quantized, output,
                     checkpoint_dtype(model, name, dtype))
                 print(f"\r[{number:3}/{len(expected)}] {name}", end="", flush=True)
+            expected_size = storage_layout(model, expected)["model_bytes"]
+            if output.tell() != expected_size:
+                raise ValueError(
+                    f"packed size {output.tell()} does not match schema {expected_size}"
+                )
         print()
         temporary.replace(output_path)
     finally:
         if temporary.exists():
             temporary.unlink()
-    print(
-        f"wrote {output_path} ({output_path.stat().st_size / 2**30:.2f} GiB, "
-        f"{len(expected)} text tensors, {model['name']})"
-    )
+    digest = hashlib.sha256()
+    with output_path.open("rb") as packed:
+        for block in iter(lambda: packed.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    print(f"wrote {output_path} ({output_path.stat().st_size} bytes, "
+          f"{output_path.stat().st_size / 2**30:.2f} GiB, {len(expected)} text tensors, "
+          f"{model['name']}, model ID {model['model_id']}, sha256 {digest.hexdigest()})")
 
 
 def main():
