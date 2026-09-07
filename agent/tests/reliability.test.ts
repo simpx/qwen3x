@@ -56,7 +56,7 @@ test("actual concurrent resumptions have exactly one writer, including stale loc
       const dead = Bun.spawn(["true"]); await dead.exited;
       writeFileSync(file + ".lock", `${dead.pid}\n`);
       const children = Array.from({ length: 8 }, (_, index) => Bun.spawn([...command(), "--base-url", server.url,
-        "-m", "test", "-r", file, "-p", `contender ${round}:${index}`, "--request-timeout", "3"],
+        "-m", "test", "-r", file, "-p", `contender ${round}:${index}`],
         { cwd: box.cwd, stdin: "ignore", stdout: "ignore", stderr: "ignore" }));
       try {
         await until(() => children.filter(p => p.exitCode !== null).length >= 7, "losing session writers", 2000);

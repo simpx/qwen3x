@@ -9,7 +9,7 @@ export function sandbox() {
 }
 export function config(cwd: string): Config {
   return { cwd, model: "test", baseUrl: "", context: 32768, maxTokens: 2048, maxTurns: 8,
-    maxOutput: 4096, autoCompact: true, requestTimeout: 2000, commandTimeout: 2000 };
+    maxOutput: 4096, autoCompact: true, commandTimeout: 2000 };
 }
 export function event(delta: unknown, finish: string | null = null) {
   return `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;

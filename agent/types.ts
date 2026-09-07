@@ -24,7 +24,6 @@ export type Config = {
   context: number;
   maxTokens: number;
   maxTurns: number;
-  requestTimeout: number;
   commandTimeout: number;
   maxOutput: number;
   autoCompact: boolean;

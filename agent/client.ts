@@ -53,7 +53,7 @@ function headers(config: Config): Record<string, string> {
 
 export async function discoverModel(config: Config, signal: AbortSignal): Promise<string> {
   const response = await fetch(endpoint(config.baseUrl, "models"), {
-    headers: headers(config), signal: AbortSignal.any([signal, AbortSignal.timeout(config.requestTimeout)]),
+    headers: headers(config), signal,
   });
   if (!response.ok) throw new Error(`Model discovery returned HTTP ${response.status}; specify --model`);
   const body = await response.json();
@@ -67,7 +67,7 @@ export async function complete(config: Config, messages: Message[], tools: unkno
                                display: Display, maxTokens = config.maxTokens): Promise<Completion> {
   const response = await fetch(endpoint(config.baseUrl, "chat/completions"), {
     method: "POST", headers: headers(config),
-    signal: AbortSignal.any([signal, AbortSignal.timeout(config.requestTimeout)]),
+    signal,
     body: JSON.stringify({ model: config.model, messages, stream: true,
       stream_options: { include_usage: true }, max_tokens: maxTokens,
       ...(tools.length ? { tools } : {}),

@@ -23,7 +23,7 @@ function session(cwd: string, resume?: string, output?: string) {
 }
 function config(cwd = directory()): Config {
   return { cwd, baseUrl: "", model: "test-model", context: 32768, maxTokens: 2048, maxTurns: 8,
-    requestTimeout: 3000, commandTimeout: 2000, maxOutput: 4096, autoCompact: true };
+    commandTimeout: 2000, maxOutput: 4096, autoCompact: true };
 }
 function stream(events: unknown[], done = true): Response {
   const data = events.map(event => `data: ${JSON.stringify(event)}\r\n\r\n`).join("") + (done ? "data: [DONE]\n\n" : "");
@@ -153,13 +153,6 @@ test("request cancellation preserves the user task and partial response in JSONL
   }).run("task", controller.signal)).rejects.toThrow();
   expect(history.messages.at(-1)?.role).toBe("user");
   expect(readFileSync(file, "utf8")).toContain('"partial":"partial"');
-});
-
-test("request deadline stops a stalled SSE stream", async () => {
-  const cfg = config(); cfg.requestTimeout = 60;
-  cfg.baseUrl = server(() => new Response(new ReadableStream({ start() {} }),
-    { headers: { "content-type": "text/event-stream" } }));
-  await expect(complete(cfg, [], [], new AbortController().signal, () => {})).rejects.toThrow();
 });
 
 test("bash timeout and cancellation stop descendants; output is bounded", async () => {

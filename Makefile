@@ -37,7 +37,7 @@ NVCCFLAGS ?= -O3 -std=c++17 -arch=$(CUDA_ARCH) \
 
 .PHONY: all cuda metal metal-shaders metal-test metal-library metal-reference \
 	metal-smoke-vectors metal-smoke-9b-vectors metal-smoke metal-smoke-9b \
-	model-4b model-9b serve-4b serve-9b \
+	model-4b model-9b model-27b serve-4b serve-9b serve-27b \
 	serve-eval-4b serve-eval-9b test cuda-test llama-smoke clean
 
 all: $(PROGRAM)
@@ -87,6 +87,9 @@ model-4b:
 model-9b:
 	$(MAKE) -C scripts model-9b render
 
+model-27b:
+	$(MAKE) -C scripts model-27b render
+
 serve-4b: $(GPU_BACKEND)
 	test -f "$(BUILD)/qwen35-4b-model.bin" || { echo "run: make model-4b"; exit 1; }
 	test -f "$(BUILD)/qwen3x-render.bin" || { echo "run: make model-4b"; exit 1; }
@@ -103,13 +106,21 @@ serve-9b: $(GPU_BACKEND)
 		--host 127.0.0.1 --port 8000 --session-slots 1 \
 		--session-context 40960 --audit-log "$(BUILD)/qwen35-9b-audit.log"
 
+serve-27b: metal
+	test -f "$(BUILD)/qwen38-27b-q4_0-model.bin" || { echo "run: make model-27b"; exit 1; }
+	test -f "$(BUILD)/qwen3x-render.bin" || { echo "run: make model-27b"; exit 1; }
+	$(METAL_PROGRAM) --model "$(BUILD)/qwen38-27b-q4_0-model.bin" \
+		--render "$(BUILD)/qwen3x-render.bin" --listen \
+		--host 127.0.0.1 --port 8000 --session-slots 1 \
+		--session-context 32768 --audit-log "$(BUILD)/qwen38-27b-audit.log"
+
 serve-eval-4b: $(GPU_BACKEND)
 	test -f "$(BUILD)/qwen35-4b-model.bin" || { echo "run: make model-4b"; exit 1; }
 	test -f "$(BUILD)/qwen3x-render.bin" || { echo "run: make model-4b"; exit 1; }
 	$(GPU_PROGRAM) --model "$(BUILD)/qwen35-4b-model.bin" \
 		--render "$(BUILD)/qwen3x-render.bin" --listen \
 		--host 127.0.0.1 --port 8000 --session-slots 1 \
-		--session-context 65536 --request-timeout 7200 \
+		--session-context 65536 \
 		--audit-log "$(BUILD)/qwen35-4b-eval-audit.log"
 
 serve-eval-9b: $(GPU_BACKEND)
@@ -118,7 +129,7 @@ serve-eval-9b: $(GPU_BACKEND)
 	$(GPU_PROGRAM) --model "$(BUILD)/qwen35-9b-q8_0-model.bin" \
 		--render "$(BUILD)/qwen3x-render.bin" --listen \
 		--host 127.0.0.1 --port 8000 --session-slots 1 \
-		--session-context 65536 --request-timeout 7200 \
+		--session-context 65536 \
 		--audit-log "$(BUILD)/qwen35-9b-eval-audit.log"
 
 $(PROGRAM): $(PROGRAM_OBJ)

@@ -144,7 +144,7 @@ for (const task of tasks.filter(t => !values.only || values.only.split(",").incl
     writeFileSync(join(runDir, "prompt.txt"), task.prompt);
     const file = join(runDir, "session.jsonl");
     const result = await exec([binary, "--base-url", url, ...(values.model ? ["--model", values.model] : []),
-      "--thinking", values.thinking!, "--max-turns", "16", "--request-timeout", "120", "--command-timeout", "30",
+      "--thinking", values.thinking!, "--max-turns", "16", "--command-timeout", "30",
       ...(values.temperature === undefined ? [] : ["--temperature", values.temperature]),
       "-o", file, "-p", task.prompt], cwd);
     const seconds = (performance.now() - start) / 1000;

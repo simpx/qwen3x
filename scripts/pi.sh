@@ -18,7 +18,7 @@ command -v pi >/dev/null 2>&1 || {
     exit 1
 }
 curl -fsS http://127.0.0.1:8000/readyz >/dev/null || {
-    echo "qwen3x is not ready; run: make -C $project serve-4b or serve-9b" >&2
+    echo "qwen3x is not ready; run: make -C $project serve-4b, serve-9b, or serve-27b" >&2
     exit 1
 }
 

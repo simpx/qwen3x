@@ -72,7 +72,6 @@ struct Options {
     int max_tokens = 128;
     int bench_prefill = 0;
     int bench_decode = 0;
-    int request_timeout = 600;
     size_t log_max_bytes = 20 * 1024 * 1024;
     size_t log_backups = 5;
     bool context_set = false;
@@ -381,12 +380,6 @@ bool parse_options(int argc, char** argv, Options* options,
                 *error = "invalid --max-tokens";
                 return false;
             }
-        } else if (argument == "--request-timeout") {
-            if (!integer(value, &options->request_timeout) ||
-                options->request_timeout <= 0) {
-                *error = "invalid --request-timeout";
-                return false;
-            }
         } else if (argument == "--log-max-mb") {
             size_t megabytes = 0;
             if (!integer(value, &megabytes) || megabytes == 0) {
@@ -628,12 +621,6 @@ bool generate(Runtime& runtime, const q3x_render::CompletionRequest& request,
     std::string published_content;
 
     while (static_cast<int>(result->tokens.size()) < request.max_tokens) {
-        if (std::chrono::steady_clock::now() - started >
-            std::chrono::seconds(runtime.options.request_timeout)) {
-            result->stop_cause = "timeout";
-            *error = "generation request timed out";
-            return false;
-        }
         const int token = request.temperature == 0.0f &&
                           request.presence_penalty == 0.0f
             ? q3x_session_argmax(session)
@@ -1393,7 +1380,7 @@ int serve(Runtime& runtime, std::string* error) {
     };
     server.set_payload_max_length(MAX_REQUEST_BYTES);
     server.set_read_timeout(30, 0);
-    server.set_write_timeout(runtime.options.request_timeout, 0);
+    server.set_write_timeout(30, 0);
     server.set_keep_alive_timeout(5);
     server.set_keep_alive_max_count(10);
     server.set_tcp_nodelay(true);
@@ -1408,10 +1395,7 @@ int serve(Runtime& runtime, std::string* error) {
         request_id(response);
         const std::string body = "{\"status\":\"ready\",\"slots\":" +
             std::to_string(runtime.options.slots) + ",\"context_size\":" +
-            std::to_string(runtime.options.context) +
-            ",\"request_timeout\":" +
-            std::to_string(runtime.options.request_timeout) +
-            ",\"compute\":\"" +
+            std::to_string(runtime.options.context) + ",\"compute\":\"" +
             (runtime.options.mock ? "mock" : "real") + "\"}";
         json_response(response, 200, body);
     });
