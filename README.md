@@ -8,7 +8,7 @@ OpenAI-compatible HTTP API。
 ## 原则
 
 - 尽量用少量、直接的 C++ 文件完成完整数据流，只做不影响阅读的性能优化。
-- 代码采用 C-oriented、exception-free C++17：模型计算使用数组、指针、循环和显式
+- 主体代码采用 C-oriented、exception-free C++17：模型计算使用数组、指针、循环和显式
   shape；C++ 主要用于 namespace、RAII、并发和动态存储，不使用异常、RTTI 或复杂模板。
 - 项目优先级是 `correct -> simple -> readable -> usable -> fast`。
 
@@ -62,7 +62,7 @@ cd /path/to/project
 ```
 
 `pi.sh` 保持当前工作目录不变，自动创建隔离的 pi 配置，检查 qwen3x 是否 ready，并从
-`/v1/models` 选择当前服务实际加载的 4B、9B 或 27B 模型，以默认 thinking 启动 pi。
+`/v1/models` 选择当前服务实际加载的 4B、9B、27B 或 35B 模型，以默认 thinking 启动 pi。
 配置模板是 [`scripts/pi-models.json`](scripts/pi-models.json)；压缩余量在
 [`scripts/pi-settings.json`](scripts/pi-settings.json)。
 
@@ -96,6 +96,68 @@ context。pi 可以流式 thinking 和 tool calls，完成分段读文件、revi
 11.793 GiB 显存。4K prompt prefill 为 8.90 秒（460 tok/s），随后 decode 为 25.9 tok/s；
 16K prompt prefill 为 56.54 秒（290 tok/s），随后 decode 为 21.5 tok/s。结果记录在
 [`eval/q8-9b.md`](eval/q8-9b.md)。
+
+### Apple Silicon 上的 Qwen3.6 MLX C++ 后端
+
+可选 MLX 后端运行 Qwen3.6-35B-A3B 的纯文本模型，使用社区原生 affine4/group64
+权重并保留部分 8-bit 张量，共用本项目的 CLI、HTTP、tokenizer 和 Session。
+只有 MLX 适配文件使用 C++20 与异常，主体仍为 C++17。
+
+先准备 CMake、Xcode Metal Toolchain、社区权重和共享 render 文件。固定版本、权重
+打包命令与测试入口见 [`arch/mlx/README.md`](arch/mlx/README.md)。在已准备的环境中：
+
+```sh
+make mlx-deps
+make -j4 mlx mlx-test
+make serve-mlx
+```
+
+`serve-mlx` 监听 `127.0.0.1:8000`，使用单 slot、65,536-token 总上下文和默认
+4,096-token 输出预算。此开发目标显式开启审计，完整请求与生成内容写入
+`build/qwen3x-mlx-audit.log`；直接启动 binary 时，只有传入 `--audit-log` 才开启。
+
+另一个终端进入工作项目后启动 Pi：
+
+```sh
+/path/to/qwen3x/scripts/pi.sh
+# 不需要思考过程时：
+/path/to/qwen3x/scripts/pi.sh --thinking off
+```
+
+35B 的 Pi 配置使用 65,536 总上下文和 16,384 单次输出预算，后者覆盖服务默认值。
+模板、历史、工具结果、思考和正文都占用总上下文；增加输出预算会减少可用输入空间。
+修改模型配置后需重启 Pi；显式使用 `PI_CODING_AGENT_DIR` 的已有配置需自行同步。
+
+服务支持手动配置 128K 容量，64K 与 128K 服务择一启动：
+
+```sh
+build/qwen3x-mlx --model build/qwen36-35b-a3b-mlx-affine4-model.bin \
+  --render build/qwen3x-render.bin --listen --host 127.0.0.1 --port 8000 \
+  --session-slots 1 --session-context 131072 --max-tokens 4096
+```
+
+这条命令不改变 Pi 的 64K 配置。使用 128K 客户端上下文时，需相应修改其模型配置，
+并为输出和后续工具结果留出空间。早期长上下文测试属于历史版本；本轮移除取消和
+错误恢复路径后尚未重跑真实模型长测试，不能据此宣称当前版本完成稳定性验收。
+
+可先检查服务：
+
+```sh
+curl -fsS http://127.0.0.1:8000/readyz
+curl -sS http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"用一句话解释递归。"}],"temperature":0,"max_tokens":256,"chat_template_kwargs":{"enable_thinking":false}}'
+```
+
+设置 `QWEN_API_KEY` 后，请求需添加对应的 `Authorization: Bearer …`。
+工具由客户端执行。预算耗尽导致工具调用截断时，服务返回 `max_tokens_exceeded`；
+应增加预算或拆分写入。Pi 实际使用仍出现提前 EOS 导致工具调用未完成的问题，根因
+尚未定位，重试不保证解决。客户端断开不会中断正在执行的 forward，取消能力另见
+[`TODO.md`](TODO.md)。
+
+部署需要 `qwen3x-mlx`、MLX model bin、`qwen3x-render.bin` 和 `mlx.metallib` 四个
+文件。移动 shader 后通过 `Q3X_MLX_METALLIB` 指定绝对路径；推理不需要 Python、
+venv、MLX 动态库或第二个模型进程。
 
 ### Qwen3.6-35B-A3B Q4_0
 

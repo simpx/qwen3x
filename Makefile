@@ -77,9 +77,14 @@ MLX_LIBS := $(MLX_ROOT)/lib/libmlx.a $(MLX_ROOT)/lib/libjaccl.a
 MLX_FRAMEWORKS := -framework Metal -framework Foundation -framework QuartzCore -framework Accelerate
 MLX_OBJ := $(BUILD)/obj/arch/mlx/engine.o
 MLX_FLAGS := $(filter-out -std=c++17 -fno-exceptions,$(CXXFLAGS)) -std=c++20 -fexceptions
-.PHONY: mlx mlx-library mlx-test
+.PHONY: mlx mlx-library mlx-test serve-mlx
 mlx: $(BUILD)/qwen3x-mlx
 mlx-library: $(BUILD)/mlx/libqwen3x-mlx.dylib
+serve-mlx: mlx
+	$(BUILD)/qwen3x-mlx --model "$(BUILD)/qwen36-35b-a3b-mlx-affine4-model.bin" \
+		--render "$(BUILD)/qwen3x-render.bin" --listen --host 127.0.0.1 --port 8000 \
+		--session-slots 1 --session-context 65536 --max-tokens 4096 \
+		--audit-log "$(BUILD)/qwen3x-mlx-audit.log"
 mlx-test: $(BUILD)/mlx-test
 	$(BUILD)/mlx-test
 	python3 tests/test_mlx_errors.py $(BUILD)/mlx-test

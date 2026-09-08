@@ -11,6 +11,13 @@
       },
       "models": [
         {
+          "id": "qwen3.6-35b-a3b",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 65536,
+          "maxTokens": 16384
+        },
+        {
           "id": "qwen3.5-4b",
           "reasoning": true,
           "input": ["text"],
