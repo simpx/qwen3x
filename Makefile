@@ -45,6 +45,33 @@ NVCCFLAGS ?= -O3 -std=c++17 -arch=$(CUDA_ARCH) \
 
 all: $(PROGRAM)
 
+# Optional MLX dependency; the default CPU build does not need it.
+CMAKE ?= $(if $(wildcard $(BUILD)/mlx-venv/bin/cmake),$(abspath $(BUILD)/mlx-venv/bin/cmake),cmake)
+MLX_SOURCE := $(BUILD)/mlx-src
+MLX_DEP_BUILD := $(BUILD)/mlx-static-build
+MLX_ROOT ?= $(abspath $(BUILD)/mlx-install)
+MLX_REVISION := 1f8e74e3f12f31365464a6867c6579f0e9b29d85
+MLX_BUILD_JOBS ?= 6
+
+.PHONY: mlx-deps
+mlx-deps:
+	@test "$$(uname -s)" = Darwin && test "$$(uname -m)" = arm64 || \
+		{ echo 'MLX requires Apple Silicon macOS.' >&2; exit 1; }
+	xcrun --toolchain Metal -sdk macosx metal --version
+	@if [ ! -d "$(MLX_SOURCE)/.git" ]; then \
+		mkdir -p "$(dir $(MLX_SOURCE))"; \
+		git clone --depth 1 --branch v0.32.2 https://github.com/ml-explore/mlx.git "$(MLX_SOURCE)"; \
+	fi
+	@test "$$(git -C "$(MLX_SOURCE)" rev-parse HEAD)" = "$(MLX_REVISION)" || \
+		{ echo 'MLX source revision differs from the tested revision; leaving it untouched.' >&2; exit 1; }
+	TOOLCHAINS=Metal "$(CMAKE)" -S "$(MLX_SOURCE)" -B "$(MLX_DEP_BUILD)" \
+		-DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=26.3 \
+		-DCMAKE_INSTALL_PREFIX="$(MLX_ROOT)" -DBUILD_SHARED_LIBS=OFF \
+		-DMLX_METAL_JIT=OFF -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_EXAMPLES=OFF \
+		-DMLX_BUILD_BENCHMARKS=OFF -DMLX_BUILD_PYTHON_BINDINGS=OFF -DMLX_BUILD_GGUF=OFF
+	TOOLCHAINS=Metal "$(CMAKE)" --build "$(MLX_DEP_BUILD)" -j "$(MLX_BUILD_JOBS)"
+	"$(CMAKE)" --install "$(MLX_DEP_BUILD)"
+
 .PHONY: q3x q3x-test
 q3x:
 	$(MAKE) -C agent build BUN="$(BUN)" BUILD="$(abspath $(BUILD))"
