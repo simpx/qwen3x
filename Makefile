@@ -72,6 +72,40 @@ mlx-deps:
 	TOOLCHAINS=Metal "$(CMAKE)" --build "$(MLX_DEP_BUILD)" -j "$(MLX_BUILD_JOBS)"
 	"$(CMAKE)" --install "$(MLX_DEP_BUILD)"
 
+# MLX is an optional C++20 backend; shared product sources remain C++17.
+MLX_LIBS := $(MLX_ROOT)/lib/libmlx.a $(MLX_ROOT)/lib/libjaccl.a
+MLX_FRAMEWORKS := -framework Metal -framework Foundation -framework QuartzCore -framework Accelerate
+MLX_OBJ := $(BUILD)/obj/arch/mlx/engine.o
+MLX_FLAGS := $(filter-out -std=c++17 -fno-exceptions,$(CXXFLAGS)) -std=c++20 -fexceptions
+.PHONY: mlx mlx-library mlx-test
+mlx: $(BUILD)/qwen3x-mlx
+mlx-library: $(BUILD)/mlx/libqwen3x-mlx.dylib
+mlx-test: $(BUILD)/mlx-test
+	$(BUILD)/mlx-test
+	python3 tests/test_mlx_errors.py $(BUILD)/mlx-test
+	python3 tests/test_pack_mlx.py
+
+$(BUILD)/mlx-test: tests/mlx_test.cpp arch/mlx/engine.cpp internal.h model_config.h \
+		$(BUILD)/obj/log.o $(patsubst %.cpp,$(BUILD)/obj/%.o,$(SPDLOG_SRC)) $(MLX_LIBS)
+	$(CXX) $(MLX_FLAGS) -I. -I$(MLX_ROOT)/include \
+		-DQ3X_MLX_METALLIB='"$(MLX_ROOT)/lib/mlx.metallib"' $< \
+		$(filter %.o %.a,$^) $(THREAD_FLAGS) $(MLX_FRAMEWORKS) -o $@
+
+$(MLX_OBJ): arch/mlx/engine.cpp internal.h model_config.h Makefile
+	mkdir -p $(dir $@)
+	$(CXX) $(MLX_FLAGS) -I. -I$(MLX_ROOT)/include \
+		-DQ3X_MLX_METALLIB='"$(MLX_ROOT)/lib/mlx.metallib"' -MMD -MP -c $< -o $@
+
+$(BUILD)/qwen3x-mlx: $(MLX_OBJ) $(COMMON_OBJ) $(MLX_LIBS)
+	$(CXX) $(CXXFLAGS) $^ $(THREAD_FLAGS) $(MLX_FRAMEWORKS) -o $@
+
+$(BUILD)/mlx/libqwen3x-mlx.dylib: $(MLX_OBJ) $(BUILD)/obj/runtime.o $(BUILD)/obj/log.o \
+		$(patsubst %.cpp,$(BUILD)/obj/%.o,$(SPDLOG_SRC)) $(MLX_LIBS)
+	mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -dynamiclib $^ $(THREAD_FLAGS) $(MLX_FRAMEWORKS) -o $@
+
+-include $(MLX_OBJ:.o=.d)
+
 .PHONY: q3x q3x-test
 q3x:
 	$(MAKE) -C agent build BUN="$(BUN)" BUILD="$(abspath $(BUILD))"
@@ -257,6 +291,8 @@ clean:
 	rm -f "$(PROGRAM)" "$(CUDA_PROGRAM)" $(PROGRAM_OBJ) $(PROGRAM_DEP) \
 		$(CUDA_OBJ) $(CUDA_DEP) "$(METAL_PROGRAM)" $(METAL_OBJ) $(METAL_OBJ:.o=.d) \
 		$(BUILD)/metal-test $(BUILD)/obj/tests/metal_test.o $(BUILD)/obj/tests/metal_test.d \
+		$(BUILD)/qwen3x-mlx $(BUILD)/mlx-test $(BUILD)/mlx/libqwen3x-mlx.dylib \
+		$(MLX_OBJ) $(MLX_OBJ:.o=.d) \
 		$(METAL_DIR)/kernels.air $(METAL_DIR)/kernels.metallib $(METAL_DIR)/kernels_metallib.h \
 		$(METAL_DIR)/libqwen3x-metal.dylib
 	$(MAKE) -C scripts clean

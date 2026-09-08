@@ -7,7 +7,7 @@
 #include "qwen3x.h"
 
 // runtime.cpp 只通过这组不透明操作访问一个计算后端。构建时由根目录
-// engine.cpp、arch/cuda/engine.cu 或 arch/metal/engine.mm 实现其中一个。
+// engine.cpp、arch/cuda/engine.cu、arch/metal/engine.mm 或 arch/mlx/engine.cpp 实现其中一个。
 namespace q3x_backend {
 
 struct Model;
