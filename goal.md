@@ -1,7 +1,16 @@
 # Goal：今晚跑通并优化 Qwen3.6-35B-A3B 的 MLX C++ 后端
 
-> 状态：用户已于 2026-09-08 通过 active goal「完成goal.md」授权执行。正在实现和验证，
-> 实时进度与原始证据在 build/qwen36-night/；下列验收未全部完成前不宣称交付。
+> 状态：2026-09-08 夜间实现与指定测试已完成，记录见
+> [eval/qwen36-m5.md](eval/qwen36-m5.md)。夜间版本的 64K 通过 30 分钟、125 项检查；
+> 128K 通过独立数值、内存与 HTTP 功能检查，但 decode 未达到社区参考 90% 的目标。
+> 后续 Pi 会话仍发生工具调用提前 EOS，根因未定位，不能宣称复杂编码 agent 全面生产可用。
+>
+> 评审后的 MLX 核心为 `89dc923`，启动与 Pi 配置为 `ead356c`。取消与错误恢复已移出
+> 本轮，记入 [TODO.md](TODO.md)；当前版本只完成构建、基础/小型 GPU 等回归，尚未
+> 重跑真实模型长数值、性能与 soak。夜间源码/二进制 SHA 和旧验收不能代替当前版本验收。
+> 原始证据在 `build/qwen36-night/`，完整代码备份在 `backup/mlx-before-review-20260908`。
+> 本文件保留原任务与夜间进度；下文已勾选的夜间检查项不表示评审后主线重新通过。
+> 本次只整理文档，不启动新的运行任务。
 
 ## 今晚的唯一主线
 
@@ -286,7 +295,7 @@ decode 与峰值内存，分别争取同长度社区参考吞吐的 90%；参考
 
 ## 已有准备：复用，不冒充模型完成
 
-准备起点 7575868，执行前重新确认 HEAD。历史 Q4_0 CPU/CUDA 结果见
+以下记录开工前的准备起点，并非当前实现状态。准备起点 7575868，执行前重新确认 HEAD。历史 Q4_0 CPU/CUDA 结果见
 [eval/qwen36-35b-q4.md](eval/qwen36-35b-q4.md)，不能冒充本机 MLX 结果。
 此前合并已通过基础测试、CPU_OPT=0、Metal fixture 与 0.8B CPU reference。
 CPU 已支持 MoE，原生 Metal 尚未支持，MLX 后端尚未实现。
@@ -301,10 +310,10 @@ CPU 已支持 MoE，原生 Metal 尚未支持，MLX 后端尚未实现。
 - [x] 固定社区 repo/revision，确认无 gated 登录要求；保留部分下载。
 - [x] 社区 snapshot 完整校验与真实短推理。
 - [x] 同权重短序列参考 logits 与 512/2K/8K 本机性能基线；长档位另行验收。
-- [ ] C++ MLX 完整 forward、Session 与 HTTP。
-- [ ] 原生量化路径正确性、调优和服务验收。
-- [ ] 64K 真实长输入、性能、缓存/恢复与默认服务稳定性验收。
-- [ ] 128K 真实尝试与独立结果报告；通过才推荐。
+- [x] C++ MLX 完整 forward、Session 与 HTTP。
+- [x] 原生量化路径正确性、调优和服务验收。
+- [x] 64K 真实长输入、性能、缓存/恢复与默认服务稳定性验收。
+- [x] 128K 真实尝试与独立结果报告；通过才推荐。
 
 环境 build/mlx-venv/：Python 3.12.14、MLX/MLX Metal 0.32.2、mlx-lm 0.31.3、
 Transformers 5.16.1、CMake 4.4.3、Ninja 1.13.2。冻结清单
@@ -326,7 +335,7 @@ build/qwen36-night/cpp-probe/CMakeLists.txt，不用重新排查。
 本夜可随产物附带并明确说明，内嵌资源/三文件分发留待结构评审。
 运行不依赖 Python，不能因静态链接就声称不需要 shader 资源。
 
-已验证的小程序命令（本次编辑不执行）：
+准备阶段已验证的小程序命令：
 
 ```sh
 build/qwen36-night/cpp-probe/static-build/mlx-probe \
