@@ -626,6 +626,17 @@ std::string error_json(const std::string& message, const char* type,
     return Json{{"error", std::move(error)}}.dump();
 }
 
+std::string tool_call_error_json(const std::string& message, int output_limit) {
+    if (output_limit > 0) {
+        return error_json(message + "; output reached max_tokens=" +
+            std::to_string(output_limit) +
+            "; increase the output limit or split the file into smaller writes",
+            "invalid_request_error", "max_tokens", "max_tokens_exceeded");
+    }
+    return error_json(message + "; please retry your request",
+                      "server_error", nullptr, "incomplete_tool_call");
+}
+
 std::string models_json(const std::string& model) {
     return Json{{"object", "list"},
                 {"data", Json::array({Json{{"id", model}, {"object", "model"},

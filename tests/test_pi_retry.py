@@ -21,6 +21,16 @@ ERROR = {
     }
 }
 
+LIMIT_ERROR = {
+    "error": {
+        "message": "incomplete generated tool call; output reached max_tokens=64; "
+                   "increase the output limit or split the file into smaller writes",
+        "type": "invalid_request_error",
+        "param": "max_tokens",
+        "code": "max_tokens_exceeded",
+    }
+}
+
 
 def sse(*events):
     return "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode()
@@ -30,6 +40,7 @@ class RetryServer(ThreadingHTTPServer):
     def __init__(self, address):
         super().__init__(address, Handler)
         self.requests = []
+        self.error = ERROR
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -41,7 +52,7 @@ class Handler(BaseHTTPRequestHandler):
         self.server.requests.append(request)
         attempt = len(self.server.requests)
         if attempt == 1:
-            body = sse(ERROR)
+            body = sse(self.server.error)
         else:
             completion_id = "chatcmpl-pi-retry"
             common = {
@@ -134,6 +145,21 @@ def main():
             assert server.requests[0]["messages"] == server.requests[1]["messages"]
             assert all(message["role"] != "assistant"
                        for message in server.requests[1]["messages"])
+
+            # Repeating the same output budget cannot repair a truncated write.
+            server.requests.clear()
+            server.error = LIMIT_ERROR
+            limited = subprocess.run(
+                [args.pi, "--provider", "retry-test", "--model", "retry-model",
+                 "--print", "--no-session", "--no-tools", "--no-extensions",
+                 "--no-skills", "--no-context-files", "--offline",
+                 "--system-prompt", "Answer briefly.", "hi"],
+                cwd=directory, env=environment, capture_output=True, text=True,
+                timeout=20, check=False,
+            )
+            assert limited.returncode != 0
+            assert "max_tokens=64" in limited.stderr, limited.stderr
+            assert len(server.requests) == 1, len(server.requests)
     finally:
         server.shutdown()
         server.server_close()

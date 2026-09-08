@@ -130,6 +130,8 @@ std::string error_json(const std::string& message,
                        const char* type = "invalid_request_error",
                        const char* param = nullptr,
                        const char* code = nullptr);
+// A positive output_limit means generation stopped at its token budget.
+std::string tool_call_error_json(const std::string& message, int output_limit);
 std::string models_json(const std::string& model);
 std::string completion_json(const std::string& id, int64_t created,
                             const std::string& model,

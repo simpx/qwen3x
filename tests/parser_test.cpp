@@ -544,6 +544,21 @@ void test_invalid_completion_requests() {
     }
 }
 
+void test_tool_output_limit_error() {
+    const std::string truncated = q3x_render::tool_call_error_json(
+        "incomplete generated tool call", 4096);
+    check(truncated.find("max_tokens=4096") != std::string::npos &&
+          truncated.find("\"code\":\"max_tokens_exceeded\"") != std::string::npos &&
+          truncated.find("\"param\":\"max_tokens\"") != std::string::npos &&
+          truncated.find("please retry") == std::string::npos,
+          "a truncated tool call explains its budget instead of retrying unchanged");
+    const std::string malformed = q3x_render::tool_call_error_json(
+        "incomplete generated tool call", 0);
+    check(malformed.find("\"code\":\"incomplete_tool_call\"") != std::string::npos &&
+          malformed.find("please retry your request") != std::string::npos,
+          "an incomplete tool call without truncation retains retry behavior");
+}
+
 }  // namespace
 
 int main() {
@@ -562,6 +577,7 @@ int main() {
     test_generated_tool_calls();
     test_completion_json();
     test_invalid_completion_requests();
+    test_tool_output_limit_error();
     if (failures) return 1;
     std::puts("parser-test: ok");
     return 0;

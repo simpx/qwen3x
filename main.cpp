@@ -929,8 +929,10 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
                          access->request_id.c_str(), completion_id.c_str(),
                          error.c_str());
                 record_generation(access.get(), result);
-                api_error(response, 500, retryable_error(error),
-                          "server_error", nullptr, "incomplete_tool_call");
+                const bool truncated = result.finish_reason == "length";
+                json_response(response, truncated ? 400 : 500,
+                    q3x_render::tool_call_error_json(
+                        error, truncated ? request.max_tokens : 0));
                 return false;
             }
         }
@@ -1054,9 +1056,8 @@ bool chat(Runtime& runtime, const std::shared_ptr<AccessLog>& access,
                              access->request_id.c_str(), completion_id.c_str(),
                              error.c_str());
                     record_generation(access.get(), result);
-                    if (!send(q3x_render::error_json(
-                            retryable_error(error), "server_error", nullptr,
-                            "incomplete_tool_call"))) {
+                    if (!send(q3x_render::tool_call_error_json(error,
+                            result.finish_reason == "length" ? request.max_tokens : 0))) {
                         interrupted("tool_parse_error");
                         return false;
                     }
